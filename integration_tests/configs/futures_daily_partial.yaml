@@ -1,0 +1,22 @@
+# Futures Daily Data - PARTIAL (Initial Load Test)
+# Only loads data up to 1999-12-31
+
+cache_dir: ../../../parquet_test_data/test_caches
+
+datasets:
+  md.futures_daily:
+    description: Daily futures OHLCV data
+    date_col: date
+    date_partition: year
+    partition_columns:
+      - future_root
+    sort_columns:
+      - contract_name
+      - date
+
+    # Limit to pre-2000 data for initial load
+    end_date_str: "1999-12-31"
+
+    source_class_name: HiveParquetSource
+    source_init_args:
+      path: "C:/Users/cplag/OneDrive/Documents/Data/Futures_daily_data/parquet_files"

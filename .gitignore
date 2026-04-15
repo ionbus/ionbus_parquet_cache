@@ -1,0 +1,28 @@
+# cSpell: disable
+__pycache__ 
+*.exe 
+*.dll 
+*.pkl.gz 
+*.log 
+*.gz 
+*.xlsx 
+*.xls 
+*.xlsm 
+*.csv 
+*.txt 
+*bak 
+*.whl
+.vscode
+log 
+*.egg-info/
+dist/
+python_venv/
+# Conda build turds:
+build_env_setup.sh
+conda_build.sh
+metadata_conda_debug.yaml
+*.parquet 
+ignored 
+_version.py
+build/ 
+.oldgit/ 

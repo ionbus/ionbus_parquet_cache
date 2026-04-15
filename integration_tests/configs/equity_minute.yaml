@@ -1,0 +1,20 @@
+# Equity Minute Data - Integration Test Configuration
+# Source: Generated fake equity minute bars
+
+cache_dir: ../../../parquet_test_data/test_caches
+
+datasets:
+  md.equity_minute:
+    description: Minute equity OHLC data (synthetic)
+    date_col: date
+    date_partition: month
+    partition_columns:
+      - first_letter
+    sort_columns:
+      - ticker
+      - date
+
+    # Read from generated fake bars
+    source_class_name: HiveParquetSource
+    source_init_args:
+      path: "../../../parquet_test_data/fake_bars/minute"

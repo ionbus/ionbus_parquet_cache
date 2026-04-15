@@ -1,0 +1,22 @@
+# Equity Daily Data - PARTIAL (Initial Load Test)
+# Only loads data up to 2023-06-30
+
+cache_dir: ../../../parquet_test_data/test_caches
+
+datasets:
+  md.equity_daily:
+    description: Daily equity OHLC data (synthetic)
+    date_col: date
+    date_partition: year
+    partition_columns:
+      - first_letter
+    sort_columns:
+      - ticker
+      - date
+
+    # Limit to mid-2023 for initial load
+    end_date_str: "2023-06-30"
+
+    source_class_name: HiveParquetSource
+    source_init_args:
+      path: "../../../parquet_test_data/fake_bars/daily"

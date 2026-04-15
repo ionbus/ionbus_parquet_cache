@@ -1,0 +1,612 @@
+"""
+CacheRegistry - manage multiple cache locations with priority search.
+
+The registry is a singleton that searches caches in registration order
+when reading data.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, SnapshotMetadata
+from ionbus_parquet_cache.exceptions import SnapshotNotFoundError
+from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
+from ionbus_parquet_cache.snapshot import extract_suffix_from_filename
+
+
+class DatasetType(Enum):
+    """Enum for specifying dataset type in searches."""
+
+    DATED = "dated"
+    NON_DATED = "non_dated"
+
+
+class CacheRegistry:
+    """
+    Singleton registry for managing multiple cache locations.
+
+    Caches are searched in registration order. The first cache containing
+    a requested dataset is used.
+
+    Example:
+        registry = CacheRegistry.instance(
+            local="c:/Users/me/parquet_cache",
+            team="w:/team/parquet_cache",
+            official="w:/firm/parquet_cache",
+        )
+        df = registry.read_data("md.futures_daily", start_date="2024-01-01")
+    """
+
+    _instance: "CacheRegistry | None" = None
+
+    def __init__(self) -> None:
+        """Initialize an empty registry."""
+        self._caches: dict[str, Path] = {}
+        self._cache_order: list[str] = []
+        self._dpd_cache: dict[tuple[str, str], DatedParquetDataset] = {}
+        self._npd_cache: dict[tuple[str, str], NonDatedParquetDataset] = {}
+
+    @classmethod
+    def instance(cls, **named_paths: str | Path) -> "CacheRegistry":
+        """
+        Get or create the singleton registry.
+
+        Args:
+            **named_paths: Named cache paths to register.
+                Keys are cache names, values are paths.
+
+        Returns:
+            The singleton CacheRegistry instance.
+
+        Example:
+            registry = CacheRegistry.instance(
+                local="/path/to/local",
+                team="/path/to/team",
+            )
+        """
+        if cls._instance is None:
+            cls._instance = cls()
+
+        for name, path in named_paths.items():
+            cls._instance.add_cache(name, path)
+
+        return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the singleton instance (mainly for testing)."""
+        cls._instance = None
+
+    def add_cache(self, name: str, path: str | Path) -> None:
+        """
+        Register a cache location.
+
+        If already registered, updates the path but preserves order.
+
+        Args:
+            name: Name for this cache location.
+            path: Path to the cache directory.
+        """
+        path = Path(path)
+        if name not in self._caches:
+            self._cache_order.append(name)
+        self._caches[name] = path
+
+    def get_cache_path(self, name: str) -> Path | None:
+        """
+        Get the path for a named cache.
+
+        Args:
+            name: Cache name.
+
+        Returns:
+            Path to the cache, or None if not registered.
+        """
+        return self._caches.get(name)
+
+    def discover_dpds(self, cache_path: Path) -> dict[str, Path]:
+        """
+        Discover DPDs in a cache by scanning for _meta_data directories.
+
+        Args:
+            cache_path: Path to the cache.
+
+        Returns:
+            Dict mapping dataset name to data directory path.
+        """
+        dpds = {}
+        if not cache_path.exists():
+            return dpds
+
+        for item in cache_path.iterdir():
+            if item.is_dir() and not item.name.startswith("."):
+                meta_dir = item / "_meta_data"
+                if meta_dir.exists() and meta_dir.is_dir():
+                    dpds[item.name] = item
+
+        return dpds
+
+    def discover_npds(self, cache_path: Path) -> dict[str, Path]:
+        """
+        Discover NPDs by scanning the non-dated directory.
+
+        Args:
+            cache_path: Path to the cache.
+
+        Returns:
+            Dict mapping dataset name to NPD directory path.
+        """
+        npds = {}
+        non_dated = cache_path / "non-dated"
+        if not non_dated.exists():
+            return npds
+
+        for item in non_dated.iterdir():
+            if item.is_dir():
+                # Check for snapshot files/directories inside
+                has_snapshots = any(
+                    extract_suffix_from_filename(child.name)
+                    for child in item.iterdir()
+                )
+                if has_snapshots:
+                    npds[item.name] = item
+
+        return npds
+
+    def _get_dpd(self, name: str, cache_name: str) -> DatedParquetDataset | None:
+        """
+        Get or create a DPD instance.
+
+        Args:
+            name: Dataset name.
+            cache_name: Cache name.
+
+        Returns:
+            DatedParquetDataset instance, or None if not found.
+        """
+        key = (cache_name, name)
+        if key in self._dpd_cache:
+            return self._dpd_cache[key]
+
+        cache_path = self._caches.get(cache_name)
+        if not cache_path:
+            return None
+
+        dpds = self.discover_dpds(cache_path)
+        if name not in dpds:
+            return None
+
+        # Load metadata to get configuration
+        data_dir = dpds[name]
+        meta_dir = data_dir / "_meta_data"
+
+        # Find current snapshot (excluding trimmed files)
+        suffixes = []
+        for item in meta_dir.iterdir():
+            if "_trimmed" in item.name:
+                continue
+            if item.name.endswith(".pkl.gz"):
+                suffix = extract_suffix_from_filename(item.name)
+                if suffix:
+                    suffixes.append((suffix, item))
+
+        if not suffixes:
+            return None
+
+        # Get most recent
+        current_suffix, meta_path = max(suffixes, key=lambda x: x[0])
+
+        # Load metadata to get configuration
+        metadata = SnapshotMetadata.from_pickle(meta_path)
+        config = metadata.yaml_config
+
+        # Create DPD with configuration from metadata
+        dpd = DatedParquetDataset(
+            cache_dir=cache_path,
+            name=name,
+            date_col=config.get("date_col", "Date"),
+            date_partition=config.get("date_partition", "day"),
+            partition_columns=config.get("partition_columns", []),
+            sort_columns=config.get("sort_columns"),
+            description=config.get("description", ""),
+            instrument_column=config.get("instrument_column"),
+            instruments=config.get("instruments"),
+        )
+
+        # Set loaded state so is_update_available() and summary() work
+        dpd.current_suffix = current_suffix
+        dpd._metadata = metadata
+
+        self._dpd_cache[key] = dpd
+        return dpd
+
+    def _get_npd(self, name: str, cache_name: str) -> NonDatedParquetDataset | None:
+        """
+        Get or create an NPD instance.
+
+        Args:
+            name: Dataset name.
+            cache_name: Cache name.
+
+        Returns:
+            NonDatedParquetDataset instance, or None if not found.
+        """
+        key = (cache_name, name)
+        if key in self._npd_cache:
+            return self._npd_cache[key]
+
+        cache_path = self._caches.get(cache_name)
+        if not cache_path:
+            return None
+
+        npds = self.discover_npds(cache_path)
+        if name not in npds:
+            return None
+
+        npd = NonDatedParquetDataset(cache_dir=cache_path, name=name)
+
+        # Set loaded state so is_update_available() and summary() work
+        npd.current_suffix = npd._discover_current_suffix()
+
+        self._npd_cache[key] = npd
+        return npd
+
+    def get_dataset(
+        self,
+        name: str,
+        cache_name: str | None = None,
+        dataset_type: DatasetType | None = None,
+    ) -> DatedParquetDataset | NonDatedParquetDataset | None:
+        """
+        Get a dataset by name.
+
+        Searches caches in registration order unless cache_name is specified.
+        By default looks for DPD first, then NPD.
+
+        Args:
+            name: Dataset name.
+            cache_name: Optional specific cache to search.
+            dataset_type: Optional type filter:
+                - None (default): look for DPD first, then NPD
+                - DatasetType.DATED: only look for DatedParquetDataset
+                - DatasetType.NON_DATED: only look for NonDatedParquetDataset
+
+        Returns:
+            The dataset, or None if not found.
+        """
+        caches_to_search = [cache_name] if cache_name else self._cache_order
+
+        look_for_dpd = dataset_type in (None, DatasetType.DATED)
+        look_for_npd = dataset_type in (None, DatasetType.NON_DATED)
+
+        for cn in caches_to_search:
+            if cn not in self._caches:
+                continue
+
+            # Try DPD first (if looking for it)
+            if look_for_dpd:
+                dpd = self._get_dpd(name, cn)
+                if dpd:
+                    return dpd
+
+            # Then NPD (if looking for it)
+            if look_for_npd:
+                npd = self._get_npd(name, cn)
+                if npd:
+                    return npd
+
+        return None
+
+    def read_data(
+        self,
+        name: str,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+        filters: list[tuple[str, str, Any]] | None = None,
+        columns: list[str] | None = None,
+        cache_name: str | None = None,
+        snapshot: str | None = None,
+    ) -> pd.DataFrame:
+        """
+        Read data from a dataset.
+
+        Args:
+            name: Dataset name.
+            start_date: Optional start date for filtering.
+            end_date: Optional end date for filtering.
+            filters: Optional filters.
+            columns: Optional column list.
+            cache_name: Optional specific cache to use.
+            snapshot: Optional snapshot suffix. If None, uses current snapshot.
+
+        Returns:
+            A pandas DataFrame.
+
+        Raises:
+            SnapshotNotFoundError: If dataset not found.
+            ValueError: If dates missing for DPD.
+        """
+        dataset = self.get_dataset(name, cache_name)
+        if dataset is None:
+            raise SnapshotNotFoundError(
+                f"Dataset '{name}' not found in any cache",
+                dataset_name=name,
+            )
+
+        if isinstance(dataset, DatedParquetDataset):
+            return dataset.read_data(
+                start_date=start_date,
+                end_date=end_date,
+                filters=filters,
+                columns=columns,
+                snapshot=snapshot,
+            )
+        else:
+            return dataset.read_data(
+                filters=filters, columns=columns, snapshot=snapshot
+            )
+
+    def read_data_pl(
+        self,
+        name: str,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+        filters: list[tuple[str, str, Any]] | None = None,
+        columns: list[str] | None = None,
+        cache_name: str | None = None,
+        snapshot: str | None = None,
+    ) -> Any:
+        """
+        Read data from a dataset into a Polars DataFrame.
+
+        Args:
+            name: Dataset name.
+            start_date: Optional start date for filtering.
+            end_date: Optional end date for filtering.
+            filters: Optional filters.
+            columns: Optional column list.
+            cache_name: Optional specific cache to use.
+            snapshot: Optional snapshot suffix. If None, uses current snapshot.
+
+        Returns:
+            A Polars DataFrame.
+
+        Raises:
+            SnapshotNotFoundError: If dataset not found.
+            ValueError: If dates missing for DPD.
+            ImportError: If polars not installed.
+        """
+        dataset = self.get_dataset(name, cache_name)
+        if dataset is None:
+            raise SnapshotNotFoundError(
+                f"Dataset '{name}' not found in any cache",
+                dataset_name=name,
+            )
+
+        if isinstance(dataset, DatedParquetDataset):
+            return dataset.read_data_pl(
+                start_date=start_date,
+                end_date=end_date,
+                filters=filters,
+                columns=columns,
+                snapshot=snapshot,
+            )
+        else:
+            return dataset.read_data_pl(
+                filters=filters, columns=columns, snapshot=snapshot
+            )
+
+    def to_table(
+        self,
+        name: str,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+        filters: list[tuple[str, str, Any]] | None = None,
+        columns: list[str] | None = None,
+        cache_name: str | None = None,
+        snapshot: str | None = None,
+    ):
+        """
+        Read data from a dataset into a PyArrow Table.
+
+        Args:
+            name: Dataset name.
+            start_date: Optional start date for filtering.
+            end_date: Optional end date for filtering.
+            filters: Optional filters.
+            columns: Optional column list.
+            cache_name: Optional specific cache to use.
+            snapshot: Optional snapshot suffix. If None, uses current snapshot.
+
+        Returns:
+            A PyArrow Table.
+
+        Raises:
+            SnapshotNotFoundError: If dataset not found.
+        """
+        dataset = self.get_dataset(name, cache_name)
+        if dataset is None:
+            raise SnapshotNotFoundError(
+                f"Dataset '{name}' not found in any cache",
+                dataset_name=name,
+            )
+
+        if isinstance(dataset, DatedParquetDataset):
+            return dataset.to_table(
+                start_date=start_date,
+                end_date=end_date,
+                filters=filters,
+                columns=columns,
+                snapshot=snapshot,
+            )
+        else:
+            return dataset.to_table(
+                filters=filters, columns=columns, snapshot=snapshot
+            )
+
+    def pyarrow_dataset(
+        self,
+        name: str,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+        filters: list[tuple[str, str, Any]] | None = None,
+        cache_name: str | None = None,
+        snapshot: str | None = None,
+    ):
+        """
+        Get the PyArrow dataset for a dataset.
+
+        Args:
+            name: Dataset name.
+            start_date: Optional start date filter (DPDs only).
+            end_date: Optional end date filter (DPDs only).
+            filters: Optional filters.
+            cache_name: Optional specific cache to use.
+            snapshot: Optional snapshot suffix. If None, uses current snapshot.
+
+        Returns:
+            A pyarrow.dataset.Dataset.
+
+        Raises:
+            SnapshotNotFoundError: If dataset not found.
+        """
+        dataset = self.get_dataset(name, cache_name)
+        if dataset is None:
+            raise SnapshotNotFoundError(
+                f"Dataset '{name}' not found in any cache",
+                dataset_name=name,
+            )
+
+        return dataset.pyarrow_dataset(
+            start_date=start_date,
+            end_date=end_date,
+            filters=filters,
+            snapshot=snapshot,
+        )
+
+    def data_summary(self) -> pd.DataFrame:
+        """
+        Get a summary of all datasets across all caches.
+
+        Returns:
+            DataFrame with columns: cache, name, type, current_suffix, etc.
+        """
+        rows = []
+
+        for cache_name in self._cache_order:
+            cache_path = self._caches[cache_name]
+
+            # Discover DPDs
+            for dpd_name in self.discover_dpds(cache_path):
+                dpd = self._get_dpd(dpd_name, cache_name)
+                if dpd:
+                    try:
+                        suffix = dpd._discover_current_suffix()
+                        rows.append(
+                            {
+                                "cache": cache_name,
+                                "name": dpd_name,
+                                "type": "DPD",
+                                "current_suffix": suffix,
+                            }
+                        )
+                    except Exception:
+                        rows.append(
+                            {
+                                "cache": cache_name,
+                                "name": dpd_name,
+                                "type": "DPD",
+                                "current_suffix": None,
+                            }
+                        )
+
+            # Discover NPDs
+            for npd_name in self.discover_npds(cache_path):
+                npd = self._get_npd(npd_name, cache_name)
+                if npd:
+                    try:
+                        suffix = npd._discover_current_suffix()
+                        rows.append(
+                            {
+                                "cache": cache_name,
+                                "name": npd_name,
+                                "type": "NPD",
+                                "current_suffix": suffix,
+                            }
+                        )
+                    except Exception:
+                        rows.append(
+                            {
+                                "cache": cache_name,
+                                "name": npd_name,
+                                "type": "NPD",
+                                "current_suffix": None,
+                            }
+                        )
+
+        return pd.DataFrame(rows)
+
+    def discover_all_dpds(self) -> dict[str, tuple[str, Path]]:
+        """
+        Discover all DPDs across all registered caches.
+
+        Returns:
+            Dict mapping dataset name to (cache_name, path) tuple.
+            If the same dataset exists in multiple caches, the first
+            cache (in registration order) takes precedence.
+        """
+        result: dict[str, tuple[str, Path]] = {}
+        for cache_name in self._cache_order:
+            cache_path = self._caches[cache_name]
+            for dpd_name, dpd_path in self.discover_dpds(cache_path).items():
+                if dpd_name not in result:
+                    result[dpd_name] = (cache_name, dpd_path)
+        return result
+
+    def discover_all_npds(self) -> dict[str, tuple[str, Path]]:
+        """
+        Discover all NPDs across all registered caches.
+
+        Returns:
+            Dict mapping dataset name to (cache_name, path) tuple.
+            If the same dataset exists in multiple caches, the first
+            cache (in registration order) takes precedence.
+        """
+        result: dict[str, tuple[str, Path]] = {}
+        for cache_name in self._cache_order:
+            cache_path = self._caches[cache_name]
+            for npd_name, npd_path in self.discover_npds(cache_path).items():
+                if npd_name not in result:
+                    result[npd_name] = (cache_name, npd_path)
+        return result
+
+    def refresh_all(self) -> bool:
+        """
+        Refresh all cached datasets to their latest snapshots.
+
+        Useful in long-running notebooks or processes where you want to
+        pick up any new data that has been published since the datasets
+        were first loaded.
+
+        Returns:
+            True if any dataset was refreshed, False if all were current.
+        """
+        any_refreshed = False
+
+        # Refresh all cached DPDs
+        for dpd in self._dpd_cache.values():
+            if dpd.refresh():
+                any_refreshed = True
+
+        # Refresh all cached NPDs
+        for npd in self._npd_cache.values():
+            if npd.refresh():
+                any_refreshed = True
+
+        return any_refreshed

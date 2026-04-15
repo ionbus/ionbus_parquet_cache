@@ -1,0 +1,20 @@
+# Futures Daily Data - Integration Test Configuration
+# Source: Hive-partitioned parquet files from historical futures data
+
+cache_dir: ../../../parquet_test_data/test_caches
+
+datasets:
+  md.futures_daily:
+    description: Daily futures OHLCV data
+    date_col: date
+    date_partition: year
+    partition_columns:
+      - future_root
+    sort_columns:
+      - contract_name
+      - date
+
+    # Read from existing Hive-partitioned parquet
+    source_class_name: HiveParquetSource
+    source_init_args:
+      path: "C:/Users/cplag/OneDrive/Documents/Data/Futures_daily_data/parquet_files"
