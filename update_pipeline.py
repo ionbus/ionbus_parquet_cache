@@ -523,7 +523,7 @@ def execute_update(
                 if cleaner is not None:
                     rel = cleaner(rel)
 
-                table = rel.fetch_arrow_table()
+                table = rel.to_arrow_table()
 
             # Validate schema
             merged_schema = validate_schema(
