@@ -1400,3 +1400,173 @@ class TestPerChunkSorting:
 
         # Dates should be in ascending order
         assert dates == sorted(dates)
+
+
+class TestNoneFromGetData:
+    """
+    Tests for the bug fix: get_data() returning None should skip the partition
+    instead of raising an error.
+
+    Bug 1: execute_update crashed with ValidationError when get_data() returned
+    None because convert_to_arrow(None) has no handler for NoneType.
+
+    Bug 2: consolidation called pq.read_table() on a temp file path that was
+    never written (because its spec was skipped), raising a FileNotFoundError.
+
+    Both fixes are in update_pipeline.execute_update().
+    """
+
+    def test_none_from_all_specs_is_skipped(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
+        """When every spec returns None, update returns a suffix but writes no files."""
+
+        class AllNoneSource(DataSource):
+            def available_dates(self) -> tuple[dt.date, dt.date]:
+                return (dt.date(2024, 1, 1), dt.date(2024, 1, 31))
+
+            def get_data(self, partition_spec: PartitionSpec):
+                return None
+
+        source = AllNoneSource(simple_dpd)
+
+        suffix = simple_dpd.update(
+            source,
+            start_date=dt.date(2024, 1, 1),
+            end_date=dt.date(2024, 1, 31),
+        )
+
+        # Pipeline should complete without error; no data files written
+        # (suffix may be None if no partitions produced data, depending on
+        # whether _publish_snapshot is reached — either outcome is acceptable
+        # as long as no exception is raised)
+        parquet_files = list(simple_dpd.dataset_dir.rglob("*.parquet")) if simple_dpd.dataset_dir.exists() else []
+        assert parquet_files == []
+
+    def test_none_from_some_specs_writes_non_none_partitions(
+        self, temp_cache: Path
+    ) -> None:
+        """When only some specs return None, the non-None partitions are written."""
+        dpd = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="partial_none_test",
+            date_col="Date",
+            date_partition="month",
+            partition_columns=["symbol", "month"],
+        )
+
+        class PartialNoneSource(DataSource):
+            """Returns data for 'AAPL' but None for 'FAIL'."""
+
+            partition_values = {"symbol": ["AAPL", "FAIL"]}
+
+            def available_dates(self) -> tuple[dt.date, dt.date]:
+                return (dt.date(2024, 1, 1), dt.date(2024, 1, 31))
+
+            def get_data(self, partition_spec: PartitionSpec):
+                symbol = partition_spec.partition_values.get("symbol")
+                if symbol == "FAIL":
+                    return None
+                dates = pd.date_range(
+                    partition_spec.start_date, partition_spec.end_date
+                )
+                return pd.DataFrame({
+                    "Date": dates,
+                    "symbol": symbol,
+                    "price": [100.0 + i for i in range(len(dates))],
+                })
+
+        source = PartialNoneSource(dpd)
+
+        suffix = dpd.update(
+            source,
+            start_date=dt.date(2024, 1, 1),
+            end_date=dt.date(2024, 1, 31),
+        )
+
+        assert suffix is not None
+
+        dpd.refresh()
+        df = dpd.read_data(
+            start_date=dt.date(2024, 1, 1),
+            end_date=dt.date(2024, 1, 31),
+        )
+
+        # Only AAPL data should be present; FAIL was skipped without error
+        assert set(df["symbol"].unique()) == {"AAPL"}
+        assert len(df) > 0
+
+    def test_none_does_not_raise_validation_error(
+        self, simple_dpd: DatedParquetDataset, tmp_path: Path
+    ) -> None:
+        """None return must not raise ValidationError (the pre-fix behaviour)."""
+
+        class NoneSource(DataSource):
+            def available_dates(self) -> tuple[dt.date, dt.date]:
+                return (dt.date(2024, 1, 1), dt.date(2024, 1, 31))
+
+            def get_data(self, partition_spec: PartitionSpec):
+                return None
+
+        source = NoneSource(simple_dpd)
+        source._do_prepare(dt.date(2024, 1, 1), dt.date(2024, 1, 31))
+
+        specs = source.get_partitions()
+        plan = build_update_plan(simple_dpd, specs, tmp_path)
+
+        # Must not raise — previously raised ValidationError("Cannot convert NoneType")
+        execute_update(simple_dpd, source, plan)
+
+    def test_none_mixed_with_data_in_chunked_group(
+        self, temp_cache: Path
+    ) -> None:
+        """
+        When a group has multiple chunks and some return None, the non-None
+        chunks are still consolidated into the final file correctly.
+        """
+        dpd = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="chunked_none_test",
+            date_col="Date",
+            date_partition="month",
+        )
+
+        call_count = {"n": 0}
+
+        class AlternatingSource(DataSource):
+            """Returns data on even calls, None on odd calls."""
+
+            chunk_days = 10  # Force multiple chunks per month
+
+            def available_dates(self) -> tuple[dt.date, dt.date]:
+                return (dt.date(2024, 1, 1), dt.date(2024, 1, 31))
+
+            def get_data(self, partition_spec: PartitionSpec):
+                call_count["n"] += 1
+                if call_count["n"] % 2 == 0:
+                    return None
+                dates = pd.date_range(
+                    partition_spec.start_date, partition_spec.end_date
+                )
+                return pd.DataFrame({
+                    "Date": dates,
+                    "value": range(len(dates)),
+                })
+
+        source = AlternatingSource(dpd)
+
+        # Must not raise even when some chunks return None
+        suffix = dpd.update(
+            source,
+            start_date=dt.date(2024, 1, 1),
+            end_date=dt.date(2024, 1, 31),
+        )
+
+        # At least some chunks produced data
+        assert suffix is not None
+        dpd.refresh()
+        df = dpd.read_data(
+            start_date=dt.date(2024, 1, 1),
+            end_date=dt.date(2024, 1, 31),
+        )
+        assert len(df) > 0
