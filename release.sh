@@ -35,7 +35,7 @@ if [[ -n "$TAG_FLAG" && "$TAG_FLAG" != "--tag" ]]; then
 fi
 
 build_release() {
-  rm -rf build dist .pytest_cache conda-bld
+  rm -rf build dist conda-bld
   find . -maxdepth 1 -name "*.egg-info" -exec rm -rf {} +
 
   TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
@@ -60,9 +60,9 @@ build_release() {
   fi
 
   if "$RUN_ENV" "$ENV_NAME" python -c "import conda_build" >/dev/null 2>&1; then
-    "$RUN_ENV" "$ENV_NAME" python -m conda_build.cli.main_build conda-recipe --output-folder conda-bld
+    "$RUN_ENV" "$ENV_NAME" python -m conda_build.cli.main_build conda-recipe -c conda-forge --output-folder conda-bld
   elif command -v conda >/dev/null 2>&1; then
-    conda build conda-recipe --output-folder conda-bld
+    conda build conda-recipe -c conda-forge --output-folder conda-bld
   else
     echo "ERROR: conda-build is not available in $ENV_NAME and conda is not on PATH"
     exit 1
