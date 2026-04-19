@@ -1,5 +1,68 @@
 # ionbus_parquet_cache
 
+![IonBus Parquet Cache](ionbus_parquet_cache.png)
+
+<!-- TOC start (generated with https://bitdowntoc.derlin.ch/) -->
+
+- [Installation](#installation)
+- [Table of Contents](#table-of-contents)
+- [What is this library?](#what-is-this-library)
+- [Quick Start](#quick-start)
+   * [Reading data](#reading-data)
+   * [Creating and updating datasets](#creating-and-updating-datasets)
+- [Reading Data](#reading-data-1)
+   * [Basic reading](#basic-reading)
+   * [Filtering data](#filtering-data)
+   * [Using with other tools](#using-with-other-tools)
+   * [Checking for updates](#checking-for-updates)
+   * [Reading from historical snapshots](#reading-from-historical-snapshots)
+   * [Reading non-dated (reference) data](#reading-non-dated-reference-data)
+- [Dataset Types](#dataset-types)
+   * [DatedParquetDataset (DPD)](#datedparquetdataset-dpd)
+   * [NonDatedParquetDataset (NPD)](#nondatedparquetdataset-npd)
+   * [Search order and naming conventions](#search-order-and-naming-conventions)
+   * [Specifying dataset type](#specifying-dataset-type)
+- [Using Multiple Caches](#using-multiple-caches)
+- [Updating Data](#updating-data)
+   * [Creating a new dataset (from YAML)](#creating-a-new-dataset-from-yaml)
+   * [Routine updates (from metadata)](#routine-updates-from-metadata)
+   * [Backfill (add historical data)](#backfill-add-historical-data)
+   * [Restate (fix bad data)](#restate-fix-bad-data)
+- [Writing a DataSource](#writing-a-datasource)
+   * [Minimal example](#minimal-example)
+   * [With chunking for large datasets](#with-chunking-for-large-datasets)
+   * [Built-in sources](#built-in-sources)
+- [YAML Configuration](#yaml-configuration)
+   * [Basic example](#basic-example)
+   * [With data transformations](#with-data-transformations)
+   * [Configuration reference](#configuration-reference)
+- [Data Cleaning](#data-cleaning)
+- [Instrument Hash Bucketing](#instrument-hash-bucketing)
+   * [What is it and when to use it?](#what-is-it-and-when-to-use-it)
+   * [Configuration](#configuration)
+   * [Reading with an instrument filter](#reading-with-an-instrument-filter)
+   * [Incremental updates and bucketed datasets](#incremental-updates-and-bucketed-datasets)
+   * [DataSource.get_data() returning None](#datasourceget_data-returning-none)
+- [Update Operations](#update-operations)
+   * [Temp directory](#temp-directory)
+   * [Update lock](#update-lock)
+- [CLI Tools](#cli-tools)
+   * [yaml-create-datasets](#yaml-create-datasets)
+   * [update-cache](#update-cache)
+   * [cleanup-cache](#cleanup-cache)
+   * [sync-cache](#sync-cache)
+- [Common Patterns](#common-patterns)
+   * [Detecting new data](#detecting-new-data)
+      + [Refreshing a single dataset](#refreshing-a-single-dataset)
+      + [Refreshing all datasets](#refreshing-all-datasets)
+      + [Polling for updates in a loop](#polling-for-updates-in-a-loop)
+   * [Setting up a daily update job](#setting-up-a-daily-update-job)
+   * [Reading across multiple caches](#reading-across-multiple-caches)
+   * [Discovering available datasets](#discovering-available-datasets)
+
+<!-- TOC end -->
+
+
 A Python library for managing versioned Parquet datasets with automatic date partitioning, snapshot versioning, and multi-cache support.
 
 ## Installation
