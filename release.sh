@@ -17,22 +17,30 @@ CONDA_BLD_DIR="$(dirname "$ROOT_DIR")/$(basename "$ROOT_DIR")_conda-bld"
 cd "$ROOT_DIR"
 
 case "$MODE" in
-  all|build|send)
+  all|build|send|build-pip|build-conda|send-pip|send-conda)
     ;;
   *)
-    echo "Usage: $0 [all|build|send] [--tag]"
-    echo "  build: build PyPI and conda artifacts locally"
-    echo "  send: upload dist/* to PyPI and conda artifacts to ionbus"
-    echo "  --tag: create, verify, and optionally push a new git tag before running"
+    echo "Usage: $0 [all|build|send|build-pip|build-conda|send-pip|send-conda] [--tag]"
+    echo "  build: build pip and conda artifacts locally"
+    echo "  send: upload pip and conda artifacts"
+    echo "  build-pip: build pip artifacts only"
+    echo "  build-conda: build conda artifacts only"
+    echo "  send-pip: upload pip artifacts only"
+    echo "  send-conda: upload conda artifacts only"
+    echo "  --tag: create and verify a new local git tag before running"
     exit 2
     ;;
 esac
 
 if [[ -n "$TAG_FLAG" && "$TAG_FLAG" != "--tag" ]]; then
-  echo "Usage: $0 [all|build|send] [--tag]"
-  echo "  build: build PyPI and conda artifacts locally"
-  echo "  send: upload dist/* to PyPI and conda artifacts to ionbus"
-  echo "  --tag: create, verify, and optionally push a new git tag before running"
+  echo "Usage: $0 [all|build|send|build-pip|build-conda|send-pip|send-conda] [--tag]"
+  echo "  build: build pip and conda artifacts locally"
+  echo "  send: upload pip and conda artifacts"
+  echo "  build-pip: build pip artifacts only"
+  echo "  build-conda: build conda artifacts only"
+  echo "  send-pip: upload pip artifacts only"
+  echo "  send-conda: upload conda artifacts only"
+  echo "  --tag: create and verify a new local git tag before running"
   exit 2
 fi
 
@@ -114,15 +122,29 @@ verify_dist_artifacts() {
   }
 }
 
-build_release() {
-  local tag conda_build_exe conda_output_path
-
-  rm -rf build dist "$CONDA_BLD_DIR"
+cleanup_pip_artifacts() {
+  rm -rf build dist
   find . -maxdepth 1 -name "*.egg-info" -exec rm -rf {} +
+}
+
+cleanup_conda_artifacts() {
+  rm -rf "$CONDA_BLD_DIR"
+}
+
+ensure_tag_context() {
+  local tag
 
   verify_head_tag
   tag="$(git describe --tags --exact-match)"
   export GIT_DESCRIBE_TAG="$tag"
+  printf '%s\n' "$tag"
+}
+
+build_pip_artifacts() {
+  local tag
+
+  cleanup_pip_artifacts
+  tag="$(ensure_tag_context)"
 
   if "$RUN_ENV" "$ENV_NAME" python -c "import build" >/dev/null 2>&1; then
     if ! "$RUN_ENV" "$ENV_NAME" python -m build --no-isolation --skip-dependency-check; then
@@ -139,6 +161,14 @@ build_release() {
   fi
 
   verify_dist_artifacts "$tag"
+  echo "Built pip artifacts in: $ROOT_DIR/dist"
+}
+
+build_conda_artifacts() {
+  local tag conda_build_exe conda_output_path
+
+  cleanup_conda_artifacts
+  tag="$(ensure_tag_context)"
 
   conda_build_exe="$(get_conda_build_exe)"
   conda_output_path="$(get_conda_output_path)"
@@ -151,30 +181,46 @@ build_release() {
     echo "ERROR: expected conda artifact was not created: $conda_output_path"
     exit 1
   fi
-
-  echo
-  echo "Built pip artifacts in: $ROOT_DIR/dist"
   echo "Built conda artifact: $conda_output_path"
-  echo "Version/tag used: $tag"
 }
 
-send_release() {
+send_pip_artifacts() {
+  local tag
+
+  tag="$(ensure_tag_context)"
+  verify_dist_artifacts "$tag"
+
+  "$RUN_ENV" "$ENV_NAME" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
+}
+
+send_conda_artifacts() {
   local tag conda_output_path anaconda_exe
 
-  verify_head_tag
-  tag="$(git describe --tags --exact-match)"
-  export GIT_DESCRIBE_TAG="$tag"
-  verify_dist_artifacts "$tag"
+  tag="$(ensure_tag_context)"
   conda_output_path="$(get_conda_output_path)"
   if [[ ! -f "$conda_output_path" ]]; then
     echo "ERROR: expected conda artifact is missing: $conda_output_path"
     exit 1
   fi
 
-  "$RUN_ENV" "$ENV_NAME" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
-
   anaconda_exe="$(get_anaconda_exe)"
   "$anaconda_exe" -s anaconda.org upload -u ionbus "$conda_output_path"
+}
+
+build_release() {
+  local tag
+
+  build_pip_artifacts
+  build_conda_artifacts
+  tag="$(ensure_tag_context)"
+
+  echo
+  echo "Version/tag used: $tag"
+}
+
+send_release() {
+  send_pip_artifacts
+  send_conda_artifacts
 }
 
 maybe_tag_release() {
@@ -194,14 +240,29 @@ maybe_tag_release() {
   fi
 }
 
-if [[ "$MODE" == "build" ]]; then
-  maybe_tag_release
-  build_release
-elif [[ "$MODE" == "send" ]]; then
-  maybe_tag_release
-  send_release
-else
-  maybe_tag_release
-  build_release
-  send_release
-fi
+maybe_tag_release
+
+case "$MODE" in
+  build)
+    build_release
+    ;;
+  send)
+    send_release
+    ;;
+  build-pip)
+    build_pip_artifacts
+    ;;
+  build-conda)
+    build_conda_artifacts
+    ;;
+  send-pip)
+    send_pip_artifacts
+    ;;
+  send-conda)
+    send_conda_artifacts
+    ;;
+  all)
+    build_release
+    send_release
+    ;;
+esac

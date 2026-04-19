@@ -20,11 +20,19 @@ if not "%TAG_FLAG%"=="" if /I not "%TAG_FLAG%"=="--tag" goto usage
 if /I "%MODE%"=="build" goto build
 if /I "%MODE%"=="send" goto send
 if /I "%MODE%"=="all" goto all
+if /I "%MODE%"=="build-pip" goto build_pip
+if /I "%MODE%"=="build-conda" goto build_conda
+if /I "%MODE%"=="send-pip" goto send_pip
+if /I "%MODE%"=="send-conda" goto send_conda
 :usage
-echo Usage: %~nx0 [all^|build^|send] [--tag]
-echo   build: build PyPI and conda artifacts locally
-echo   send: upload dist/* to PyPI and conda artifacts to ionbus
-echo   --tag: create, verify, and optionally push a new git tag before running
+echo Usage: %~nx0 [all^|build^|send^|build-pip^|build-conda^|send-pip^|send-conda] [--tag]
+echo   build: build pip and conda artifacts locally
+echo   send: upload pip and conda artifacts
+echo   build-pip: build pip artifacts only
+echo   build-conda: build conda artifacts only
+echo   send-pip: upload pip artifacts only
+echo   send-conda: upload conda artifacts only
+echo   --tag: create and verify a new local git tag before running
 exit /b 2
 
 :get_tag
@@ -105,6 +113,16 @@ if not defined DIST_OK (
 )
 exit /b 0
 
+:cleanup_pip
+if exist build rmdir /s /q build
+if exist dist rmdir /s /q dist
+for /d %%D in (*.egg-info) do rmdir /s /q "%%D"
+exit /b 0
+
+:cleanup_conda
+if exist "%CONDA_BLD_DIR%" rmdir /s /q "%CONDA_BLD_DIR%"
+exit /b 0
+
 :maybe_tag
 if /I not "%TAG_FLAG%"=="--tag" exit /b 0
 set "TAG_OUTPUT="
@@ -129,12 +147,8 @@ if errorlevel 1 exit /b 1
 echo Created local tag: %CREATED_TAG%
 exit /b %errorlevel%
 
-:build_release
-if exist build rmdir /s /q build
-if exist dist rmdir /s /q dist
-if exist "%CONDA_BLD_DIR%" rmdir /s /q "%CONDA_BLD_DIR%"
-for /d %%D in (*.egg-info) do rmdir /s /q "%%D"
-
+:build_pip_release
+call :cleanup_pip
 call :verify_tag
 if errorlevel 1 exit /b 1
 
@@ -160,6 +174,13 @@ if errorlevel 1 (
 
 call :verify_dist
 if errorlevel 1 exit /b 1
+echo Built pip artifacts in: %CD%\dist
+exit /b 0
+
+:build_conda_release
+call :cleanup_conda
+call :verify_tag
+if errorlevel 1 exit /b 1
 call :get_conda_output
 if errorlevel 1 exit /b 1
 
@@ -174,17 +195,32 @@ if not exist "%CONDA_OUTPUT_PATH%" (
     echo ERROR: expected conda artifact was not created: %CONDA_OUTPUT_PATH%
     exit /b 1
 )
+echo Built conda artifact: %CONDA_OUTPUT_PATH%
+exit /b 0
+
+:build_release
+call :build_pip_release
+if errorlevel 1 exit /b 1
+call :build_conda_release
+if errorlevel 1 exit /b 1
 
 echo.
-echo Built pip artifacts in: %CD%\dist
-echo Built conda artifact: %CONDA_OUTPUT_PATH%
 echo Version/tag used: %GIT_DESCRIBE_TAG%
 exit /b 0
 
-:send_release
+:send_pip_release
 call :verify_tag
 if errorlevel 1 exit /b 1
 call :verify_dist
+if errorlevel 1 exit /b 1
+call :get_conda_output
+if errorlevel 1 exit /b 1
+call "%RUN_ENV%" "%ENV_NAME%" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
+if errorlevel 1 exit /b 1
+exit /b 0
+
+:send_conda_release
+call :verify_tag
 if errorlevel 1 exit /b 1
 call :get_conda_output
 if errorlevel 1 exit /b 1
@@ -193,10 +229,6 @@ if not exist "%CONDA_OUTPUT_PATH%" (
     exit /b 1
 )
 
-call "%RUN_ENV%" "%ENV_NAME%" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
-if errorlevel 1 exit /b 1
-
-where anaconda >nul 2>nul
 call :get_anaconda_exe
 if errorlevel 1 exit /b 1
 
@@ -204,16 +236,46 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 exit /b 0
 
+:send_release
+call :send_pip_release
+if errorlevel 1 exit /b 1
+call :send_conda_release
+exit /b %errorlevel%
+
 :build
 call :maybe_tag
 if errorlevel 1 exit /b 1
 call :build_release
 exit /b %errorlevel%
 
+:build_pip
+call :maybe_tag
+if errorlevel 1 exit /b 1
+call :build_pip_release
+exit /b %errorlevel%
+
+:build_conda
+call :maybe_tag
+if errorlevel 1 exit /b 1
+call :build_conda_release
+exit /b %errorlevel%
+
 :send
 call :maybe_tag
 if errorlevel 1 exit /b 1
 call :send_release
+exit /b %errorlevel%
+
+:send_pip
+call :maybe_tag
+if errorlevel 1 exit /b 1
+call :send_pip_release
+exit /b %errorlevel%
+
+:send_conda
+call :maybe_tag
+if errorlevel 1 exit /b 1
+call :send_conda_release
 exit /b %errorlevel%
 
 :all

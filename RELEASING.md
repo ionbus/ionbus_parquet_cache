@@ -8,6 +8,26 @@ Published names:
 - Conda package: `ionbus::ionbus-parquet-cache`
 - Import name: `ionbus_parquet_cache`
 
+## Normal release
+
+The normal release command is:
+
+```bash
+cd /path/to/ionbus_parquet_cache
+./release.sh all --tag
+```
+
+This will:
+
+- create the next local tag
+- verify the tag is on `HEAD`
+- build the pip artifacts
+- build the conda artifacts
+- upload to PyPI
+- upload to `ionbus` on Anaconda.org
+
+If everything succeeds, push the branch and the new git tag manually when you are ready.
+
 ## Release environment
 
 Releases are built from the `pixi_313_pd22` Pixi environment managed by:
@@ -37,6 +57,23 @@ Version numbers come from git tags.
 - `--tag` tells the release script to create the next local tag automatically
 - the script verifies that `HEAD` is exactly on a tag before it builds or uploads
 - the script never pushes anything to git; tags remain local until you push them yourself
+
+## Build and send modes
+
+Combined modes:
+
+- `./release.sh build` builds pip and conda locally
+- `./release.sh send` uploads pip and conda artifacts
+- `./release.sh all --tag` tags, builds, and uploads both
+
+Single-target modes:
+
+- `./release.sh build-pip` builds only the pip artifacts
+- `./release.sh build-conda` builds only the conda artifacts
+- `./release.sh send-pip` uploads only the pip artifacts
+- `./release.sh send-conda` uploads only the conda artifacts
+
+Any of the build modes can also be run with `--tag` to create the next local tag first.
 
 ## Build only
 
@@ -70,16 +107,6 @@ This uploads:
 
 - `dist/*` to PyPI with `twine`
 - the exact `.conda` artifact to `ionbus` on Anaconda.org
-
-## Full release
-
-Create the next local tag, build everything, then upload to PyPI and conda:
-
-```bash
-./release.sh all --tag
-```
-
-This is the normal release command.
 
 ## PyPI setup
 
@@ -127,5 +154,4 @@ You can also upload the conda artifact directly with:
 cd /path/to/ionbus_parquet_cache
 ./release.sh all --tag
 ```
-
 4. If everything succeeds, push the branch and the new git tag manually when you are ready.
