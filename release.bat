@@ -42,7 +42,6 @@ exit /b %errorlevel%
 :build_release
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
-if exist .pytest_cache rmdir /s /q .pytest_cache
 if exist conda-bld rmdir /s /q conda-bld
 for /d %%D in (*.egg-info) do rmdir /s /q "%%D"
 
@@ -71,10 +70,10 @@ if errorlevel 1 (
 
 call "%RUN_ENV%" "%ENV_NAME%" python -c "import conda_build"
 if errorlevel 1 (
-    conda build conda-recipe --output-folder conda-bld
+    conda build conda-recipe -c conda-forge --output-folder conda-bld
     if errorlevel 1 exit /b 1
 ) else (
-    call "%RUN_ENV%" "%ENV_NAME%" python -m conda_build.cli.main_build conda-recipe --output-folder conda-bld
+    call "%RUN_ENV%" "%ENV_NAME%" python -m conda_build.cli.main_build conda-recipe -c conda-forge --output-folder conda-bld
     if errorlevel 1 exit /b 1
 )
 
