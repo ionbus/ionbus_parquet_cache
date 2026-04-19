@@ -200,7 +200,7 @@ where anaconda >nul 2>nul
 call :get_anaconda_exe
 if errorlevel 1 exit /b 1
 
-"%ANACONDA_EXE%" upload -u ionbus "%CONDA_OUTPUT_PATH%"
+"%ANACONDA_EXE%" -s anaconda.org upload -u ionbus "%CONDA_OUTPUT_PATH%"
 if errorlevel 1 exit /b 1
 exit /b 0
 

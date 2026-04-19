@@ -174,7 +174,7 @@ send_release() {
   "$RUN_ENV" "$ENV_NAME" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
 
   anaconda_exe="$(get_anaconda_exe)"
-  "$anaconda_exe" upload -u ionbus "$conda_output_path"
+  "$anaconda_exe" -s anaconda.org upload -u ionbus "$conda_output_path"
 }
 
 maybe_tag_release() {
