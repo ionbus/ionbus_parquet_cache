@@ -1,0 +1,48 @@
+{% set name = "ionbus-parquet-cache" %}
+{% set version = environ.get('GIT_DESCRIBE_TAG', '0.0.0') %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  script: python -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  host:
+    - python >=3.9,<3.14
+    - pip
+    - setuptools
+  run:
+    - python >=3.9,<3.14
+    - duckdb >=0.10
+    - ionbus-utils >=0.0.0
+    - pandas <3.0.0
+    - polars
+    - pyarrow >=16.0.1
+    - pydantic >=2.7.2
+    - pyyaml >=6.0.1
+    - setuptools
+    - typing_extensions >=4.7.1
+    - backports.strenum >=0.4.1  # [py<311]
+    - eval-type-backport          # [py<310]
+
+test:
+  imports:
+    - ionbus_parquet_cache
+
+about:
+  home: https://github.com/ionbus/ionbus_parquet_cache
+  license: MIT
+  license_family: MIT
+  summary: Versioned Parquet dataset management with snapshot support
+  dev_url: https://github.com/ionbus/ionbus_parquet_cache
+  doc_url: https://github.com/ionbus/ionbus_parquet_cache/blob/main/README.md
+  description: |
+    Tools for managing versioned Parquet datasets with date partitioning,
+    snapshot history, YAML-driven dataset creation, multi-cache lookup,
+    and CLI workflows for update, cleanup, and cache synchronization.
