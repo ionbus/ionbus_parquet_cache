@@ -26,3 +26,4 @@ ignored
 _version.py
 build/ 
 .oldgit/ 
+.pytest_cache

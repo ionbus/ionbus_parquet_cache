@@ -151,6 +151,7 @@ def build_update_plan(
     dataset: "DatedParquetDataset",
     specs: list[PartitionSpec],
     temp_dir: Path,
+    suffix: str | None = None,
 ) -> UpdatePlan:
     """
     Build a complete update plan before fetching any data.
@@ -159,11 +160,13 @@ def build_update_plan(
         dataset: The DatedParquetDataset being updated.
         specs: List of PartitionSpecs from the DataSource.
         temp_dir: Directory for temporary files.
+        suffix: Optional snapshot suffix. If None, generates a new one.
 
     Returns:
         UpdatePlan with all file paths assigned.
     """
-    suffix = generate_snapshot_suffix()
+    if suffix is None:
+        suffix = generate_snapshot_suffix()
     plan = UpdatePlan(suffix=suffix)
 
     # Group specs by partition_values
@@ -501,6 +504,13 @@ def execute_update(
                     partition_info=spec.partition_values,
                 ) from e
 
+            # None means the source has no data for this partition — skip it
+            if data is None:
+                logger.debug(
+                    f"Skipping partition {spec.partition_values}: source returned None"
+                )
+                continue
+
             # Convert to Arrow
             table = convert_to_arrow(data)
 
@@ -516,7 +526,7 @@ def execute_update(
                 if cleaner is not None:
                     rel = cleaner(rel)
 
-                table = rel.fetch_arrow_table()
+                table = rel.to_arrow_table()
 
             # Validate schema
             merged_schema = validate_schema(
@@ -589,8 +599,11 @@ def execute_update(
         for key, group in plan.groups.items():
             updated_partition_keys.add(key)
 
-            # Read all new data chunks
-            tables = [pq.read_table(f) for f in group.temp_files]
+            # Read all new data chunks (only files that were actually written;
+            # a file is absent when get_data() returned None for that spec)
+            tables = [pq.read_table(f) for f in group.temp_files if f.exists()]
+            if not tables:
+                continue  # Every spec in this group was skipped
             new_data = pa.concat_tables(tables)
 
             # Check for existing partition data
