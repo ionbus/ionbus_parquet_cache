@@ -151,6 +151,7 @@ def build_update_plan(
     dataset: "DatedParquetDataset",
     specs: list[PartitionSpec],
     temp_dir: Path,
+    suffix: str | None = None,
 ) -> UpdatePlan:
     """
     Build a complete update plan before fetching any data.
@@ -159,11 +160,13 @@ def build_update_plan(
         dataset: The DatedParquetDataset being updated.
         specs: List of PartitionSpecs from the DataSource.
         temp_dir: Directory for temporary files.
+        suffix: Optional snapshot suffix. If None, generates a new one.
 
     Returns:
         UpdatePlan with all file paths assigned.
     """
-    suffix = generate_snapshot_suffix()
+    if suffix is None:
+        suffix = generate_snapshot_suffix()
     plan = UpdatePlan(suffix=suffix)
 
     # Group specs by partition_values

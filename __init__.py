@@ -21,6 +21,7 @@ from ionbus_parquet_cache.exceptions import (
     SyncError,
     ValidationError,
     ConfigurationError,
+    UpdateLockedError,
 )
 from ionbus_parquet_cache.snapshot import (
     generate_snapshot_suffix,
@@ -61,6 +62,10 @@ from ionbus_parquet_cache.builtin_sources import (
     HiveParquetSource,
     DPDSource,
 )
+from ionbus_parquet_cache.bucketing import (
+    instrument_bucket,
+    bucket_instruments,
+)
 
 __all__ = [
     # Exceptions
@@ -73,6 +78,7 @@ __all__ = [
     "SyncError",
     "ValidationError",
     "ConfigurationError",
+    "UpdateLockedError",
     # Snapshot utilities
     "generate_snapshot_suffix",
     "parse_snapshot_suffix",
@@ -112,6 +118,9 @@ __all__ = [
     # Built-in data sources
     "HiveParquetSource",
     "DPDSource",
+    # Bucketing utilities
+    "instrument_bucket",
+    "bucket_instruments",
 ]
 
 __version__ = "0.1.0"
