@@ -47,6 +47,52 @@ if not "%~1"=="" (
 )
 exit /b 0
 
+:get_conda_build_exe
+set "CONDA_BUILD_EXE="
+for /f "usebackq delims=" %%I in (`call "%RUN_ENV%" "%ENV_NAME%" where conda-build 2^>nul`) do set "CONDA_BUILD_EXE=%%I"
+if defined CONDA_BUILD_EXE exit /b 0
+where conda >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: conda-build is not available in %ENV_NAME% and conda is not on PATH
+    exit /b 1
+)
+set "CONDA_BUILD_EXE=conda"
+exit /b 0
+
+:get_conda_output
+call :get_conda_build_exe
+if errorlevel 1 exit /b 1
+set "CONDA_OUTPUT_PATH="
+if /I "%CONDA_BUILD_EXE%"=="conda" (
+    for /f "usebackq delims=" %%I in (`conda build conda-recipe -c ionbus -c conda-forge --croot "%CONDA_BLD_DIR%" --output`) do set "CONDA_OUTPUT_PATH=%%I"
+) else (
+    for /f "usebackq delims=" %%I in (`"%CONDA_BUILD_EXE%" conda-recipe -c ionbus -c conda-forge --croot "%CONDA_BLD_DIR%" --output`) do set "CONDA_OUTPUT_PATH=%%I"
+)
+if not defined CONDA_OUTPUT_PATH (
+    echo ERROR: failed to compute conda artifact output path
+    exit /b 1
+)
+exit /b 0
+
+:verify_dist
+set "DIST_OK="
+for %%F in (dist\*.whl) do (
+    echo %%~nxF | findstr /C:"%GIT_DESCRIBE_TAG%" >nul && set "DIST_OK=1"
+)
+if not defined DIST_OK (
+    echo ERROR: expected wheel for tag %GIT_DESCRIBE_TAG% in dist\
+    exit /b 1
+)
+set "DIST_OK="
+for %%F in (dist\*.tar.gz) do (
+    echo %%~nxF | findstr /C:"%GIT_DESCRIBE_TAG%" >nul && set "DIST_OK=1"
+)
+if not defined DIST_OK (
+    echo ERROR: expected sdist for tag %GIT_DESCRIBE_TAG% in dist\
+    exit /b 1
+)
+exit /b 0
+
 :maybe_tag
 if /I not "%TAG_FLAG%"=="--tag" exit /b 0
 for /f "usebackq delims=" %%I in (`call "%RUN_ENV%" "%ENV_NAME%" python -m ionbus_utils.git_utils.auto_tag . --name-only`) do set "CREATED_TAG=%%I"
@@ -63,10 +109,7 @@ git tag -a "%CREATED_TAG%" -m "auto-tag %CREATED_TAG%"
 if errorlevel 1 exit /b 1
 call :verify_tag "%CREATED_TAG%"
 if errorlevel 1 exit /b 1
-if /I not "%MODE%"=="build" (
-    git push origin "refs/tags/%CREATED_TAG%"
-    if errorlevel 1 exit /b 1
-)
+echo Created local tag: %CREATED_TAG%
 exit /b %errorlevel%
 
 :build_release
@@ -98,25 +141,40 @@ if errorlevel 1 (
     if errorlevel 1 exit /b 1
 )
 
-set "CONDA_BUILD_EXE="
-for /f "usebackq delims=" %%I in (`call "%RUN_ENV%" "%ENV_NAME%" where conda-build`) do set "CONDA_BUILD_EXE=%%I"
-if not defined CONDA_BUILD_EXE (
+call :verify_dist
+if errorlevel 1 exit /b 1
+call :get_conda_output
+if errorlevel 1 exit /b 1
+
+if /I "%CONDA_BUILD_EXE%"=="conda" (
     conda build conda-recipe -c ionbus -c conda-forge --croot "%CONDA_BLD_DIR%"
     if errorlevel 1 exit /b 1
 ) else (
     "%CONDA_BUILD_EXE%" conda-recipe -c ionbus -c conda-forge --croot "%CONDA_BLD_DIR%"
     if errorlevel 1 exit /b 1
 )
+if not exist "%CONDA_OUTPUT_PATH%" (
+    echo ERROR: expected conda artifact was not created: %CONDA_OUTPUT_PATH%
+    exit /b 1
+)
 
 echo.
 echo Built pip artifacts in: %CD%\dist
-echo Built conda artifacts in: %CONDA_BLD_DIR%
+echo Built conda artifact: %CONDA_OUTPUT_PATH%
 echo Version/tag used: %GIT_DESCRIBE_TAG%
 exit /b 0
 
 :send_release
 call :verify_tag
 if errorlevel 1 exit /b 1
+call :verify_dist
+if errorlevel 1 exit /b 1
+call :get_conda_output
+if errorlevel 1 exit /b 1
+if not exist "%CONDA_OUTPUT_PATH%" (
+    echo ERROR: expected conda artifact is missing: %CONDA_OUTPUT_PATH%
+    exit /b 1
+)
 
 call "%RUN_ENV%" "%ENV_NAME%" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
 if errorlevel 1 exit /b 1
@@ -127,7 +185,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-anaconda upload -u ionbus "%CONDA_BLD_DIR%\**\*.conda" "%CONDA_BLD_DIR%\**\*.tar.bz2"
+anaconda upload -u ionbus "%CONDA_OUTPUT_PATH%"
 if errorlevel 1 exit /b 1
 exit /b 0
 

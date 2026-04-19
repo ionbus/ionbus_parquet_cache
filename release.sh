@@ -51,13 +51,51 @@ verify_head_tag() {
   fi
 }
 
+get_conda_build_exe() {
+  local conda_build_exe
+
+  conda_build_exe="$("$RUN_ENV" "$ENV_NAME" which conda-build 2>/dev/null || true)"
+  if [[ -n "$conda_build_exe" ]]; then
+    printf '%s\n' "$conda_build_exe"
+    return 0
+  fi
+  if command -v conda >/dev/null 2>&1; then
+    printf '%s\n' "conda"
+    return 0
+  fi
+  echo "ERROR: conda-build is not available in $ENV_NAME and conda is not on PATH"
+  exit 1
+}
+
+get_conda_output_path() {
+  local conda_build_exe
+
+  conda_build_exe="$(get_conda_build_exe)"
+  if [[ "$conda_build_exe" == "conda" ]]; then
+    conda build conda-recipe -c ionbus -c conda-forge --croot "$CONDA_BLD_DIR" --output | tail -n 1
+  else
+    "$conda_build_exe" conda-recipe -c ionbus -c conda-forge --croot "$CONDA_BLD_DIR" --output | tail -n 1
+  fi
+}
+
+verify_dist_artifacts() {
+  local tag="$1"
+
+  "$RUN_ENV" "$ENV_NAME" python -c "import pathlib, sys; tag=sys.argv[1]; files=sorted(pathlib.Path('dist').iterdir()) if pathlib.Path('dist').is_dir() else []; wheel=[p for p in files if p.suffix=='.whl' and tag in p.name]; sdist=[p for p in files if p.name.endswith('.tar.gz') and tag in p.name]; sys.exit(0 if wheel and sdist else 1)" "$tag" || {
+    echo "ERROR: expected wheel and sdist for tag $tag in dist/"
+    exit 1
+  }
+}
+
 build_release() {
+  local tag conda_build_exe conda_output_path
+
   rm -rf build dist "$CONDA_BLD_DIR"
   find . -maxdepth 1 -name "*.egg-info" -exec rm -rf {} +
 
   verify_head_tag
-  TAG="$(git describe --tags --exact-match)"
-  export GIT_DESCRIBE_TAG="$TAG"
+  tag="$(git describe --tags --exact-match)"
+  export GIT_DESCRIBE_TAG="$tag"
 
   if "$RUN_ENV" "$ENV_NAME" python -c "import build" >/dev/null 2>&1; then
     if ! "$RUN_ENV" "$ENV_NAME" python -m build --no-isolation --skip-dependency-check; then
@@ -73,36 +111,43 @@ build_release() {
     echo "WARNING: twine is not installed in $ENV_NAME; skipping twine check"
   fi
 
-  CONDA_BUILD_EXE="$("$RUN_ENV" "$ENV_NAME" which conda-build)"
-  if [[ -n "$CONDA_BUILD_EXE" ]]; then
-    "$CONDA_BUILD_EXE" conda-recipe -c ionbus -c conda-forge --croot "$CONDA_BLD_DIR"
-  elif command -v conda >/dev/null 2>&1; then
+  verify_dist_artifacts "$tag"
+
+  conda_build_exe="$(get_conda_build_exe)"
+  conda_output_path="$(get_conda_output_path)"
+  if [[ "$conda_build_exe" == "conda" ]]; then
     conda build conda-recipe -c ionbus -c conda-forge --croot "$CONDA_BLD_DIR"
   else
-    echo "ERROR: conda-build is not available in $ENV_NAME and conda is not on PATH"
+    "$conda_build_exe" conda-recipe -c ionbus -c conda-forge --croot "$CONDA_BLD_DIR"
+  fi
+  if [[ ! -f "$conda_output_path" ]]; then
+    echo "ERROR: expected conda artifact was not created: $conda_output_path"
     exit 1
   fi
 
   echo
   echo "Built pip artifacts in: $ROOT_DIR/dist"
-  echo "Built conda artifacts in: $CONDA_BLD_DIR"
-  echo "Version/tag used: $GIT_DESCRIBE_TAG"
+  echo "Built conda artifact: $conda_output_path"
+  echo "Version/tag used: $tag"
 }
 
 send_release() {
+  local tag conda_output_path
+
   verify_head_tag
-  TAG="$(git describe --tags --exact-match)"
-  export GIT_DESCRIBE_TAG="$TAG"
+  tag="$(git describe --tags --exact-match)"
+  export GIT_DESCRIBE_TAG="$tag"
+  verify_dist_artifacts "$tag"
+  conda_output_path="$(get_conda_output_path)"
+  if [[ ! -f "$conda_output_path" ]]; then
+    echo "ERROR: expected conda artifact is missing: $conda_output_path"
+    exit 1
+  fi
 
   "$RUN_ENV" "$ENV_NAME" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
 
   if command -v anaconda >/dev/null 2>&1; then
-    mapfile -t conda_files < <(find "$CONDA_BLD_DIR" -type f \( -name "*.conda" -o -name "*.tar.bz2" \))
-    if [[ ${#conda_files[@]} -eq 0 ]]; then
-      echo "ERROR: no conda artifacts found in $CONDA_BLD_DIR"
-      exit 1
-    fi
-    anaconda upload -u ionbus "${conda_files[@]}"
+    anaconda upload -u ionbus "$conda_output_path"
   else
     echo "ERROR: anaconda CLI is required to upload conda packages to ionbus::ionbus-parquet-cache"
     exit 1
@@ -122,9 +167,7 @@ maybe_tag_release() {
     fi
     git tag -a "$CREATED_TAG" -m "auto-tag $CREATED_TAG"
     verify_head_tag "$CREATED_TAG"
-    if [[ "$MODE" != "build" ]]; then
-      git push origin "refs/tags/$CREATED_TAG"
-    fi
+    echo "Created local tag: $CREATED_TAG"
   fi
 }
 
