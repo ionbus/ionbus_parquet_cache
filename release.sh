@@ -78,6 +78,17 @@ get_conda_output_path() {
   fi
 }
 
+get_next_tag_name() {
+  local output tag
+
+  output="$("$RUN_ENV" "$ENV_NAME" python -m ionbus_utils.git_utils.auto_tag . --name-only 2>&1)"
+  tag="$(printf '%s\n' "$output" | sed -nE "s/.*tag='([^']+)'.*/\1/p" | tail -n 1)"
+  if [[ -z "$tag" ]]; then
+    tag="$(printf '%s\n' "$output" | awk 'NF { print }' | tail -n 1)"
+  fi
+  printf '%s\n' "$tag"
+}
+
 verify_dist_artifacts() {
   local tag="$1"
 
@@ -156,7 +167,7 @@ send_release() {
 
 maybe_tag_release() {
   if [[ "$TAG_FLAG" == "--tag" ]]; then
-    CREATED_TAG="$("$RUN_ENV" "$ENV_NAME" python -m ionbus_utils.git_utils.auto_tag . --name-only | tail -n 1)"
+    CREATED_TAG="$(get_next_tag_name)"
     if [[ -z "$CREATED_TAG" ]]; then
       echo "ERROR: failed to compute new tag name"
       exit 1

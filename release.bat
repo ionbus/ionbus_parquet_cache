@@ -95,7 +95,12 @@ exit /b 0
 
 :maybe_tag
 if /I not "%TAG_FLAG%"=="--tag" exit /b 0
-for /f "usebackq delims=" %%I in (`call "%RUN_ENV%" "%ENV_NAME%" python -m ionbus_utils.git_utils.auto_tag . --name-only`) do set "CREATED_TAG=%%I"
+set "TAG_OUTPUT="
+for /f "usebackq delims=" %%I in (`call "%RUN_ENV%" "%ENV_NAME%" python -m ionbus_utils.git_utils.auto_tag . --name-only 2^>^&1`) do set "TAG_OUTPUT=%%I"
+set "CREATED_TAG=%TAG_OUTPUT%"
+if not "!TAG_OUTPUT:tag='=!"=="!TAG_OUTPUT!" (
+    for /f "tokens=2 delims='" %%I in ("!TAG_OUTPUT!") do set "CREATED_TAG=%%I"
+)
 if not defined CREATED_TAG (
     echo ERROR: failed to compute new tag name
     exit /b 1
