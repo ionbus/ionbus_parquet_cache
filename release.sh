@@ -5,6 +5,7 @@ ENV_NAME="pixi_313_pd22"
 RUN_ENV="${HOME}/bin/python_env_management/run_env.sh"
 MODE="${1:-all}"
 TAG_FLAG="${2:-}"
+CREATED_TAG=""
 
 if [[ ! -x "$RUN_ENV" ]]; then
   echo "ERROR: could not find run_env.sh at $RUN_ENV"
@@ -22,7 +23,7 @@ case "$MODE" in
     echo "Usage: $0 [all|build|send] [--tag]"
     echo "  build: build PyPI and conda artifacts locally"
     echo "  send: upload dist/* to PyPI and conda artifacts to ionbus"
-    echo "  --tag: create and push a new git tag via ionbus_utils before running"
+    echo "  --tag: create, verify, and optionally push a new git tag before running"
     exit 2
     ;;
 esac
@@ -31,19 +32,31 @@ if [[ -n "$TAG_FLAG" && "$TAG_FLAG" != "--tag" ]]; then
   echo "Usage: $0 [all|build|send] [--tag]"
   echo "  build: build PyPI and conda artifacts locally"
   echo "  send: upload dist/* to PyPI and conda artifacts to ionbus"
-  echo "  --tag: create and push a new git tag via ionbus_utils before running"
+  echo "  --tag: create, verify, and optionally push a new git tag before running"
   exit 2
 fi
+
+verify_head_tag() {
+  local expected_tag="${1:-}"
+  local current_tag
+
+  current_tag="$(git describe --tags --exact-match 2>/dev/null || true)"
+  if [[ -z "$current_tag" ]]; then
+    echo "ERROR: HEAD is not tagged."
+    exit 1
+  fi
+  if [[ -n "$expected_tag" && "$current_tag" != "$expected_tag" ]]; then
+    echo "ERROR: expected HEAD tag '$expected_tag' but found '$current_tag'"
+    exit 1
+  fi
+}
 
 build_release() {
   rm -rf build dist "$CONDA_BLD_DIR"
   find . -maxdepth 1 -name "*.egg-info" -exec rm -rf {} +
 
-  TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
-  if [[ -z "$TAG" ]]; then
-    echo "ERROR: HEAD is not tagged. Re-run with --tag to create a release tag first."
-    exit 1
-  fi
+  verify_head_tag
+  TAG="$(git describe --tags --exact-match)"
   export GIT_DESCRIBE_TAG="$TAG"
 
   if "$RUN_ENV" "$ENV_NAME" python -c "import build" >/dev/null 2>&1; then
@@ -77,11 +90,8 @@ build_release() {
 }
 
 send_release() {
-  TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
-  if [[ -z "$TAG" ]]; then
-    echo "ERROR: HEAD is not tagged. Re-run with --tag to create a release tag first."
-    exit 1
-  fi
+  verify_head_tag
+  TAG="$(git describe --tags --exact-match)"
   export GIT_DESCRIBE_TAG="$TAG"
 
   "$RUN_ENV" "$ENV_NAME" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
@@ -101,7 +111,20 @@ send_release() {
 
 maybe_tag_release() {
   if [[ "$TAG_FLAG" == "--tag" ]]; then
-    "$RUN_ENV" "$ENV_NAME" python -m ionbus_utils.git_utils.auto_tag . --throw-on-failure
+    CREATED_TAG="$("$RUN_ENV" "$ENV_NAME" python -m ionbus_utils.git_utils.auto_tag . --name-only | tail -n 1)"
+    if [[ -z "$CREATED_TAG" ]]; then
+      echo "ERROR: failed to compute new tag name"
+      exit 1
+    fi
+    if git rev-parse -q --verify "refs/tags/$CREATED_TAG" >/dev/null; then
+      echo "ERROR: tag '$CREATED_TAG' already exists locally"
+      exit 1
+    fi
+    git tag -a "$CREATED_TAG" -m "auto-tag $CREATED_TAG"
+    verify_head_tag "$CREATED_TAG"
+    if [[ "$MODE" != "build" ]]; then
+      git push origin "refs/tags/$CREATED_TAG"
+    fi
   fi
 }
 

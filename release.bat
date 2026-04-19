@@ -6,6 +6,7 @@ set "RUN_ENV=%USERPROFILE%\bin\python_env_management\run_env.bat"
 set "MODE=%~1"
 if "%MODE%"=="" set "MODE=all"
 set "TAG_FLAG=%~2"
+set "CREATED_TAG="
 
 if not exist "%RUN_ENV%" (
     echo ERROR: could not find run_env.bat at %RUN_ENV%
@@ -23,7 +24,7 @@ if /I "%MODE%"=="all" goto all
 echo Usage: %~nx0 [all^|build^|send] [--tag]
 echo   build: build PyPI and conda artifacts locally
 echo   send: upload dist/* to PyPI and conda artifacts to ionbus
-echo   --tag: create and push a new git tag via ionbus_utils before running
+echo   --tag: create, verify, and optionally push a new git tag before running
 exit /b 2
 
 :get_tag
@@ -35,9 +36,37 @@ if not defined GIT_DESCRIBE_TAG (
 )
 exit /b 0
 
+:verify_tag
+call :get_tag
+if errorlevel 1 exit /b 1
+if not "%~1"=="" (
+    if /I not "%GIT_DESCRIBE_TAG%"=="%~1" (
+        echo ERROR: expected HEAD tag "%~1" but found "%GIT_DESCRIBE_TAG%"
+        exit /b 1
+    )
+)
+exit /b 0
+
 :maybe_tag
 if /I not "%TAG_FLAG%"=="--tag" exit /b 0
-call "%RUN_ENV%" "%ENV_NAME%" python -m ionbus_utils.git_utils.auto_tag . --throw-on-failure
+for /f "usebackq delims=" %%I in (`call "%RUN_ENV%" "%ENV_NAME%" python -m ionbus_utils.git_utils.auto_tag . --name-only`) do set "CREATED_TAG=%%I"
+if not defined CREATED_TAG (
+    echo ERROR: failed to compute new tag name
+    exit /b 1
+)
+git rev-parse -q --verify "refs/tags/%CREATED_TAG%" >nul 2>nul
+if not errorlevel 1 (
+    echo ERROR: tag "%CREATED_TAG%" already exists locally
+    exit /b 1
+)
+git tag -a "%CREATED_TAG%" -m "auto-tag %CREATED_TAG%"
+if errorlevel 1 exit /b 1
+call :verify_tag "%CREATED_TAG%"
+if errorlevel 1 exit /b 1
+if /I not "%MODE%"=="build" (
+    git push origin "refs/tags/%CREATED_TAG%"
+    if errorlevel 1 exit /b 1
+)
 exit /b %errorlevel%
 
 :build_release
@@ -46,7 +75,7 @@ if exist dist rmdir /s /q dist
 if exist "%CONDA_BLD_DIR%" rmdir /s /q "%CONDA_BLD_DIR%"
 for /d %%D in (*.egg-info) do rmdir /s /q "%%D"
 
-call :get_tag
+call :verify_tag
 if errorlevel 1 exit /b 1
 
 call "%RUN_ENV%" "%ENV_NAME%" python -c "import build"
@@ -86,7 +115,7 @@ echo Version/tag used: %GIT_DESCRIBE_TAG%
 exit /b 0
 
 :send_release
-call :get_tag
+call :verify_tag
 if errorlevel 1 exit /b 1
 
 call "%RUN_ENV%" "%ENV_NAME%" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
