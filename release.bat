@@ -59,6 +59,18 @@ if errorlevel 1 (
 set "CONDA_BUILD_EXE=conda"
 exit /b 0
 
+:get_anaconda_exe
+set "ANACONDA_EXE="
+for /f "usebackq delims=" %%I in (`call "%RUN_ENV%" "%ENV_NAME%" where anaconda 2^>nul`) do set "ANACONDA_EXE=%%I"
+if defined ANACONDA_EXE exit /b 0
+where anaconda >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: anaconda-client is not available in %ENV_NAME% and anaconda is not on PATH
+    exit /b 1
+)
+set "ANACONDA_EXE=anaconda"
+exit /b 0
+
 :get_conda_output
 call :get_conda_build_exe
 if errorlevel 1 exit /b 1
@@ -185,12 +197,10 @@ call "%RUN_ENV%" "%ENV_NAME%" python -c "import pathlib, subprocess, sys; files=
 if errorlevel 1 exit /b 1
 
 where anaconda >nul 2>nul
-if errorlevel 1 (
-    echo ERROR: anaconda CLI is required to upload conda packages to ionbus::ionbus-parquet-cache
-    exit /b 1
-)
+call :get_anaconda_exe
+if errorlevel 1 exit /b 1
 
-anaconda upload -u ionbus "%CONDA_OUTPUT_PATH%"
+"%ANACONDA_EXE%" upload -u ionbus "%CONDA_OUTPUT_PATH%"
 if errorlevel 1 exit /b 1
 exit /b 0
 

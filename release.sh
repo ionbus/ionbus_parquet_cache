@@ -67,6 +67,22 @@ get_conda_build_exe() {
   exit 1
 }
 
+get_anaconda_exe() {
+  local anaconda_exe
+
+  anaconda_exe="$("$RUN_ENV" "$ENV_NAME" which anaconda 2>/dev/null || true)"
+  if [[ -n "$anaconda_exe" ]]; then
+    printf '%s\n' "$anaconda_exe"
+    return 0
+  fi
+  if command -v anaconda >/dev/null 2>&1; then
+    printf '%s\n' "anaconda"
+    return 0
+  fi
+  echo "ERROR: anaconda-client is not available in $ENV_NAME and anaconda is not on PATH"
+  exit 1
+}
+
 get_conda_output_path() {
   local conda_build_exe
 
@@ -143,7 +159,7 @@ build_release() {
 }
 
 send_release() {
-  local tag conda_output_path
+  local tag conda_output_path anaconda_exe
 
   verify_head_tag
   tag="$(git describe --tags --exact-match)"
@@ -157,12 +173,8 @@ send_release() {
 
   "$RUN_ENV" "$ENV_NAME" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
 
-  if command -v anaconda >/dev/null 2>&1; then
-    anaconda upload -u ionbus "$conda_output_path"
-  else
-    echo "ERROR: anaconda CLI is required to upload conda packages to ionbus::ionbus-parquet-cache"
-    exit 1
-  fi
+  anaconda_exe="$(get_anaconda_exe)"
+  "$anaconda_exe" upload -u ionbus "$conda_output_path"
 }
 
 maybe_tag_release() {
