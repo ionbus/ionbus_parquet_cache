@@ -70,10 +70,10 @@ if errorlevel 1 (
 
 call "%RUN_ENV%" "%ENV_NAME%" python -c "import conda_build"
 if errorlevel 1 (
-    conda build conda-recipe -c conda-forge --output-folder conda-bld
+    conda build conda-recipe -c ionbus -c conda-forge --output-folder conda-bld
     if errorlevel 1 exit /b 1
 ) else (
-    call "%RUN_ENV%" "%ENV_NAME%" python -m conda_build.cli.main_build conda-recipe -c conda-forge --output-folder conda-bld
+    call "%RUN_ENV%" "%ENV_NAME%" python -m conda_build.cli.main_build conda-recipe -c ionbus -c conda-forge --output-folder conda-bld
     if errorlevel 1 exit /b 1
 )
 

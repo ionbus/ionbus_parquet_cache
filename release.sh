@@ -60,9 +60,9 @@ build_release() {
   fi
 
   if "$RUN_ENV" "$ENV_NAME" python -c "import conda_build" >/dev/null 2>&1; then
-    "$RUN_ENV" "$ENV_NAME" python -m conda_build.cli.main_build conda-recipe -c conda-forge --output-folder conda-bld
+    "$RUN_ENV" "$ENV_NAME" python -m conda_build.cli.main_build conda-recipe -c ionbus -c conda-forge --output-folder conda-bld
   elif command -v conda >/dev/null 2>&1; then
-    conda build conda-recipe -c conda-forge --output-folder conda-bld
+    conda build conda-recipe -c ionbus -c conda-forge --output-folder conda-bld
   else
     echo "ERROR: conda-build is not available in $ENV_NAME and conda is not on PATH"
     exit 1
