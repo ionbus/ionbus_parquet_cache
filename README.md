@@ -2,6 +2,26 @@
 
 A Python library for managing versioned Parquet datasets with automatic date partitioning, snapshot versioning, and multi-cache support.
 
+## Installation
+
+PyPI project:
+
+```bash
+pip install ionbus-parquet-cache
+```
+
+Conda package:
+
+```bash
+conda install -c ionbus ionbus-parquet-cache
+```
+
+Import package:
+
+```python
+import ionbus_parquet_cache
+```
+
 ## Table of Contents
 
 - [What is this library?](#what-is-this-library)
