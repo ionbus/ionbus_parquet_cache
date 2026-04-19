@@ -22,6 +22,8 @@ Import package:
 import ionbus_parquet_cache
 ```
 
+Maintainers: release instructions live in [RELEASING.md](RELEASING.md).
+
 ## Table of Contents
 
 - [What is this library?](#what-is-this-library)
