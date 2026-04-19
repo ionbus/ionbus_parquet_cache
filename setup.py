@@ -59,14 +59,6 @@ package_dirs = {
 }
 package_dirs.update({f"ionbus_parquet_cache/{x}": f"./{x}" for x in all_dirs})
 
-requirements = []
-with open("requirements.txt", "r", encoding="utf-8") as req:
-    for line in req.readlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        requirements.append(line.replace("= ", "="))
-
 with open("readme_pip.md", "r", encoding="utf-8") as readme_file:
     long_description = readme_file.read()
 
@@ -75,16 +67,12 @@ setup(
     url="https://github.com/ionbus/ionbus_parquet_cache",
     packages=packages,
     package_dir=package_dirs,
-    install_requires=requirements,
     long_description=long_description,
     long_description_content_type="text/markdown",
     package_data={
         "ionbus_parquet_cache": [
             "*.md",
             "*/*.md",
-            "integration_tests/*.sh",
-            "integration_tests/*.bat",
-            "integration_tests/configs/*.yaml",
         ]
     },
 )

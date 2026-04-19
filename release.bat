@@ -6,6 +6,7 @@ set "RUN_ENV=%USERPROFILE%\bin\python_env_management\run_env.bat"
 set "MODE=%~1"
 if "%MODE%"=="" set "MODE=all"
 set "TAG_FLAG=%~2"
+set "CONDA_BLD_DIR=%CD%\conda-bld"
 
 if not exist "%RUN_ENV%" (
     echo ERROR: could not find run_env.bat at %RUN_ENV%
@@ -42,7 +43,7 @@ exit /b %errorlevel%
 :build_release
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
-if exist conda-bld rmdir /s /q conda-bld
+if exist "%CONDA_BLD_DIR%" rmdir /s /q "%CONDA_BLD_DIR%"
 for /d %%D in (*.egg-info) do rmdir /s /q "%%D"
 
 call :get_tag
@@ -68,18 +69,19 @@ if errorlevel 1 (
     if errorlevel 1 exit /b 1
 )
 
-call "%RUN_ENV%" "%ENV_NAME%" python -c "import conda_build"
-if errorlevel 1 (
-    conda build conda-recipe -c ionbus -c conda-forge --output-folder conda-bld
+set "CONDA_BUILD_EXE="
+for /f "usebackq delims=" %%I in (`call "%RUN_ENV%" "%ENV_NAME%" where conda-build`) do set "CONDA_BUILD_EXE=%%I"
+if not defined CONDA_BUILD_EXE (
+    conda build conda-recipe -c ionbus -c conda-forge --croot "%CONDA_BLD_DIR%"
     if errorlevel 1 exit /b 1
 ) else (
-    call "%RUN_ENV%" "%ENV_NAME%" python -m conda_build.cli.main_build conda-recipe -c ionbus -c conda-forge --output-folder conda-bld
+    "%CONDA_BUILD_EXE%" conda-recipe -c ionbus -c conda-forge --croot "%CONDA_BLD_DIR%"
     if errorlevel 1 exit /b 1
 )
 
 echo.
 echo Built pip artifacts in: %CD%\dist
-echo Built conda artifacts in: %CD%\conda-bld
+echo Built conda artifacts in: %CONDA_BLD_DIR%
 echo Version/tag used: %GIT_DESCRIBE_TAG%
 exit /b 0
 
@@ -96,7 +98,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-anaconda upload -u ionbus conda-bld\**\*.conda conda-bld\**\*.tar.bz2
+anaconda upload -u ionbus "%CONDA_BLD_DIR%\**\*.conda" "%CONDA_BLD_DIR%\**\*.tar.bz2"
 if errorlevel 1 exit /b 1
 exit /b 0
 

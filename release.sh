@@ -12,6 +12,7 @@ if [[ ! -x "$RUN_ENV" ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONDA_BLD_DIR="$ROOT_DIR/conda-bld"
 cd "$ROOT_DIR"
 
 case "$MODE" in
@@ -35,7 +36,7 @@ if [[ -n "$TAG_FLAG" && "$TAG_FLAG" != "--tag" ]]; then
 fi
 
 build_release() {
-  rm -rf build dist conda-bld
+  rm -rf build dist "$CONDA_BLD_DIR"
   find . -maxdepth 1 -name "*.egg-info" -exec rm -rf {} +
 
   TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
@@ -59,10 +60,11 @@ build_release() {
     echo "WARNING: twine is not installed in $ENV_NAME; skipping twine check"
   fi
 
-  if "$RUN_ENV" "$ENV_NAME" python -c "import conda_build" >/dev/null 2>&1; then
-    "$RUN_ENV" "$ENV_NAME" python -m conda_build.cli.main_build conda-recipe -c ionbus -c conda-forge --output-folder conda-bld
+  CONDA_BUILD_EXE="$("$RUN_ENV" "$ENV_NAME" which conda-build)"
+  if [[ -n "$CONDA_BUILD_EXE" ]]; then
+    "$CONDA_BUILD_EXE" conda-recipe -c ionbus -c conda-forge --croot "$CONDA_BLD_DIR"
   elif command -v conda >/dev/null 2>&1; then
-    conda build conda-recipe -c ionbus -c conda-forge --output-folder conda-bld
+    conda build conda-recipe -c ionbus -c conda-forge --croot "$CONDA_BLD_DIR"
   else
     echo "ERROR: conda-build is not available in $ENV_NAME and conda is not on PATH"
     exit 1
@@ -70,7 +72,7 @@ build_release() {
 
   echo
   echo "Built pip artifacts in: $ROOT_DIR/dist"
-  echo "Built conda artifacts in: $ROOT_DIR/conda-bld"
+  echo "Built conda artifacts in: $CONDA_BLD_DIR"
   echo "Version/tag used: $GIT_DESCRIBE_TAG"
 }
 
@@ -85,9 +87,9 @@ send_release() {
   "$RUN_ENV" "$ENV_NAME" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
 
   if command -v anaconda >/dev/null 2>&1; then
-    mapfile -t conda_files < <(find conda-bld -type f \( -name "*.conda" -o -name "*.tar.bz2" \))
+    mapfile -t conda_files < <(find "$CONDA_BLD_DIR" -type f \( -name "*.conda" -o -name "*.tar.bz2" \))
     if [[ ${#conda_files[@]} -eq 0 ]]; then
-      echo "ERROR: no conda artifacts found in conda-bld"
+      echo "ERROR: no conda artifacts found in $CONDA_BLD_DIR"
       exit 1
     fi
     anaconda upload -u ionbus "${conda_files[@]}"
