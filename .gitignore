@@ -16,6 +16,10 @@ __pycache__
 log 
 *.egg-info/
 dist/
+conda-bld/
+*.conda
+*.tar.bz2
+MANIFEST
 python_venv/
 # Conda build turds:
 build_env_setup.sh
@@ -27,3 +31,4 @@ _version.py
 build/ 
 .oldgit/ 
 .pytest_cache
+.DS_Store
