@@ -510,7 +510,15 @@ class DataSource(ABC):
                 raise ValidationError(
                     "instruments provided but dataset has no instrument_column set"
                 )
-            if instrument_col not in self.dataset.partition_columns:
+            # When instrument hash bucketing is active the instrument_column is
+            # managed by _BucketedDataSourceWrapper and is NOT a direct
+            # partition column.  Skip the partition-column check in that case.
+            # Use the reserved column name directly to avoid a circular import.
+            _BUCKET_COL = "__instrument_bucket__"
+            is_bucketed = _BUCKET_COL in getattr(
+                self.dataset, "partition_columns", []
+            )
+            if not is_bucketed and instrument_col not in self.dataset.partition_columns:
                 raise ValidationError(
                     f"instrument_column '{instrument_col}' must be a partition "
                     f"column to use instruments filter. "

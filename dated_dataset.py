@@ -29,10 +29,12 @@ from ionbus_parquet_cache.data_source import DataSource
 from ionbus_parquet_cache.exceptions import (
     SnapshotNotFoundError,
     SnapshotPublishError,
+    UpdateLockedError,
     ValidationError,
 )
 from ionbus_parquet_cache.partition import (
     DATE_PARTITION_GRANULARITIES,
+    PartitionSpec,
     date_partition_column_name,
 )
 from ionbus_parquet_cache.snapshot import (
@@ -45,6 +47,9 @@ from ionbus_parquet_cache.update_pipeline import (
     compute_update_window,
     execute_update,
 )
+from ionbus_parquet_cache.bucketing import instrument_bucket, bucket_instruments
+
+INSTRUMENT_BUCKET_COL = "__instrument_bucket__"
 
 
 @dataclass
@@ -111,6 +116,97 @@ class SnapshotMetadata:
         return pd.read_pickle(path)
 
 
+class _BucketedDataSourceWrapper:
+    """
+    Wraps a DataSource to add hash-bucket partitioning transparently.
+
+    The inner DataSource returns ticker-level PartitionSpecs. This wrapper
+    groups them by (bucket, year) and presents bucket-level specs to the
+    pipeline. get_data() fetches all tickers in a bucket for a given year,
+    concatenates, and sorts.
+    """
+
+    def __init__(self, inner, instrument_column, num_instrument_buckets, sort_cols, instrument_bucket_col):
+        self._inner = inner
+        self._instrument_col = instrument_column
+        self._num_buckets = num_instrument_buckets
+        self._sort_cols = sort_cols
+        self._bucket_col = instrument_bucket_col
+        self._bucket_specs: dict[tuple, list] = {}  # (bucket_str, ...) -> [PartitionSpec]
+        self.prepared = True
+
+    def _bucket_for(self, instrument: str) -> str:
+        return instrument_bucket(instrument, self._num_buckets)
+
+    def get_partitions(self) -> list:
+        from collections import defaultdict
+        inner_specs = self._inner.get_partitions()
+
+        groups = defaultdict(list)
+        for spec in inner_specs:
+            instrument_val = spec.partition_values[self._instrument_col]
+            bucket_str = self._bucket_for(instrument_val)
+            # Key: (bucket_str, other partition values as sorted tuple)
+            other_vals = tuple(sorted(
+                (k, v) for k, v in spec.partition_values.items()
+                if k != self._instrument_col
+            ))
+            key = (bucket_str,) + other_vals
+            groups[key].append(spec)
+
+        bucket_specs = []
+        self._bucket_specs = {}
+        for key in sorted(groups):
+            specs = groups[key]
+            bucket_str = key[0]
+            other_vals = dict(key[1:])
+            self._bucket_specs[key] = specs
+            start = min(s.start_date for s in specs)
+            end = max(s.end_date for s in specs)
+            bucket_specs.append(PartitionSpec(
+                partition_values={self._bucket_col: bucket_str, **other_vals},
+                start_date=start,
+                end_date=end,
+            ))
+
+        return bucket_specs
+
+    def get_data(self, spec) -> "pa.Table | None":
+        import pyarrow.compute as pc
+
+        bucket_str = spec.partition_values[self._bucket_col]
+        other_vals = tuple(sorted(
+            (k, v) for k, v in spec.partition_values.items()
+            if k != self._bucket_col
+        ))
+        key = (bucket_str,) + other_vals
+
+        inner_specs = self._bucket_specs.get(key, [])
+        tables = []
+        for inner_spec in inner_specs:
+            table = self._inner.get_data(inner_spec)
+            if table is not None:
+                # Validate instrument_col exists on first non-None result
+                if not tables and self._instrument_col not in table.schema.names:
+                    raise ValidationError(
+                        f"instrument_col '{self._instrument_col}' not found in data. "
+                        f"Available columns: {table.schema.names}"
+                    )
+                tables.append(table)
+
+        if not tables:
+            return None
+
+        combined = pa.concat_tables(tables)
+        # Sort by sort_cols
+        sort_keys = [(col, "ascending") for col in self._sort_cols if col in combined.schema.names]
+        if sort_keys:
+            indices = pc.sort_indices(combined, sort_keys=sort_keys)
+            combined = combined.take(indices)
+
+        return combined
+
+
 class DatedParquetDataset(ParquetDataset):
     """
     Date-partitioned parquet dataset with snapshot metadata.
@@ -150,6 +246,9 @@ class DatedParquetDataset(ParquetDataset):
     repull_n_days: int = 0
     instrument_column: str | None = None
     instruments: list[str] | None = None
+    num_instrument_buckets: int | None = None
+    lock_dir: Path | None = None
+    use_update_lock: bool = True
 
     # Private attributes for cached state
     _metadata: SnapshotMetadata | None = PrivateAttr(default=None)
@@ -178,6 +277,37 @@ class DatedParquetDataset(ParquetDataset):
         )
         if date_part_col not in self.partition_columns:
             self.partition_columns = self.partition_columns + [date_part_col]
+
+        # --- Instrument bucketing validation and setup ---
+        # num_instrument_buckets requires instrument_column (but instrument_column
+        # alone is valid for the non-bucketed partition-column use case)
+        if self.num_instrument_buckets is not None and self.instrument_column is None:
+            raise ValidationError(
+                "instrument_column and num_instrument_buckets must both be set or both be None"
+            )
+        # The INSTRUMENT_BUCKET_COL reservation checks apply regardless of whether
+        # bucketing is active, to prevent accidental misuse of the reserved name.
+        if INSTRUMENT_BUCKET_COL in self.partition_columns:
+            raise ValidationError(
+                f"'{INSTRUMENT_BUCKET_COL}' is reserved by ionbus_parquet_cache"
+            )
+        if self.sort_columns and INSTRUMENT_BUCKET_COL in self.sort_columns:
+            raise ValidationError(
+                f"'{INSTRUMENT_BUCKET_COL}' is reserved and must not appear in sort_columns"
+            )
+        # Bucketing-specific setup: only when num_instrument_buckets is set
+        if self.num_instrument_buckets is not None:
+            if self.instrument_column in self.partition_columns:
+                raise ValidationError(
+                    f"instrument_column '{self.instrument_column}' must not be in partition_columns "
+                    "— the library manages its partitioning via __instrument_bucket__"
+                )
+            # Inject __instrument_bucket__ before date partition col
+            other_cols = [c for c in self.partition_columns if c != date_part_col]
+            self.partition_columns = [INSTRUMENT_BUCKET_COL] + other_cols + [date_part_col]
+            # Default sort: instrument_column then date_col (if still at default)
+            if self.sort_columns == [self.date_col]:
+                self.sort_columns = [self.instrument_column, self.date_col]
 
     @property
     def dataset_dir(self) -> Path:
@@ -242,7 +372,19 @@ class DatedParquetDataset(ParquetDataset):
             )
 
         logger.debug(f"Loading metadata for {self.name} from {meta_path}")
-        return SnapshotMetadata.from_pickle(meta_path)
+        metadata = SnapshotMetadata.from_pickle(meta_path)
+
+        # Validate num_instrument_buckets consistency
+        stored_buckets = metadata.yaml_config.get("num_instrument_buckets")
+        if stored_buckets is not None and self.num_instrument_buckets is not None:
+            if stored_buckets != self.num_instrument_buckets:
+                raise ValidationError(
+                    f"num_instrument_buckets mismatch: cache was built with {stored_buckets} "
+                    f"but current config has {self.num_instrument_buckets}. "
+                    "Changing num_instrument_buckets requires a full rebuild."
+                )
+
+        return metadata
 
     def _load_schema(self) -> pa.Schema | None:
         """Load the schema from the current snapshot metadata if needed."""
@@ -506,7 +648,14 @@ class DatedParquetDataset(ParquetDataset):
                 "repull_n_days": self.repull_n_days,
                 "instrument_column": self.instrument_column,
                 "instruments": self.instruments,
+                "num_instrument_buckets": self.num_instrument_buckets,
             }
+        else:
+            # Caller-supplied yaml_config may have pre-expansion partition_columns
+            # (e.g. from DatasetConfig.to_yaml_config() which stores the YAML value
+            # before model_post_init expands it). Always stamp the actual runtime
+            # partition_columns so _build_dataset_from_metadata reads them correctly.
+            yaml_config = {**yaml_config, "partition_columns": self.partition_columns}
 
         # Build metadata
         metadata = SnapshotMetadata(
@@ -677,6 +826,155 @@ class DatedParquetDataset(ParquetDataset):
 
         return transforms
 
+    @property
+    def _lock_path(self) -> Path:
+        lock_root = self.lock_dir if self.lock_dir is not None else self.dataset_dir
+        return lock_root / f"{self.name}_update.lock"
+
+    @staticmethod
+    def _pid_is_running(pid: int) -> bool | None:
+        """
+        Return True if the process is alive, False if dead, None if undetermined.
+
+        Uses platform-appropriate mechanism: signal 0 on POSIX, OpenProcess on Windows.
+        """
+        import sys
+        if sys.platform == "win32":
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+                return True
+            return False
+        else:
+            import os as _os
+            try:
+                _os.kill(pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return None  # process exists but we can't signal it
+
+    def _acquire_lock(self) -> None:
+        """Write the lock file, raising UpdateLockedError if one already exists."""
+        import json
+        import os
+        import socket
+        import time
+
+        lock_path = self._lock_path
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if lock_path.exists():
+            try:
+                info = json.loads(lock_path.read_text())
+            except Exception:
+                info = {}
+            host = info.get("hostname", "unknown")
+            pid = info.get("pid")
+            started = info.get("started_at", "unknown")
+            age = None
+            try:
+                age = time.time() - dt.datetime.fromisoformat(started).timestamp()
+            except Exception:
+                pass
+
+            age_str = f"{age / 60:.1f} minutes" if age is not None else "unknown age"
+            raise UpdateLockedError(
+                f"Dataset '{self.name}' is locked for update.\n"
+                f"  Lock file : {lock_path}\n"
+                f"  Locked by : {host} (PID {pid})\n"
+                f"  Started   : {started} ({age_str} ago)\n"
+                f"\n"
+                f"  To remove the lock and allow new updates:\n"
+                f"    Shell : rm {lock_path}\n"
+                f"    Python: dpd.clear_update_lock(force=True)",
+                lock_path=str(lock_path),
+                locked_by_host=host,
+                locked_by_pid=pid,
+                lock_age_seconds=age,
+            )
+
+        payload = {
+            "dataset": self.name,
+            "hostname": socket.gethostname(),
+            "pid": os.getpid(),
+            "started_at": dt.datetime.now().isoformat(),
+        }
+        # Use exclusive create (atomic on POSIX) to avoid TOCTOU race
+        try:
+            with open(lock_path, "x") as f:
+                f.write(json.dumps(payload, indent=2))
+        except FileExistsError:
+            # Another process beat us — re-read and raise with their info
+            self._acquire_lock()
+
+    def _release_lock(self) -> None:
+        """Delete the lock file; silently ignored if already gone."""
+        try:
+            self._lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def clear_update_lock(self, force: bool = False) -> None:
+        """
+        Remove the update lock for this dataset.
+
+        Args:
+            force: If False (default), verify the locking PID is no longer
+                running on this host before deleting. If True, delete
+                unconditionally regardless of host or PID.
+
+        Raises:
+            UpdateLockedError: If force=False and the locking process is still
+                alive on this host.
+            FileNotFoundError: If no lock file exists.
+        """
+        import json
+        import os
+
+        lock_path = self._lock_path
+        if not lock_path.exists():
+            raise FileNotFoundError(
+                f"No lock file found for dataset '{self.name}' at {lock_path}"
+            )
+
+        if not force:
+            try:
+                info = json.loads(lock_path.read_text())
+                pid = info.get("pid")
+                host = info.get("hostname", "")
+                import socket
+                if host == socket.gethostname() and pid is not None:
+                    alive = self._pid_is_running(pid)
+                    if alive is True or alive is None:
+                        msg = (
+                            f"Dataset '{self.name}' lock is held by a running process "
+                            f"(PID {pid} on {host}). Use clear_update_lock(force=True) "
+                            "to override."
+                            if alive is True
+                            else (
+                                f"Dataset '{self.name}' lock is held by PID {pid} on "
+                                f"{host} — cannot verify liveness. "
+                                "Use clear_update_lock(force=True) to override."
+                            )
+                        )
+                        raise UpdateLockedError(
+                            msg,
+                            lock_path=str(lock_path),
+                            locked_by_host=host,
+                            locked_by_pid=pid,
+                        )
+            except (json.JSONDecodeError, OSError):
+                pass  # Corrupt lock file — allow clearing
+
+        lock_path.unlink(missing_ok=True)
+        logger.info(f"Cleared update lock for dataset '{self.name}'")
+
     def update(
         self,
         source: DataSource,
@@ -730,6 +1028,23 @@ class DatedParquetDataset(ParquetDataset):
             SnapshotPublishError: If publishing fails.
             ValidationError: If configuration is invalid.
         """
+        # Bucketed datasets do not yet support partial-instrument updates.
+        # Writing a subset of instruments to an existing bucket file would
+        # overwrite all other instruments in that bucket. Until the read-merge
+        # path is implemented, block any update that targets a specific
+        # instrument list on a bucketed dataset that already has a snapshot.
+        # TODO: remove this guard once _BucketedDataSourceWrapper.get_data()
+        # reads and merges existing bucket data before writing.
+        if self.num_instrument_buckets is not None and instruments is not None:
+            raise ValidationError(
+                f"Partial-instrument updates are not yet supported for bucketed "
+                f"datasets (num_instrument_buckets={self.num_instrument_buckets}). "
+                "Writing a subset of instruments would overwrite all other "
+                "instruments already stored in the same bucket files. "
+                "Track progress on this limitation in PLAN.md under "
+                "'Incremental Updates for Bucketed Caches'."
+            )
+
         # Validate backfill/restate constraints
         if backfill and restate:
             raise ValidationError("backfill and restate are mutually exclusive")
@@ -766,6 +1081,39 @@ class DatedParquetDataset(ParquetDataset):
                             f"before cache_start_date ({cache_start})"
                         )
 
+        if self.use_update_lock:
+            self._acquire_lock()
+        try:
+            return self._do_update(
+                source=source,
+                start_date=start_date,
+                end_date=end_date,
+                instruments=instruments,
+                dry_run=dry_run,
+                cleaner=cleaner,
+                backfill=backfill,
+                restate=restate,
+                transforms=transforms,
+                yaml_config=yaml_config,
+            )
+        finally:
+            if self.use_update_lock:
+                self._release_lock()
+
+    def _do_update(
+        self,
+        source: DataSource,
+        start_date: dt.date | str | None = None,
+        end_date: dt.date | str | None = None,
+        instruments: list[str] | None = None,
+        dry_run: bool = False,
+        cleaner: DataCleaner | None = None,
+        backfill: bool = False,
+        restate: bool = False,
+        transforms: dict[str, Any] | None = None,
+        yaml_config: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Inner update implementation (called after lock is acquired)."""
         # Compute update window
         window = compute_update_window(
             self, source, to_date(start_date), to_date(end_date)
@@ -778,19 +1126,36 @@ class DatedParquetDataset(ParquetDataset):
         # Prepare source
         source._do_prepare(update_start, update_end, instruments)
 
+        # Wrap source with bucket grouping if instrument bucketing is active
+        active_source: Any = source
+        if self.instrument_column is not None and self.num_instrument_buckets is not None:
+            active_source = _BucketedDataSourceWrapper(
+                inner=source,
+                instrument_column=self.instrument_column,
+                num_instrument_buckets=self.num_instrument_buckets,
+                sort_cols=self.sort_columns or [self.instrument_column, self.date_col],
+                instrument_bucket_col=INSTRUMENT_BUCKET_COL,
+            )
+
         # Get partitions
-        specs = source.get_partitions()
+        specs = active_source.get_partitions()
         if not specs:
             return None  # No partitions to update
 
-        # Build update plan
-        with tempfile.TemporaryDirectory() as temp_dir:
-            plan = build_update_plan(self, specs, Path(temp_dir))
+        # Build update plan — use a visible temp dir inside the dataset directory
+        # so progress can be monitored. Named with the snapshot suffix so it's
+        # clear which run it belongs to. Cleaned up after publish.
+        plan_suffix = generate_snapshot_suffix()
+        temp_dir = self.dataset_dir / f"_tmp_{plan_suffix}"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            plan = build_update_plan(self, specs, temp_dir, suffix=plan_suffix)
+            # plan.suffix == plan_suffix, so temp dir name matches snapshot suffix
 
             # Execute update
             suffix = execute_update(
                 dataset=self,
-                source=source,
+                source=active_source,
                 plan=plan,
                 cleaner=cleaner,
                 dry_run=dry_run,
@@ -798,5 +1163,122 @@ class DatedParquetDataset(ParquetDataset):
                 transforms=transforms,
                 yaml_config=yaml_config,
             )
+        finally:
+            # Clean up temp dir
+            import shutil
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
-            return suffix
+        return suffix
+
+    def read_data(
+        self,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+        filters: list[tuple[str, Any, Any]] | Any | None = None,
+        columns: list[str] | None = None,
+        snapshot: str | None = None,
+        instruments: str | list[str] | set[str] | None = None,
+    ) -> "pd.DataFrame":
+        """
+        Read data into a pandas DataFrame, with optional instrument filter.
+
+        When ``instruments`` is provided and bucketing is active
+        (``instrument_column`` and ``num_instrument_buckets`` are set),
+        the call is pushed down to the correct ``__instrument_bucket__``
+        partition(s) before row-level filtering.
+
+        Args:
+            start_date: Optional start date for filtering.
+            end_date: Optional end date for filtering.
+            filters: Optional additional filters.
+            columns: Optional list of columns to return.
+            snapshot: Optional snapshot suffix.
+            instruments: One or more instrument values to filter on.
+                Requires ``instrument_column`` and ``num_instrument_buckets``
+                to be set.
+
+        Raises:
+            ValueError: If ``instruments`` is given but bucketing is not active.
+        """
+        combined_filters = self._build_instrument_filters(instruments, filters)
+        return super().read_data(
+            start_date=start_date,
+            end_date=end_date,
+            filters=combined_filters,
+            columns=columns,
+            snapshot=snapshot,
+        )
+
+    def read_data_pl(
+        self,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+        filters: list[tuple[str, Any, Any]] | Any | None = None,
+        columns: list[str] | None = None,
+        snapshot: str | None = None,
+        instruments: str | list[str] | set[str] | None = None,
+    ) -> "pl.DataFrame":
+        """
+        Read data into a Polars DataFrame, with optional instrument filter.
+
+        See :meth:`read_data` for parameter documentation.
+        """
+        combined_filters = self._build_instrument_filters(instruments, filters)
+        return super().read_data_pl(
+            start_date=start_date,
+            end_date=end_date,
+            filters=combined_filters,
+            columns=columns,
+            snapshot=snapshot,
+        )
+
+    def _build_instrument_filters(
+        self,
+        instruments: "str | list[str] | set[str] | None",
+        existing_filters: "list[tuple] | Any | None",
+    ) -> "list[tuple] | Any | None":
+        """
+        Build combined filters incorporating instrument bucket and row filters.
+
+        Returns the original ``existing_filters`` unchanged if ``instruments``
+        is None.  Raises ``ValueError`` if ``instruments`` is given but
+        bucketing is not configured.
+        """
+        import pyarrow.dataset as pds
+
+        if instruments is None:
+            return existing_filters
+
+        if self.instrument_column is None or self.num_instrument_buckets is None:
+            raise ValueError(
+                "instruments filter requires instrument_column and "
+                "num_instrument_buckets to be set on this dataset"
+            )
+
+        # Normalise to a sorted list
+        if isinstance(instruments, str):
+            instruments_set: set[str] = {instruments}
+        else:
+            instruments_set = set(instruments)
+
+        # Compute which buckets contain these instruments
+        bucket_strs = {
+            instrument_bucket(t, self.num_instrument_buckets)
+            for t in instruments_set
+        }
+
+        new_filters: list[tuple] = [
+            (INSTRUMENT_BUCKET_COL, "in", sorted(bucket_strs)),
+            (self.instrument_column, "in", sorted(instruments_set)),
+        ]
+
+        if existing_filters is None:
+            return new_filters
+        if isinstance(existing_filters, pds.Expression):
+            # Combine as Expression: bucket filter AND row filter AND existing
+            bucket_expr = pds.field(INSTRUMENT_BUCKET_COL).isin(sorted(bucket_strs))
+            row_expr = pds.field(self.instrument_column).isin(sorted(instruments_set))
+            return bucket_expr & row_expr & existing_filters
+        # Assume it's a list of tuples
+        return new_filters + list(existing_filters)

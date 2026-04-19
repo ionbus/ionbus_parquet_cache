@@ -137,3 +137,29 @@ class ConfigurationError(ParquetCacheError):
     def __init__(self, message: str, config_file: str | None = None):
         super().__init__(message)
         self.config_file = config_file
+
+
+class UpdateLockedError(ParquetCacheError):
+    """
+    Raised when an update is attempted on a locked dataset.
+
+    Attributes:
+        lock_path: Path to the lock file.
+        locked_by_host: Hostname that acquired the lock.
+        locked_by_pid: PID of the locking process.
+        lock_age_seconds: Age of the lock in seconds.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        lock_path: str | None = None,
+        locked_by_host: str | None = None,
+        locked_by_pid: int | None = None,
+        lock_age_seconds: float | None = None,
+    ):
+        super().__init__(message)
+        self.lock_path = lock_path
+        self.locked_by_host = locked_by_host
+        self.locked_by_pid = locked_by_pid
+        self.lock_age_seconds = lock_age_seconds

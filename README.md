@@ -520,7 +520,8 @@ datasets:
 | `partition_columns` | `list[str]` | `[]` | Columns to partition by (in directory order) |
 | `sort_columns` | `list[str]` | `[date_col]` | Sort order within partition files; defaults to `[date_col]` if not provided |
 | `repull_n_days` | `int` | `0` | Re-fetch this many recent business days on each update |
-| `instrument_column` | `str` | `None` | Column name for instrument filtering (e.g., `"Symbol"`) |
+| `instrument_column` | `str` | `None` | Column name holding instrument identifiers (e.g., `"ticker"`). Required when `num_instrument_buckets` is set. |
+| `num_instrument_buckets` | `int` | `None` | Enable hash bucketing: group tickers into this many bucket directories instead of one directory per ticker. Must be set together with `instrument_column`. |
 | `instruments` | `list[str]` | `None` | List of instruments to filter on (uses `instrument_column`) |
 | `start_date_str` | `str` | `None` | Override start date (debugging only, format: `"YYYY-MM-DD"`) |
 | `end_date_str` | `str` | `None` | Override end date (debugging only, format: `"YYYY-MM-DD"`) |
@@ -566,6 +567,189 @@ datasets:
     cleaning_init_args:
       min_price: 1.0
 ```
+
+## Instrument Hash Bucketing
+
+### What is it and when to use it?
+
+By default, when a DataSource returns one PartitionSpec per ticker per year, the
+cache creates one directory per ticker:
+
+```
+eod_prices/
+    ticker=AAPL/year=Y2024/...
+    ticker=MSFT/year=Y2024/...
+    ...  (32,000 directories)
+```
+
+With 32,000 tickers this creates a filesystem metadata problem — listing or
+opening the dataset directory is slow and inode-hungry.
+
+**Instrument hash bucketing** groups tickers into a fixed number of bucket
+directories.  Each ticker is assigned to a bucket by hashing:
+
+```python
+bucket = zlib.crc32(ticker.encode()) % num_instrument_buckets
+```
+
+The resulting layout is:
+
+```
+eod_prices_bucketed/
+    __instrument_bucket__=0042/year=Y2024/...  # ~125 tickers per bucket
+    __instrument_bucket__=0107/year=Y2024/...
+    ...  (256 directories, not 32,000)
+```
+
+Use bucketing when:
+- Your DataSource returns one spec per ticker (not per ticker-year file)
+- You have hundreds or thousands of instruments
+- Per-ticker directories are causing filesystem performance problems
+
+### Configuration
+
+Set both fields together in YAML:
+
+```yaml
+datasets:
+  eod_prices_bucketed:
+    description: "EOD historical prices, hash-bucketed"
+    date_col: date
+    date_partition: year
+    partition_columns: []      # Do NOT include ticker here
+    sort_columns:
+      - ticker
+      - date
+    instrument_column: ticker  # Column holding the ticker identifier
+    num_instrument_buckets: 256
+
+    source_location: "code/my_source.py"
+    source_class_name: MySource
+```
+
+Or in Python:
+
+```python
+from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
+
+dpd = DatedParquetDataset(
+    cache_dir=Path("/path/to/cache"),
+    name="eod_prices_bucketed",
+    date_col="date",
+    date_partition="year",
+    partition_columns=[],      # Do NOT include ticker here
+    instrument_column="ticker",
+    num_instrument_buckets=256,
+)
+```
+
+**Constraints:**
+- `instrument_column` must NOT appear in `partition_columns` — the library
+  manages it internally via `__instrument_bucket__`
+- `__instrument_bucket__` is a reserved column name; you cannot use it in
+  `partition_columns` or `sort_columns`
+- `num_instrument_buckets` is a breaking change: once a dataset is built with
+  N buckets, re-opening it with a different count raises `ValidationError`
+
+**Your DataSource is completely unaware of bucketing.** It returns one
+PartitionSpec per ticker as normal. The library's internal
+`_BucketedDataSourceWrapper` handles the grouping transparently.
+
+### Reading with an instrument filter
+
+When bucketing is active, use the `instruments` parameter on `read_data()` or
+`read_data_pl()` to push down a filter to the correct bucket partitions:
+
+```python
+# Single ticker
+df = dpd.read_data(instruments="AAPL")
+
+# Multiple tickers (list or set)
+df = dpd.read_data(instruments=["AAPL", "MSFT", "GOOGL"])
+
+# Combined with date range
+df = dpd.read_data(
+    start_date="2023-01-01",
+    end_date="2023-12-31",
+    instruments=["AAPL", "MSFT"],
+)
+
+# Also works with read_data_pl
+df_pl = dpd.read_data_pl(instruments="TSLA")
+```
+
+The `instruments` filter:
+1. Computes which bucket(s) contain the requested tickers (partition pruning)
+2. Applies an exact row-level filter on `instrument_column` within those buckets
+
+Without the `instruments` filter, `read_data()` returns all tickers as normal.
+
+### Incremental updates and bucketed datasets
+
+> **Current limitation:** `update(..., instruments=[...])` raises `ValidationError`
+> on bucketed datasets. Writing only a subset of instruments to a bucket file
+> would silently overwrite the other instruments already stored in that file.
+> Full-universe updates (no `instruments` argument) work correctly. Support for
+> partial-instrument updates requires a read-merge path that is not yet
+> implemented — see PLAN.md for the design.
+
+### DataSource.get_data() returning None
+
+A DataSource's `get_data()` may return `None` to signal that a partition has no
+data.  The pipeline skips that partition — no file is written and no error is
+raised.  This is useful when a DataSource does not have data for every
+combination of (ticker, year) and wants to avoid writing empty files.
+
+This behavior applies both in non-bucketed and bucketed datasets. In bucketed
+mode, if all tickers in a bucket for a given year return `None`, the entire
+bucket-year partition is skipped.
+
+## Update Operations
+
+### Temp directory
+
+During an update, partition files are written to a temporary directory inside
+the dataset directory (`<dataset>/_tmp_<suffix>/`) and moved into place at
+publish time. Keeping the temp directory on the same filesystem as the
+destination means the final "move" is a rename — a directory-entry update with
+no data copied. This makes publish fast regardless of dataset size.
+
+The `_tmp_<suffix>/` directory is visible while the update runs, which lets you
+monitor write progress. It is removed automatically when the update completes
+(success or failure). If you see a stale `_tmp_*/` directory it means a
+previous update was killed before it could clean up — safe to delete manually.
+
+### Update lock
+
+`update()` writes a `<name>_update.lock` file at the start of every run and
+removes it on completion. If a second process tries to update the same dataset
+while a lock exists, it raises `UpdateLockedError` immediately with the locking
+host, PID, age, and instructions for clearing it:
+
+```
+UpdateLockedError: Dataset 'eod_prices_bucketed' is locked for update.
+  Lock file : /path/to/cache/eod_prices_bucketed/eod_prices_bucketed_update.lock
+  Locked by : my-host.local (PID 12345)
+  Started   : 2026-04-19T10:30:00 (2.3 minutes ago)
+
+  To remove the lock and allow new updates:
+    Shell : rm /path/to/.../eod_prices_bucketed_update.lock
+    Python: dpd.clear_update_lock(force=True)
+```
+
+To clear a stale lock (e.g. after a process was killed):
+
+```python
+dpd.clear_update_lock()          # checks PID is dead first (same host only)
+dpd.clear_update_lock(force=True)  # unconditional
+```
+
+**Configuration options:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `lock_dir` | `None` (dataset dir) | Override lock file location. Useful when the dataset directory is read-only or GCS-backed — point to a local or writable path instead. Lock filename is `<name>_update.lock` within this directory. |
+| `use_update_lock` | `True` | Set to `False` to disable locking entirely. Appropriate when single-writer is guaranteed by convention (e.g. a scheduled Cloud job with no concurrency). |
 
 ## CLI Tools
 

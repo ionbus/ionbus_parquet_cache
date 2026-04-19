@@ -45,6 +45,7 @@ class DatasetConfig:
     repull_n_days: int = 0
     instrument_column: str | None = None
     instruments: list[str] | None = None
+    num_instrument_buckets: int | None = None
 
     # Data source settings
     source_location: str = ""
@@ -83,6 +84,7 @@ class DatasetConfig:
             repull_n_days=self.repull_n_days,
             instrument_column=self.instrument_column,
             instruments=self.instruments,
+            num_instrument_buckets=self.num_instrument_buckets,
         )
 
     def to_yaml_config(self) -> dict[str, Any]:
@@ -107,6 +109,7 @@ class DatasetConfig:
             "repull_n_days": self.repull_n_days,
             "instrument_column": self.instrument_column,
             "instruments": self.instruments,
+            "num_instrument_buckets": self.num_instrument_buckets,
             # Source settings
             "source_location": self.source_location,
             "source_class_name": self.source_class_name,
@@ -283,6 +286,7 @@ def load_yaml_file(yaml_path: Path, cache_dir: Path) -> dict[str, DatasetConfig]
             repull_n_days=settings.get("repull_n_days", 0),
             instrument_column=settings.get("instrument_column"),
             instruments=settings.get("instruments"),
+            num_instrument_buckets=settings.get("num_instrument_buckets"),
             source_location=settings.get("source_location", ""),
             source_class_name=settings.get("source_class_name", ""),
             source_init_args=settings.get("source_init_args", {}),

@@ -77,7 +77,7 @@ These are mandatory behaviors for the initial implementation:
   - **NPDs:** Reads come from the current snapshot file/directory in `non-dated/`, not from scanning data directories.
   - Discovery is by scanning snapshot locations (`_meta_data/` for DPDs, top level of `non-dated/` for NPDs), never data directories.
 - Snapshot publish is atomic: readers either see the old snapshot or the new snapshot, never a partial state.
-- Single-writer: a DPD must only be updated by one process at a time. Concurrent updates to the same DPD are not supported and may corrupt the cache. (We considered explicit lock files but decided against them - a stale lock from a crashed process would cause more operational trouble than the locking prevents. Callers are responsible for ensuring single-writer access, typically via job scheduling.)
+- Single-writer: a DPD must only be updated by one process at a time. Concurrent updates to the same DPD are not supported and may corrupt the cache. `DatedParquetDataset.update()` enforces this with a `<name>_update.lock` file written at the start of every update and removed on completion (success or failure). If a lock already exists, the update raises `UpdateLockedError` with the locking host, PID, age, and instructions for clearing it (`dpd.clear_update_lock(force=True)` or `rm <lock_path>`). The lock file is created atomically (exclusive open) to avoid race conditions. Stale locks from crashed processes can be cleared via `clear_update_lock(force=False)`, which checks whether the locking PID is still alive on the local host before deleting. Lock file location defaults to the dataset directory but can be overridden via `lock_dir` (useful when the dataset directory is read-only or GCS-backed). Locking can be disabled entirely with `use_update_lock=False` for use cases where single-writer is guaranteed by convention (e.g. a scheduled Cloud job).
 - Snapshot ids are monotonic: later updates must produce lexicographically larger suffix ids. (With single-writer, second-granularity timestamps are sufficient. If a new snapshot would have the same timestamp as the current snapshot, the update fails with "snapshot will be duplicated." This is extremely unlikely in practice.)
 - Partition values are virtual: partition columns are injected from snapshot metadata/path and are not required in parquet payload columns.
 - A failed update must not change the current snapshot.
@@ -3694,5 +3694,142 @@ When implementing auto-partitioning, the main additions will be:
    option from disk sync YAML is replaced by `cleanup-cache --keep-days`,
    which creates a new snapshot excluding old files.
 
+---
 
+## Instrument Hash Bucketing
 
+### Overview
+
+When a DataSource returns one PartitionSpec per instrument per date-partition
+(e.g., one spec per ticker per year), the default layout creates one directory
+per instrument. With tens of thousands of instruments this creates filesystem
+metadata pressure. Instrument hash bucketing solves this by grouping instruments
+into a fixed number of bucket directories based on a deterministic hash.
+
+### Reserved constant
+
+```python
+INSTRUMENT_BUCKET_COL = "__instrument_bucket__"
+```
+
+Defined at module level in `dated_dataset.py`. No user field may use this name
+in `partition_columns` or `sort_columns`; doing so raises `ValidationError`.
+
+### New DatedParquetDataset fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `instrument_column` | `str \| None` | `None` | Column name holding the instrument identifier (e.g., `"ticker"`). When used **without** `num_instrument_buckets`, this is just metadata tagging which column contains instrument IDs (existing non-bucketed behavior). |
+| `num_instrument_buckets` | `int \| None` | `None` | Number of hash buckets. Must be set together with `instrument_column` to activate bucketing. |
+
+### Validation rules (enforced in `model_post_init`)
+
+1. `num_instrument_buckets` set without `instrument_column` → `ValidationError`
+2. `instrument_column` in `partition_columns` when `num_instrument_buckets` is set → `ValidationError` (the library manages the column via `__instrument_bucket__`)
+3. `INSTRUMENT_BUCKET_COL` in `partition_columns` → `ValidationError` (reserved)
+4. `INSTRUMENT_BUCKET_COL` in `sort_columns` → `ValidationError` (reserved)
+
+### Bucket hash formula
+
+```python
+import zlib
+bucket_int = zlib.crc32(instrument.encode()) % num_instrument_buckets
+bucket_str = f"{bucket_int:04d}"   # zero-padded to 4 digits
+```
+
+The hash is deterministic and stable across Python versions (zlib.crc32 is
+not subject to Python's hash randomization).
+
+### Partition column injection
+
+When `num_instrument_buckets` is set, `model_post_init` rewrites
+`partition_columns` to:
+
+```python
+[INSTRUMENT_BUCKET_COL] + [other non-date cols] + [date_partition_col]
+```
+
+The `instrument_column` itself is NOT added to `partition_columns`; it remains
+a payload column in the parquet files.
+
+The default `sort_columns` changes from `[date_col]` to
+`[instrument_column, date_col]`.
+
+### Directory layout example
+
+```
+eod_prices_bucketed/
+    __instrument_bucket__=0042/
+        year=Y2024/
+            eod_prices_bucketed_0042_Y2024_1wXyZa.parquet   # ~125 tickers
+    __instrument_bucket__=0107/
+        year=Y2024/
+            eod_prices_bucketed_0107_Y2024_1wXyZa.parquet
+    ...
+```
+
+### _BucketedDataSourceWrapper
+
+`_BucketedDataSourceWrapper` is a private class in `dated_dataset.py` that
+duck-types the DataSource interface needed by `execute_update()`. It is
+injected in `DatedParquetDataset.update()` transparently — the user-supplied
+DataSource is completely unaware.
+
+Behavior:
+- `get_partitions()`: calls `inner.get_partitions()`, groups the resulting
+  specs by `(bucket_str, other_partition_values)`, and returns one
+  `PartitionSpec` per bucket-group with `INSTRUMENT_BUCKET_COL` in
+  `partition_values`. The date range of each bucket spec is
+  `[min(inner_start), max(inner_end)]` across all grouped specs.
+- `get_data(spec)`: looks up the inner specs for this bucket-group, calls
+  `inner.get_data()` for each, concatenates non-None results, and sorts by
+  `sort_cols`. Returns `None` if all inner calls returned `None`.
+- `prepared = True` always (the inner source was already prepared).
+
+### DataSource.get_data() returning None
+
+Spec: when `get_data()` returns `None`, the pipeline skips that partition. No
+parquet file is written and no error is raised. This applies in both bucketed
+and non-bucketed modes.
+
+In bucketed mode: if ALL inner `get_data()` calls for a bucket-group return
+`None`, the bucket-level `get_data()` also returns `None` and the partition is
+skipped.
+
+### Breaking change detection
+
+`_publish_snapshot()` stores `num_instrument_buckets` in `yaml_config`. On
+`_load_metadata()`, if both the stored value and the current instance value are
+non-None and they differ, a `ValidationError` is raised:
+
+```
+num_instrument_buckets mismatch: cache was built with 4
+but current config has 8. Changing num_instrument_buckets requires a full rebuild.
+```
+
+### Partial-instrument update guard
+
+`update(..., instruments=[...])` raises `ValidationError` when
+`num_instrument_buckets` is set. Writing only a subset of instruments to an
+existing bucket file would overwrite all other instruments in that file. Until
+the read-merge path is implemented in `_BucketedDataSourceWrapper.get_data()`,
+this combination is explicitly blocked. Full-universe updates (no `instruments`
+argument) are unaffected.
+
+### `instruments` parameter on `read_data()` / `read_data_pl()`
+
+Both methods accept:
+
+```python
+instruments: str | list[str] | set[str] | None = None
+```
+
+When `instruments` is provided:
+
+1. If `instrument_column` and `num_instrument_buckets` are not set → `ValueError`
+2. Compute bucket strings for the requested instruments
+3. Build two filters:
+   - `(INSTRUMENT_BUCKET_COL, "in", sorted_bucket_strs)` — partition pruning
+   - `(instrument_column, "in", sorted_instruments)` — row-level filter
+4. Merge with any user-supplied `filters`
+5. Delegate to `super().read_data()` (or `read_data_pl()`) with combined filters
