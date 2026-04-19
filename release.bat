@@ -6,7 +6,6 @@ set "RUN_ENV=%USERPROFILE%\bin\python_env_management\run_env.bat"
 set "MODE=%~1"
 if "%MODE%"=="" set "MODE=all"
 set "TAG_FLAG=%~2"
-set "CONDA_BLD_DIR=%CD%\conda-bld"
 
 if not exist "%RUN_ENV%" (
     echo ERROR: could not find run_env.bat at %RUN_ENV%
@@ -14,6 +13,7 @@ if not exist "%RUN_ENV%" (
 )
 
 cd /d "%~dp0"
+set "CONDA_BLD_DIR=%~dp0..\ionbus_parquet_cache_conda-bld"
 
 if not "%TAG_FLAG%"=="" if /I not "%TAG_FLAG%"=="--tag" goto usage
 if /I "%MODE%"=="build" goto build

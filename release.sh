@@ -12,7 +12,7 @@ if [[ ! -x "$RUN_ENV" ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONDA_BLD_DIR="$ROOT_DIR/conda-bld"
+CONDA_BLD_DIR="$(dirname "$ROOT_DIR")/$(basename "$ROOT_DIR")_conda-bld"
 cd "$ROOT_DIR"
 
 case "$MODE" in
