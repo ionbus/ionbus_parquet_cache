@@ -4,8 +4,28 @@ set -euo pipefail
 ENV_NAME="pixi_313_pd22"
 RUN_ENV="${HOME}/bin/python_env_management/run_env.sh"
 MODE="${1:-all}"
-TAG_FLAG="${2:-}"
+TAG_FLAG=""
+ANY_BRANCH=""
 CREATED_TAG=""
+
+for arg in "${@:2}"; do
+  case "$arg" in
+    --tag)        TAG_FLAG="--tag" ;;
+    --any-branch) ANY_BRANCH="--any-branch" ;;
+    *)
+      echo "Usage: $0 [all|build|send|build-pip|build-conda|send-pip|send-conda] [--tag] [--any-branch]"
+      echo "  build: build pip and conda artifacts locally"
+      echo "  send: upload pip and conda artifacts"
+      echo "  build-pip: build pip artifacts only"
+      echo "  build-conda: build conda artifacts only"
+      echo "  send-pip: upload pip artifacts only"
+      echo "  send-conda: upload conda artifacts only"
+      echo "  --tag: create and verify a new local git tag before running"
+      echo "  --any-branch: skip the main-branch check"
+      exit 2
+      ;;
+  esac
+done
 
 if [[ ! -x "$RUN_ENV" ]]; then
   echo "ERROR: could not find run_env.sh at $RUN_ENV"
@@ -20,7 +40,7 @@ case "$MODE" in
   all|build|send|build-pip|build-conda|send-pip|send-conda)
     ;;
   *)
-    echo "Usage: $0 [all|build|send|build-pip|build-conda|send-pip|send-conda] [--tag]"
+    echo "Usage: $0 [all|build|send|build-pip|build-conda|send-pip|send-conda] [--tag] [--any-branch]"
     echo "  build: build pip and conda artifacts locally"
     echo "  send: upload pip and conda artifacts"
     echo "  build-pip: build pip artifacts only"
@@ -28,21 +48,19 @@ case "$MODE" in
     echo "  send-pip: upload pip artifacts only"
     echo "  send-conda: upload conda artifacts only"
     echo "  --tag: create and verify a new local git tag before running"
+    echo "  --any-branch: skip the main-branch check"
     exit 2
     ;;
 esac
 
-if [[ -n "$TAG_FLAG" && "$TAG_FLAG" != "--tag" ]]; then
-  echo "Usage: $0 [all|build|send|build-pip|build-conda|send-pip|send-conda] [--tag]"
-  echo "  build: build pip and conda artifacts locally"
-  echo "  send: upload pip and conda artifacts"
-  echo "  build-pip: build pip artifacts only"
-  echo "  build-conda: build conda artifacts only"
-  echo "  send-pip: upload pip artifacts only"
-  echo "  send-conda: upload conda artifacts only"
-  echo "  --tag: create and verify a new local git tag before running"
-  exit 2
-fi
+verify_main_branch() {
+  local branch
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ "$branch" != "main" ]]; then
+    echo "ERROR: not on main branch (currently on '$branch'). Use --any-branch to override."
+    exit 1
+  fi
+}
 
 verify_head_tag() {
   local expected_tag="${1:-}"
@@ -239,6 +257,10 @@ maybe_tag_release() {
     echo "Created local tag: $CREATED_TAG"
   fi
 }
+
+if [[ -z "$ANY_BRANCH" ]]; then
+  verify_main_branch
+fi
 
 maybe_tag_release
 
