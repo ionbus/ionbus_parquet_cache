@@ -19,6 +19,7 @@ cd /path/to/ionbus_parquet_cache
 
 This will:
 
+- verify you are on the `main` branch
 - create the next local tag
 - verify the tag is on `HEAD`
 - build the pip artifacts
@@ -27,6 +28,14 @@ This will:
 - upload to `ionbus` on Anaconda.org
 
 If everything succeeds, push the branch and the new git tag manually when you are ready.
+
+> **Note:** The script refuses to run on any branch other than `main`. If you
+> intentionally need to release from another branch (e.g. a hotfix branch),
+> add the `--any-branch` flag:
+>
+> ```bash
+> ./release.sh all --tag --any-branch
+> ```
 
 ## Release environment
 
@@ -73,7 +82,10 @@ Single-target modes:
 - `./release.sh send-pip` uploads only the pip artifacts
 - `./release.sh send-conda` uploads only the conda artifacts
 
-Any of the build modes can also be run with `--tag` to create the next local tag first.
+Any of the build modes can also be combined with `--tag` and/or `--any-branch`:
+
+- `--tag` creates the next local tag before building
+- `--any-branch` skips the `main`-branch check (use sparingly)
 
 ## Build only
 
@@ -146,12 +158,13 @@ You can also upload the conda artifact directly with:
 
 ## Recommended release flow
 
-1. Commit your changes, using `#bugfix` while packaging issues are still being worked out.
-2. Make sure PyPI credentials are configured and Anaconda.org login is active.
-3. Run:
+1. Make sure you are on the `main` branch (`git checkout main && git pull`).
+2. Commit your changes, using `#bugfix` while packaging issues are still being worked out.
+3. Make sure PyPI credentials are configured and Anaconda.org login is active.
+4. Run:
 
 ```bash
 cd /path/to/ionbus_parquet_cache
 ./release.sh all --tag
 ```
-4. If everything succeeds, push the branch and the new git tag manually when you are ready.
+5. If everything succeeds, push the branch and the new git tag manually when you are ready.

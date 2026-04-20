@@ -5,8 +5,23 @@ set "ENV_NAME=pixi_313_pd22"
 set "RUN_ENV=%USERPROFILE%\bin\python_env_management\run_env.bat"
 set "MODE=%~1"
 if "%MODE%"=="" set "MODE=all"
-set "TAG_FLAG=%~2"
+set "TAG_FLAG="
+set "ANY_BRANCH="
 set "CREATED_TAG="
+
+set "ARG2=%~2"
+set "ARG3=%~3"
+if /I "%ARG2%"=="--tag"        set "TAG_FLAG=--tag"
+if /I "%ARG2%"=="--any-branch" set "ANY_BRANCH=--any-branch"
+if /I "%ARG3%"=="--tag"        set "TAG_FLAG=--tag"
+if /I "%ARG3%"=="--any-branch" set "ANY_BRANCH=--any-branch"
+
+if not "%ARG2%"=="" (
+    if /I not "%ARG2%"=="--tag" if /I not "%ARG2%"=="--any-branch" goto usage
+)
+if not "%ARG3%"=="" (
+    if /I not "%ARG3%"=="--tag" if /I not "%ARG3%"=="--any-branch" goto usage
+)
 
 if not exist "%RUN_ENV%" (
     echo ERROR: could not find run_env.bat at %RUN_ENV%
@@ -16,7 +31,6 @@ if not exist "%RUN_ENV%" (
 cd /d "%~dp0"
 set "CONDA_BLD_DIR=%~dp0..\ionbus_parquet_cache_conda-bld"
 
-if not "%TAG_FLAG%"=="" if /I not "%TAG_FLAG%"=="--tag" goto usage
 if /I "%MODE%"=="build" goto build
 if /I "%MODE%"=="send" goto send
 if /I "%MODE%"=="all" goto all
@@ -25,7 +39,7 @@ if /I "%MODE%"=="build-conda" goto build_conda
 if /I "%MODE%"=="send-pip" goto send_pip
 if /I "%MODE%"=="send-conda" goto send_conda
 :usage
-echo Usage: %~nx0 [all^|build^|send^|build-pip^|build-conda^|send-pip^|send-conda] [--tag]
+echo Usage: %~nx0 [all^|build^|send^|build-pip^|build-conda^|send-pip^|send-conda] [--tag] [--any-branch]
 echo   build: build pip and conda artifacts locally
 echo   send: upload pip and conda artifacts
 echo   build-pip: build pip artifacts only
@@ -33,7 +47,17 @@ echo   build-conda: build conda artifacts only
 echo   send-pip: upload pip artifacts only
 echo   send-conda: upload conda artifacts only
 echo   --tag: create and verify a new local git tag before running
+echo   --any-branch: skip the main-branch check
 exit /b 2
+
+:verify_main_branch
+set "CURRENT_BRANCH="
+for /f "usebackq delims=" %%I in (`git rev-parse --abbrev-ref HEAD 2^>nul`) do set "CURRENT_BRANCH=%%I"
+if /I not "%CURRENT_BRANCH%"=="main" (
+    echo ERROR: not on main branch (currently on '%CURRENT_BRANCH%'^). Use --any-branch to override.
+    exit /b 1
+)
+exit /b 0
 
 :get_tag
 set "GIT_DESCRIBE_TAG="
@@ -244,42 +268,56 @@ call :send_conda_release
 exit /b %errorlevel%
 
 :build
+if not defined ANY_BRANCH call :verify_main_branch
+if errorlevel 1 exit /b 1
 call :maybe_tag
 if errorlevel 1 exit /b 1
 call :build_release
 exit /b %errorlevel%
 
 :build_pip
+if not defined ANY_BRANCH call :verify_main_branch
+if errorlevel 1 exit /b 1
 call :maybe_tag
 if errorlevel 1 exit /b 1
 call :build_pip_release
 exit /b %errorlevel%
 
 :build_conda
+if not defined ANY_BRANCH call :verify_main_branch
+if errorlevel 1 exit /b 1
 call :maybe_tag
 if errorlevel 1 exit /b 1
 call :build_conda_release
 exit /b %errorlevel%
 
 :send
+if not defined ANY_BRANCH call :verify_main_branch
+if errorlevel 1 exit /b 1
 call :maybe_tag
 if errorlevel 1 exit /b 1
 call :send_release
 exit /b %errorlevel%
 
 :send_pip
+if not defined ANY_BRANCH call :verify_main_branch
+if errorlevel 1 exit /b 1
 call :maybe_tag
 if errorlevel 1 exit /b 1
 call :send_pip_release
 exit /b %errorlevel%
 
 :send_conda
+if not defined ANY_BRANCH call :verify_main_branch
+if errorlevel 1 exit /b 1
 call :maybe_tag
 if errorlevel 1 exit /b 1
 call :send_conda_release
 exit /b %errorlevel%
 
 :all
+if not defined ANY_BRANCH call :verify_main_branch
+if errorlevel 1 exit /b 1
 call :maybe_tag
 if errorlevel 1 exit /b 1
 call :build_release
