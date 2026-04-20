@@ -6,14 +6,16 @@ Both the internal _BucketedDataSourceWrapper and user-written DataSources
 should import from here rather than reimplementing the hash.
 
 Hash function: zlib.crc32(instrument.encode()) % num_buckets
-Bucket strings: zero-padded to 4 digits (e.g. "0042") for consistent
-lexicographic ordering in directory names.
+Bucket strings: 2-character base-62 (e.g. "0g") for consistent
+lexicographic ordering in directory names. Supports up to 3844 buckets.
 """
 
 from __future__ import annotations
 
 import zlib
 from collections import defaultdict
+
+from ionbus_utils.base_utils import int_to_base
 
 
 def instrument_bucket(instrument: str, num_buckets: int) -> str:
@@ -22,16 +24,17 @@ def instrument_bucket(instrument: str, num_buckets: int) -> str:
 
     Args:
         instrument: Instrument identifier (e.g. "AAPL").
-        num_buckets: Total number of buckets.
+        num_buckets: Total number of buckets (max 3844 for 2-char base-62).
 
     Returns:
-        Zero-padded 4-digit bucket string (e.g. "0042").
+        2-character base-62 bucket string (e.g. "0g").
 
     Example:
         >>> instrument_bucket("AAPL", 256)
-        '0042'
+        '0g'
     """
-    return f"{zlib.crc32(instrument.encode()) % num_buckets:04d}"
+    bucket_num = zlib.crc32(str(instrument).encode()) % num_buckets
+    return int_to_base(bucket_num, 62).zfill(2)
 
 
 def bucket_instruments(
@@ -51,7 +54,7 @@ def bucket_instruments(
 
     Example:
         >>> buckets = bucket_instruments(["AAPL", "MSFT", "GOOG"], num_buckets=256)
-        >>> buckets["0042"]
+        >>> buckets["0g"]
         ['AAPL']
     """
     groups: dict[str, list[str]] = defaultdict(list)
