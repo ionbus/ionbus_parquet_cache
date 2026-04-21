@@ -14,7 +14,11 @@ from typing import Any
 
 import pandas as pd
 
-from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, SnapshotMetadata
+from ionbus_parquet_cache.dated_dataset import (
+    INSTRUMENT_BUCKET_COL,
+    DatedParquetDataset,
+    SnapshotMetadata,
+)
 from ionbus_parquet_cache.exceptions import SnapshotNotFoundError
 from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
 from ionbus_parquet_cache.snapshot import extract_suffix_from_filename
@@ -207,15 +211,20 @@ class CacheRegistry:
         config = metadata.yaml_config
 
         # Create DPD with configuration from metadata
+        partition_columns = [
+            c for c in config.get("partition_columns", [])
+            if c != INSTRUMENT_BUCKET_COL
+        ]
         dpd = DatedParquetDataset(
             cache_dir=cache_path,
             name=name,
             date_col=config.get("date_col", "Date"),
             date_partition=config.get("date_partition", "day"),
-            partition_columns=config.get("partition_columns", []),
+            partition_columns=partition_columns,
             sort_columns=config.get("sort_columns"),
             description=config.get("description", ""),
             instrument_column=config.get("instrument_column"),
+            num_instrument_buckets=config.get("num_instrument_buckets"),
             instruments=config.get("instruments"),
         )
 
@@ -312,6 +321,7 @@ class CacheRegistry:
         columns: list[str] | None = None,
         cache_name: str | None = None,
         snapshot: str | None = None,
+        instruments: Any = None,
     ) -> pd.DataFrame:
         """
         Read data from a dataset.
@@ -346,6 +356,7 @@ class CacheRegistry:
                 filters=filters,
                 columns=columns,
                 snapshot=snapshot,
+                instruments=instruments,
             )
         else:
             return dataset.read_data(
@@ -361,6 +372,7 @@ class CacheRegistry:
         columns: list[str] | None = None,
         cache_name: str | None = None,
         snapshot: str | None = None,
+        instruments: Any = None,
     ) -> Any:
         """
         Read data from a dataset into a Polars DataFrame.
@@ -396,6 +408,7 @@ class CacheRegistry:
                 filters=filters,
                 columns=columns,
                 snapshot=snapshot,
+                instruments=instruments,
             )
         else:
             return dataset.read_data_pl(

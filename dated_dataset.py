@@ -1256,9 +1256,9 @@ class DatedParquetDataset(ParquetDataset):
                 "num_instrument_buckets to be set on this dataset"
             )
 
-        # Normalise to a sorted list
-        if isinstance(instruments, str):
-            instruments_set: set[str] = {instruments}
+        # Normalise to a set — handle single scalar (str, int, etc.) or iterable
+        if isinstance(instruments, (str, int, float)):
+            instruments_set = {instruments}
         else:
             instruments_set = set(instruments)
 
