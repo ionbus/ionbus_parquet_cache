@@ -687,7 +687,6 @@ eod_prices_bucketed/
 ```
 
 Use bucketing when:
-- Your DataSource returns one spec per ticker (not per ticker-year file)
 - You have hundreds or thousands of instruments
 - Per-ticker directories are causing filesystem performance problems
 
@@ -736,9 +735,37 @@ dpd = DatedParquetDataset(
 - `num_instrument_buckets` is a breaking change: once a dataset is built with
   N buckets, re-opening it with a different count raises `ValidationError`
 
-**Your DataSource is completely unaware of bucketing.** It returns one
-PartitionSpec per ticker as normal. The library's internal
-`_BucketedDataSourceWrapper` handles the grouping transparently.
+**Your DataSource subclasses `BucketedDataSource`.** You implement two methods
+and the base class handles all bucketing logic transparently:
+
+```python
+from ionbus_parquet_cache.data_source import BucketedDataSource
+
+class MySource(BucketedDataSource):
+    def get_instruments_for_time_period(
+        self, start_date: dt.date, end_date: dt.date
+    ) -> list:
+        # Return all instruments available for this period.
+        # Called once per date partition (e.g. once per year) and cached.
+        return self._all_instruments
+
+    def get_data_for_bucket(
+        self,
+        instruments: list,
+        start_date: dt.date,
+        end_date: dt.date,
+    ) -> pa.Table | None:
+        # Fetch and return data for this subset of instruments.
+        # Return None if there is no data for this bucket/period.
+        ...
+```
+
+The base class:
+1. Generates `num_buckets × num_date_partitions` specs with zero I/O
+2. On first `get_data()` call for a period, calls `get_instruments_for_time_period()`,
+   hashes the results into buckets, and caches the mapping for that period
+3. Short-circuits empty buckets (returns `None` immediately without calling
+   `get_data_for_bucket()`)
 
 ### Reading with an instrument filter
 
@@ -786,8 +813,8 @@ raised.  This is useful when a DataSource does not have data for every
 combination of (ticker, year) and wants to avoid writing empty files.
 
 This behavior applies both in non-bucketed and bucketed datasets. In bucketed
-mode, if all tickers in a bucket for a given year return `None`, the entire
-bucket-year partition is skipped.
+mode, the base class short-circuits immediately when a bucket has no instruments
+for a period — `get_data_for_bucket()` is never called.
 
 ## Update Operations
 
@@ -968,6 +995,28 @@ python -m ionbus_parquet_cache.sync_cache push /local /remote --delete
 python -m ionbus_parquet_cache.sync_cache pull /remote /local \
     --daemon --update-interval 60
 ```
+
+### rename-cache
+
+Rename a DatedParquetDataset directory in place. This updates the metadata
+files (which store the dataset name internally) and renames the directory — the
+parquet data files themselves are untouched.
+
+```bash
+# Preview what would happen (no changes made)
+python -m ionbus_parquet_cache.rename_cache /path/to/cache old_name new_name --dry-run
+
+# Rename for real
+python -m ionbus_parquet_cache.rename_cache /path/to/cache old_name new_name
+```
+
+**Recovery ordering** (safe at any interruption point):
+1. Write new `<new_name>_<suffix>.pkl.gz` metadata files alongside the old ones
+2. Rename directory `old_name/` → `new_name/`
+3. Delete old `<old_name>_*.pkl.gz` from `new_name/_meta_data/` (cleanup only)
+
+If interrupted at step 1, delete the new metadata files — the old cache is
+untouched. If interrupted at step 2, rename the directory back.
 
 ## Common Patterns
 

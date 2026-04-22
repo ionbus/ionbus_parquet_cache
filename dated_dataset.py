@@ -286,13 +286,13 @@ class DatedParquetDataset(ParquetDataset):
 
         # Validate num_instrument_buckets consistency
         stored_buckets = metadata.yaml_config.get("num_instrument_buckets")
-        if stored_buckets is not None and self.num_instrument_buckets is not None:
-            if stored_buckets != self.num_instrument_buckets:
-                raise ValidationError(
-                    f"num_instrument_buckets mismatch: cache was built with {stored_buckets} "
-                    f"but current config has {self.num_instrument_buckets}. "
-                    "Changing num_instrument_buckets requires a full rebuild."
-                )
+        if stored_buckets != self.num_instrument_buckets:
+            raise ValidationError(
+                f"num_instrument_buckets mismatch: cache was built with "
+                f"{stored_buckets} but current config has "
+                f"{self.num_instrument_buckets}. "
+                "Changing num_instrument_buckets requires a full rebuild."
+            )
 
         return metadata
 

@@ -7,7 +7,11 @@ reimplementing the hash.
 
 Hash function: zlib.crc32(instrument.encode()) % num_buckets
 Bucket strings: 2-character base-62 (e.g. "0g") for consistent
-lexicographic ordering in directory names. Supports up to 3844 buckets.
+lexicographic ordering in directory names. Bucket strings are 2-char base-62
+(e.g. "0g"), which covers up to 3844 buckets before names exceed 2 characters.
+Beyond that the strings grow longer and lose fixed-width lexicographic ordering,
+but since bucket order is irrelevant to correctness, this is harmless in
+practice. Typical values are 20–256; no sane dataset needs anywhere near 3844.
 """
 
 from __future__ import annotations
@@ -27,10 +31,10 @@ def instrument_bucket(instrument: str, num_buckets: int) -> str:
 
     Args:
         instrument: Instrument identifier (e.g. "AAPL").
-        num_buckets: Total number of buckets (max 3844 for 2-char base-62).
+        num_buckets: Total number of buckets.
 
     Returns:
-        2-character base-62 bucket string (e.g. "0g").
+        Base-62 bucket string, zero-padded to at least 2 characters (e.g. "0g").
 
     Example:
         >>> instrument_bucket("AAPL", 256)

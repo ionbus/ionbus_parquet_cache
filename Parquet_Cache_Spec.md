@@ -3470,6 +3470,42 @@ credentials will be read from the environment (`AWS_ACCESS_KEY_ID`,
 - With `--delete`, removes files at destination that aren't in the
   source snapshot (use with caution)
 
+### `rename-cache`
+
+Renames a `DatedParquetDataset` directory in place. The parquet data files
+are untouched; only the `_meta_data/*.pkl.gz` files (which store the dataset
+name internally) and the directory itself are modified.
+
+**Usage:**
+
+```bash
+# Preview (no changes)
+python -m ionbus_parquet_cache.rename_cache /path/to/cache old_name new_name --dry-run
+
+# Rename
+python -m ionbus_parquet_cache.rename_cache /path/to/cache old_name new_name
+```
+
+**Implementation — safe recovery ordering:**
+
+1. **Validate:** `old_dir` exists with `_meta_data/`; `new_dir` does not exist.
+2. **Write new metadata:** For each `<old_name>_<suffix>.pkl.gz`, read it,
+   set `metadata.name = new_name`, write as `<new_name>_<suffix>.pkl.gz`
+   alongside the old file. *Interrupted here → delete the new files; old cache
+   is untouched.*
+3. **Rename directory:** `old_name/` → `new_name/`. *Interrupted here → rename
+   back.*
+4. **Delete old metadata:** Remove `<old_name>_*.pkl.gz` from
+   `new_name/_meta_data/`. *(Cleanup only — rename already committed.)*
+
+Trimmed snapshots (`*_trimmed.pkl.gz`) are left in place without renaming.
+
+**Errors raised:**
+- `FileNotFoundError` — `old_dir` missing, no `_meta_data/`, or no `.pkl.gz`
+  snapshot files found
+- `FileExistsError` — `new_dir` already exists
+- `ValueError` — names are empty or identical
+
 ### `yaml-create-datasets`
 
 Creates or updates datasets based on YAML configuration files. This tool
@@ -3768,23 +3804,52 @@ eod_prices_bucketed/
     ...
 ```
 
-### _BucketedDataSourceWrapper
+### BucketedDataSource
 
-`_BucketedDataSourceWrapper` is a private class in `dated_dataset.py` that
-duck-types the DataSource interface needed by `execute_update()`. It is
-injected in `DatedParquetDataset.update()` transparently — the user-supplied
-DataSource is completely unaware.
+`BucketedDataSource` (in `data_source.py`) is the abstract base class for any
+DataSource targeting a bucketed dataset. Subclasses implement two methods;
+all bucketing machinery lives in the base class.
 
-Behavior:
-- `get_partitions()`: calls `inner.get_partitions()`, groups the resulting
-  specs by `(bucket_str, other_partition_values)`, and returns one
-  `PartitionSpec` per bucket-group with `INSTRUMENT_BUCKET_COL` in
-  `partition_values`. The date range of each bucket spec is
-  `[min(inner_start), max(inner_end)]` across all grouped specs.
-- `get_data(spec)`: looks up the inner specs for this bucket-group, calls
-  `inner.get_data()` for each, concatenates non-None results, and sorts by
-  `sort_cols`. Returns `None` if all inner calls returned `None`.
-- `prepared = True` always (the inner source was already prepared).
+**Interface:**
+
+```python
+class BucketedDataSource(DataSource, ABC):
+    @abstractmethod
+    def get_instruments_for_time_period(
+        self, start_date: dt.date, end_date: dt.date
+    ) -> list: ...
+
+    @abstractmethod
+    def get_data_for_bucket(
+        self,
+        instruments: list,
+        start_date: dt.date,
+        end_date: dt.date,
+    ) -> pa.Table | None: ...
+```
+
+**`get_partitions()` behavior:**
+Generates `num_buckets × num_date_partitions` `PartitionSpec`s with zero I/O.
+Each spec has `INSTRUMENT_BUCKET_COL` and the date partition column in its
+`partition_values`. No instrument enumeration happens here.
+
+**`get_data(spec)` behavior:**
+1. Extracts `bucket_str` and `date_part_val` from `spec.partition_values`
+2. If `date_part_val` not in `_period_bucket_cache`: calls
+   `get_instruments_for_time_period(spec.start_date, spec.end_date)`, hashes
+   results into buckets via `bucket_instruments()`, stores in cache keyed by
+   `date_part_val` (e.g. `"Y2024"`)
+3. Looks up `bucket_instrument_list` from cache; returns `None` immediately if empty
+4. Otherwise calls `get_data_for_bucket(bucket_instrument_list, ...)`
+
+**Cache lifecycle:** `_period_bucket_cache` is cleared in `prepare()`. This
+means instrument lists are re-fetched on each full update run. Within a run,
+each date partition value triggers at most one `get_instruments_for_time_period`
+call.
+
+**Validation:** `DatedParquetDataset._do_update()` raises `ValidationError` if
+`num_instrument_buckets` is set but the provided DataSource is not a
+`BucketedDataSource`.
 
 ### DataSource.get_data() returning None
 
@@ -3792,9 +3857,9 @@ Spec: when `get_data()` returns `None`, the pipeline skips that partition. No
 parquet file is written and no error is raised. This applies in both bucketed
 and non-bucketed modes.
 
-In bucketed mode: if ALL inner `get_data()` calls for a bucket-group return
-`None`, the bucket-level `get_data()` also returns `None` and the partition is
-skipped.
+In bucketed mode: `BucketedDataSource.get_data()` returns `None` immediately
+when a bucket has no instruments for the period. `get_data_for_bucket()` is
+never called for empty buckets.
 
 ### Breaking change detection
 
@@ -3812,7 +3877,6 @@ but current config has 8. Changing num_instrument_buckets requires a full rebuil
 `update(..., instruments=[...])` raises `ValidationError` when
 `num_instrument_buckets` is set. Writing only a subset of instruments to an
 existing bucket file would overwrite all other instruments in that file. Until
-the read-merge path is implemented in `_BucketedDataSourceWrapper.get_data()`,
 this combination is explicitly blocked. Full-universe updates (no `instruments`
 argument) are unaffected.
 

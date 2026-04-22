@@ -413,6 +413,55 @@ class TestFullIntegration:
 
 
 class TestBreakingChangeBuckets:
+    def test_reopen_unbucketed_cache_with_bucketing_raises(
+        self, temp_cache: Path
+    ) -> None:
+        """Opening a non-bucketed cache with num_instrument_buckets set must fail."""
+        from ionbus_parquet_cache.data_source import DataSource
+        from ionbus_parquet_cache.partition import PartitionSpec
+
+        class SimpleDateSource(DataSource):
+            def available_dates(self):
+                return dt.date(2022, 1, 1), dt.date(2022, 12, 31)
+
+            def get_partitions(self):
+                return [PartitionSpec(
+                    partition_values={"year": "Y2022"},
+                    start_date=dt.date(2022, 1, 1),
+                    end_date=dt.date(2022, 12, 31),
+                )]
+
+            def get_data(self, spec):
+                return pa.table({"date": pa.array(
+                    [dt.date(2022, 1, 3)], type=pa.date32()
+                ), "ticker": ["AAPL"], "close": [150.0]})
+
+        dpd_plain = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="unbucketed_then_bucketed",
+            date_col="date",
+            date_partition="year",
+            partition_columns=["ticker"],
+        )
+        source = SimpleDateSource(dpd_plain)
+        dpd_plain.update(
+            source,
+            start_date=dt.date(2022, 1, 1),
+            end_date=dt.date(2022, 12, 31),
+        )
+
+        dpd_bucketed = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="unbucketed_then_bucketed",
+            date_col="date",
+            date_partition="year",
+            partition_columns=[],
+            instrument_column="ticker",
+            num_instrument_buckets=4,
+        )
+        with pytest.raises(ValidationError, match="num_instrument_buckets mismatch"):
+            dpd_bucketed._load_metadata()
+
     def test_reopen_with_different_bucket_count_raises(
         self, temp_cache: Path
     ) -> None:

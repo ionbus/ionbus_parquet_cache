@@ -93,6 +93,9 @@ These modules have no internal dependencies and establish core concepts:
    - Must implement: `available_dates()`, `prepare()`, `get_data()`
    - Default `get_partitions()` handles most cases
    - Class attributes: `chunk_days`, `partition_values`
+   - `BucketedDataSource` - Subclass for instrument-bucketed datasets
+   - Must implement: `get_instruments_for_time_period()`, `get_data_for_bucket()`
+   - Base class owns `get_partitions()` (pure math, no I/O) and `get_data()` (lazy bucket dispatch)
 
 10. **`data_cleaner.py`** - Data transformation interface
    - `DataCleaner` - Abstract class for custom transforms
@@ -124,6 +127,10 @@ These modules have no internal dependencies and establish core concepts:
     - `cleanup_cache_main()` - Analyzes old snapshots
     - `sync_cache_main()` - Push/pull between locations
 
+15. **`rename_cache.py`** - In-place dataset rename
+    - `rename_cache(cache_dir, old_name, new_name, dry_run)` - Renames directory and metadata files
+    - Safe recovery ordering: write new metadata → rename dir → delete old metadata
+
 ## Class Hierarchy
 
 ```
@@ -134,6 +141,8 @@ ParquetDataset (parquet_dataset_base.py)
 DataSource (data_source.py)
     ├── HiveParquetSource (builtin_sources.py)
     ├── DPDSource (builtin_sources.py)
+    ├── BucketedDataSource (data_source.py)  ← for num_instrument_buckets datasets
+    │   └── [User implementations]
     └── [User implementations]
 
 DataCleaner (data_cleaner.py)
