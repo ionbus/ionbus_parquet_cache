@@ -172,36 +172,36 @@ The cache is a directory containing:
         cleaners.py                <- DataCleaner implementations
     non-dated/                     <- NonDatedParquetDataset snapshots
         instrument_master/         <- single-file NPD
-            instrument_master_1Gz4Ab.parquet
-            instrument_master_1Gz5hK.parquet   <- current snapshot
+            instrument_master_1H4DW00.parquet
+            instrument_master_1H4DW01.parquet   <- current snapshot
         calendar_data/             <- hive-partitioned NPD
-            calendar_data_1Gz4Ab/              <- old snapshot (directory)
+            calendar_data_1H4DW00/              <- old snapshot (directory)
                 exchange=NYSE/
                     data.parquet
                 exchange=CME/
                     data.parquet
-            calendar_data_1Gz5hK/              <- current snapshot (directory)
+            calendar_data_1H4DW01/              <- current snapshot (directory)
                 exchange=NYSE/
                     data.parquet
                 exchange=CME/
                     data.parquet
     md.futures_daily/              <- data for md.futures_daily (year-partitioned)
         _meta_data/
-            md.futures_daily_1Gz4Ab.pkl.gz
-            md.futures_daily_1Gz5hK.pkl.gz   <- current snapshot (largest suffix)
+            md.futures_daily_1H4DW00.pkl.gz
+            md.futures_daily_1H4DW01.pkl.gz   <- current snapshot (largest suffix)
         FutureRoot=ES/
-            year=Y2023/FutureRoot=ES_year=Y2023_1Gz4Ab.parquet
-            year=Y2024/FutureRoot=ES_year=Y2024_1Gz4Ab.parquet
+            year=Y2023/FutureRoot=ES_year=Y2023_1H4DW00.parquet
+            year=Y2024/FutureRoot=ES_year=Y2024_1H4DW00.parquet
         FutureRoot=NQ/
-            year=Y2023/FutureRoot=NQ_year=Y2023_1Gz4Ab.parquet
-            year=Y2024/FutureRoot=NQ_year=Y2024_1Gz5hK.parquet   <- updated in second run
+            year=Y2023/FutureRoot=NQ_year=Y2023_1H4DW00.parquet
+            year=Y2024/FutureRoot=NQ_year=Y2024_1H4DW01.parquet   <- updated in second run
     md.minute_bars/                <- data for md.minute_bars (day-partitioned)
         _meta_data/
-            md.minute_bars_1Gz5hK.pkl.gz
+            md.minute_bars_1H4DW01.pkl.gz
         ticker_letter=A/
             2024/                  <- navigation dir
                 02/                <- navigation dir
-                    Date=2024-02-27/ticker_letter=A_Date=2024-02-27_1Gz5hK.parquet
+                    Date=2024-02-27/ticker_letter=A_Date=2024-02-27_1H4DW01.parquet
         ...
 ```
 
@@ -393,7 +393,7 @@ Provides the common interface for reading parquet data with snapshot versioning.
 |---|---|---|
 | `name` | `str` | Unique name for this dataset |
 | `cache_dir` | `Path` | Root directory of the cache |
-| `current_suffix` | `str` | Suffix of the current snapshot (e.g., `"1Gz5hK"`) |
+| `current_suffix` | `str` | Suffix of the current snapshot (e.g., `"1H4DW01"`) |
 | `schema` | `pa.Schema` | PyArrow schema (read from parquet files on demand; may be cached in metadata for DPDs) |
 
 **Key methods (common to all subclasses):**
@@ -527,13 +527,13 @@ snapshots:
 ```
 non-dated/
     instrument_master/                    <- single-file NPD
-        instrument_master_1Gz4Ab.parquet  <- old snapshot
-        instrument_master_1Gz5hK.parquet  <- current snapshot (largest suffix)
+        instrument_master_1H4DW00.parquet  <- old snapshot
+        instrument_master_1H4DW01.parquet  <- current snapshot (largest suffix)
     calendar_data/                        <- hive-partitioned NPD
-        calendar_data_1Gz4Ab/             <- old snapshot (directory)
+        calendar_data_1H4DW00/             <- old snapshot (directory)
             exchange=NYSE/data.parquet
             exchange=CME/data.parquet
-        calendar_data_1Gz5hK/             <- current snapshot (directory)
+        calendar_data_1H4DW01/             <- current snapshot (directory)
             exchange=NYSE/data.parquet
             exchange=CME/data.parquet
 ```
@@ -2932,15 +2932,15 @@ Year-partitioned with a `FutureRoot` partition column (two update runs):
 ```
 /data/parquet_cache/md.futures_daily/
     _meta_data/
-        md.futures_daily_1Gz4Ab.pkl.gz
-        md.futures_daily_1Gz5hK.pkl.gz   <- current snapshot
+        md.futures_daily_1H4DW00.pkl.gz
+        md.futures_daily_1H4DW01.pkl.gz   <- current snapshot
     FutureRoot=ES/
-        year=Y2023/FutureRoot=ES_year=Y2023_1Gz4Ab.parquet
-        year=Y2024/FutureRoot=ES_year=Y2024_1Gz4Ab.parquet
+        year=Y2023/FutureRoot=ES_year=Y2023_1H4DW00.parquet
+        year=Y2024/FutureRoot=ES_year=Y2024_1H4DW00.parquet
     FutureRoot=NQ/
-        year=Y2023/FutureRoot=NQ_year=Y2023_1Gz4Ab.parquet
-        year=Y2024/FutureRoot=NQ_year=Y2024_1Gz4Ab.parquet
-        year=Y2024/FutureRoot=NQ_year=Y2024_1Gz5hK.parquet   <- NQ/Y2024 updated in run 2
+        year=Y2023/FutureRoot=NQ_year=Y2023_1H4DW00.parquet
+        year=Y2024/FutureRoot=NQ_year=Y2024_1H4DW00.parquet
+        year=Y2024/FutureRoot=NQ_year=Y2024_1H4DW01.parquet   <- NQ/Y2024 updated in run 2
 ```
 
 Day-partitioned with `date_col: Date` (date is the only partition):
@@ -2948,14 +2948,14 @@ Day-partitioned with `date_col: Date` (date is the only partition):
 ```
 /data/parquet_cache/ec.daily_prices/
     _meta_data/
-        ec.daily_prices_1Gz4Ab.pkl.gz
-        ec.daily_prices_1Gz5hK.pkl.gz
+        ec.daily_prices_1H4DW00.pkl.gz
+        ec.daily_prices_1H4DW01.pkl.gz
     2024/                                <- navigation dir (year)
         01/                              <- navigation dir (month)
-            Date=2024-01-02/Date=2024-01-02_1Gz4Ab.parquet
-            Date=2024-01-03/Date=2024-01-03_1Gz4Ab.parquet
+            Date=2024-01-02/Date=2024-01-02_1H4DW00.parquet
+            Date=2024-01-03/Date=2024-01-03_1H4DW00.parquet
         02/
-            Date=2024-02-03/Date=2024-02-03_1Gz5hK.parquet   <- new date in run 2
+            Date=2024-02-03/Date=2024-02-03_1H4DW01.parquet   <- new date in run 2
     ...
 ```
 
@@ -2964,14 +2964,14 @@ Month-partitioned with an instrument column:
 ```
 /data/parquet_cache/md.monthly_stats/
     _meta_data/
-        md.monthly_stats_1Gz5hK.pkl.gz
+        md.monthly_stats_1H4DW01.pkl.gz
     instrument=ES/
         2024/                            <- navigation dir (year)
-            month=M2024-01/instrument=ES_month=M2024-01_1Gz5hK.parquet
-            month=M2024-02/instrument=ES_month=M2024-02_1Gz5hK.parquet
+            month=M2024-01/instrument=ES_month=M2024-01_1H4DW01.parquet
+            month=M2024-02/instrument=ES_month=M2024-02_1H4DW01.parquet
     instrument=NQ/
         2024/
-            month=M2024-01/instrument=NQ_month=M2024-01_1Gz5hK.parquet
+            month=M2024-01/instrument=NQ_month=M2024-01_1H4DW01.parquet
     ...
 ```
 
@@ -2980,11 +2980,11 @@ Quarter-partitioned with a `FutureRoot` partition column:
 ```
 /data/parquet_cache/md.futures_quarterly/
     _meta_data/
-        md.futures_quarterly_1Gz5hK.pkl.gz
+        md.futures_quarterly_1H4DW01.pkl.gz
     FutureRoot=ES/
         2024/                            <- navigation dir (year)
-            quarter=Q2024-1/FutureRoot=ES_quarter=Q2024-1_1Gz5hK.parquet
-            quarter=Q2024-2/FutureRoot=ES_quarter=Q2024-2_1Gz5hK.parquet
+            quarter=Q2024-1/FutureRoot=ES_quarter=Q2024-1_1H4DW01.parquet
+            quarter=Q2024-2/FutureRoot=ES_quarter=Q2024-2_1H4DW01.parquet
     ...
 ```
 
@@ -3146,13 +3146,13 @@ cleanup-cache /path/to/cache
 
 # Example output:
 #   md.futures_daily:
-#     1Gz4Ab (2024-01-01)  3 files, 1.2 GB reclaimable
-#     1Gz5hK (2024-01-10)  <- current snapshot
+#     1H4DW00 (2024-01-01)  3 files, 1.2 GB reclaimable
+#     1H4DW01 (2024-01-10)  <- current snapshot
 #   md.minute_bars:
-#     1Gz5hK (2024-01-10)  <- current snapshot (no old snapshots)
+#     1H4DW01 (2024-01-10)  <- current snapshot (no old snapshots)
 #   instrument_master (NPD):
-#     1Gz3Xy (2024-01-01)  50 MB reclaimable
-#     1Gz5hK (2024-01-10)  <- current snapshot
+#     1H4DW00 (2024-01-01)  50 MB reclaimable
+#     1H4DW01 (2024-01-10)  <- current snapshot
 #
 #   Total reclaimable: 1.25 GB
 
@@ -3170,7 +3170,7 @@ cleanup-cache /path/to/cache --dataset md.futures_daily md.minute_bars --older-t
 cleanup-cache /path/to/cache --keep-last 3
 
 # Target a specific snapshot
-cleanup-cache /path/to/cache --dataset md.futures_daily --snapshot 1Gz4Ab
+cleanup-cache /path/to/cache --dataset md.futures_daily --snapshot 1H4DW00
 ```
 
 #### Trimming (Dangerous Operation)
@@ -3222,9 +3222,9 @@ When you run a trim command, the following happens immediately:
    - `cache_start_date` is set to the cutoff date
    - `partition_values` is recomputed from the kept files only
 2. **Old metadata renamed:** Previous snapshot metadata files are renamed
-   with a `_trimmed` suffix (e.g., `md.minute_bars_1Gz5hK_trimmed.pkl.gz`)
+   with a `_trimmed` suffix (e.g., `md.minute_bars_1H4DW01_trimmed.pkl.gz`)
 3. **Data files renamed:** Data files to be deleted are renamed with a
-   `_trimmed` suffix (e.g., `data_1Gz4Ab_trimmed.parquet`)
+   `_trimmed` suffix (e.g., `data_1H4DW00_trimmed.parquet`)
 4. **Two scripts generated:**
    - `_cleanup_{suffix}_delete.sh` (or `.bat`) - removes all `*_trimmed*` files
    - `_cleanup_{suffix}_undo.sh` (or `.bat`) - reverts everything
@@ -3233,13 +3233,13 @@ When you run a trim command, the following happens immediately:
 
 ```
 _meta_data/
-    md.minute_bars_1Gz6Xy.pkl.gz            <- NEW (current snapshot)
-    md.minute_bars_1Gz5hK_trimmed.pkl.gz    <- old snapshot, marked for cleanup
-    md.minute_bars_1Gz4Ab_trimmed.pkl.gz    <- older snapshot, marked for cleanup
+    md.minute_bars_1H4DW02.pkl.gz            <- NEW (current snapshot)
+    md.minute_bars_1H4DW01_trimmed.pkl.gz    <- old snapshot, marked for cleanup
+    md.minute_bars_1H4DW00_trimmed.pkl.gz    <- older snapshot, marked for cleanup
 
 FutureRoot=ES/
-    year=Y2023/data_1Gz5hK_trimmed.parquet  <- data to be deleted
-    year=Y2024/data_1Gz6Xy.parquet          <- kept (in new snapshot)
+    year=Y2023/data_1H4DW01_trimmed.parquet  <- data to be deleted
+    year=Y2024/data_1H4DW02.parquet          <- kept (in new snapshot)
 
 _cleanup_1H4Dw0_delete.sh   <- run to permanently delete trimmed files
 _cleanup_1H4Dw0_undo.sh     <- run to restore pre-trim state

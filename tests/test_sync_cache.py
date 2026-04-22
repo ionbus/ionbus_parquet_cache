@@ -698,7 +698,7 @@ class TestRename:
             "value": range(28),
         })
         table = pa.Table.from_pandas(df)
-        suffix = "1Ccccc"
+        suffix = "1CCC000"
 
         data_dir = source_with_dpd / "other_dataset"
         data_dir.mkdir(parents=True)

@@ -277,12 +277,12 @@ df = registry.read_data("md.futures_daily", start_date="2024-01-01")
 df = registry.read_data(
     "md.futures_daily",
     start_date="2024-01-01",
-    snapshot="1Gz4Ab",  # snapshot suffix
+    snapshot="1H4DW00",  # snapshot suffix
 )
 
 # Also works with read_data_pl and pyarrow_dataset
-df_pl = registry.read_data_pl("md.futures_daily", snapshot="1Gz4Ab")
-dataset = registry.pyarrow_dataset("md.futures_daily", snapshot="1Gz4Ab")
+df_pl = registry.read_data_pl("md.futures_daily", snapshot="1H4DW00")
+dataset = registry.pyarrow_dataset("md.futures_daily", snapshot="1H4DW00")
 ```
 
 ### Reading non-dated (reference) data
@@ -296,7 +296,7 @@ df = npd.read_data()
 df = registry.read_data("ref.instrument_master")
 
 # Read from a specific historical snapshot
-df = registry.read_data("ref.instrument_master", snapshot="1Gz4Ab")
+df = registry.read_data("ref.instrument_master", snapshot="1H4DW00")
 ```
 
 ## Dataset Types
@@ -948,7 +948,7 @@ python -m ionbus_parquet_cache.cleanup_cache /path/to/cache --keep-last 3
 python -m ionbus_parquet_cache.cleanup_cache /path/to/cache --older-than 30
 
 # Target a specific snapshot suffix
-python -m ionbus_parquet_cache.cleanup_cache /path/to/cache --snapshot 1H4Dw0
+python -m ionbus_parquet_cache.cleanup_cache /path/to/cache --snapshot 1H4DW00
 
 # Find orphaned files (not in any snapshot) - generates cleanup script
 python -m ionbus_parquet_cache.cleanup_cache /path/to/cache --find-orphans

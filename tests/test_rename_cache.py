@@ -57,13 +57,13 @@ class TestRenameValidation:
             rename_cache(tmp_path, "old_name", "new_name")
 
     def test_raises_if_new_dir_exists(self, tmp_path):
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         (tmp_path / "new_name").mkdir()
         with pytest.raises(FileExistsError, match="already exists"):
             rename_cache(tmp_path, "old_name", "new_name")
 
     def test_raises_if_same_name(self, tmp_path):
-        _create_fake_dataset(tmp_path, "my_cache", ["abc123"])
+        _create_fake_dataset(tmp_path, "my_cache", ["1H4DW00"])
         with pytest.raises(ValueError, match="same"):
             rename_cache(tmp_path, "my_cache", "my_cache")
 
@@ -84,38 +84,38 @@ class TestRenameValidation:
 
 class TestRenameSuccess:
     def test_directory_renamed(self, tmp_path):
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name")
         assert (tmp_path / "new_name").exists()
         assert not (tmp_path / "old_name").exists()
 
     def test_new_metadata_file_created(self, tmp_path):
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name")
         new_meta_dir = tmp_path / "new_name" / "_meta_data"
-        assert (new_meta_dir / "new_name_abc123.pkl.gz").exists()
+        assert (new_meta_dir / "new_name_1H4DW00.pkl.gz").exists()
 
     def test_old_metadata_file_deleted(self, tmp_path):
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name")
         new_meta_dir = tmp_path / "new_name" / "_meta_data"
-        assert not (new_meta_dir / "old_name_abc123.pkl.gz").exists()
+        assert not (new_meta_dir / "old_name_1H4DW00.pkl.gz").exists()
 
     def test_metadata_name_field_updated(self, tmp_path):
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name")
         from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
-        pkl_path = tmp_path / "new_name" / "_meta_data" / "new_name_abc123.pkl.gz"
+        pkl_path = tmp_path / "new_name" / "_meta_data" / "new_name_1H4DW00.pkl.gz"
         meta = SnapshotMetadata.from_pickle(pkl_path)
         assert meta.name == "new_name"
 
     def test_data_files_preserved(self, tmp_path):
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name")
         assert (tmp_path / "new_name" / "year=Y2024" / "part-0.parquet").exists()
 
     def test_multiple_snapshots(self, tmp_path):
-        suffixes = ["aaa111", "bbb222", "ccc333"]
+        suffixes = ["1AAA000", "1BBB000", "1CCC000"]
         _create_fake_dataset(tmp_path, "old_name", suffixes)
         rename_cache(tmp_path, "old_name", "new_name")
         new_meta_dir = tmp_path / "new_name" / "_meta_data"
@@ -124,7 +124,7 @@ class TestRenameSuccess:
             assert not (new_meta_dir / f"old_name_{s}.pkl.gz").exists()
 
     def test_all_new_metadata_names_updated(self, tmp_path):
-        suffixes = ["aaa111", "bbb222"]
+        suffixes = ["1AAA000", "1BBB000"]
         _create_fake_dataset(tmp_path, "old_name", suffixes)
         rename_cache(tmp_path, "old_name", "new_name")
         from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
@@ -136,37 +136,37 @@ class TestRenameSuccess:
 
 class TestDryRun:
     def test_dry_run_does_not_rename_directory(self, tmp_path):
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name", dry_run=True)
         assert (tmp_path / "old_name").exists()
         assert not (tmp_path / "new_name").exists()
 
     def test_dry_run_does_not_write_new_metadata(self, tmp_path):
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name", dry_run=True)
         meta_dir = tmp_path / "old_name" / "_meta_data"
-        assert not (meta_dir / "new_name_abc123.pkl.gz").exists()
+        assert not (meta_dir / "new_name_1H4DW00.pkl.gz").exists()
 
     def test_dry_run_does_not_delete_old_metadata(self, tmp_path):
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name", dry_run=True)
         meta_dir = tmp_path / "old_name" / "_meta_data"
-        assert (meta_dir / "old_name_abc123.pkl.gz").exists()
+        assert (meta_dir / "old_name_1H4DW00.pkl.gz").exists()
 
 
 class TestTrimmedSnapshotsIgnored:
     def test_trimmed_snapshots_not_renamed(self, tmp_path):
         """Trimmed snapshots should be left in place (not renamed)."""
-        _create_fake_dataset(tmp_path, "old_name", ["abc123"])
+        _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         # Add a trimmed snapshot
         meta_dir = tmp_path / "old_name" / "_meta_data"
-        trimmed_path = meta_dir / "old_name_abc123_trimmed.pkl.gz"
+        trimmed_path = meta_dir / "old_name_1H4DW00_trimmed.pkl.gz"
         trimmed_path.write_bytes(b"trimmed metadata")
 
         rename_cache(tmp_path, "old_name", "new_name")
 
         new_meta_dir = tmp_path / "new_name" / "_meta_data"
         # Trimmed file should still exist under its original name
-        assert (new_meta_dir / "old_name_abc123_trimmed.pkl.gz").exists()
+        assert (new_meta_dir / "old_name_1H4DW00_trimmed.pkl.gz").exists()
         # No new trimmed file should have been created
-        assert not (new_meta_dir / "new_name_abc123_trimmed.pkl.gz").exists()
+        assert not (new_meta_dir / "new_name_1H4DW00_trimmed.pkl.gz").exists()

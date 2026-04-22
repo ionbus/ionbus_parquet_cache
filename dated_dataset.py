@@ -40,6 +40,7 @@ from ionbus_parquet_cache.snapshot import (
     extract_suffix_from_filename,
     generate_snapshot_suffix,
     get_current_suffix,
+    is_valid_suffix,
 )
 from ionbus_parquet_cache.update_pipeline import (
     build_update_plan,
@@ -86,7 +87,7 @@ class SnapshotMetadata:
 
     Attributes:
         name: Dataset name.
-        suffix: Snapshot suffix (base-62 timestamp).
+        suffix: Snapshot suffix (base-36 timestamp).
         schema: PyArrow schema of the data.
         files: List of FileMetadata objects for each parquet file.
         cache_start_date: Earliest date in the cache.
@@ -532,6 +533,11 @@ class DatedParquetDataset(ParquetDataset):
             SnapshotPublishError: If publishing fails.
         """
         if suffix is not None:
+            if not is_valid_suffix(suffix):
+                raise ValueError(
+                    f"Invalid snapshot suffix '{suffix}': must be 7 base-36 "
+                    f"characters (0-9, A-Z)"
+                )
             new_suffix = suffix
         else:
             new_suffix = generate_snapshot_suffix()

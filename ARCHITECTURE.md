@@ -46,7 +46,7 @@ These modules have no internal dependencies and establish core concepts:
    - Understanding these helps interpret error conditions throughout the code
 
 2. **`snapshot.py`** - Snapshot suffix utilities
-   - `generate_snapshot_suffix()` - Creates 6-char base-62 timestamps
+   - `generate_snapshot_suffix()` - Creates 7-char base-36 timestamps
    - `parse_snapshot_suffix()` - Converts suffix back to Unix timestamp
    - `extract_suffix_from_filename()` - Extracts suffix from file names
    - Key insight: Suffixes are lexicographically ordered = chronologically ordered
@@ -200,7 +200,7 @@ update-cache /path/to/cache --dataset my_dataset
 ## Key Concepts
 
 ### Snapshot Suffixes
-- 6-character base-62 string (e.g., `1Gz5hK`)
+- 7-character base-36 string (e.g., `1H4DW00`)
 - Encodes Unix timestamp in seconds
 - Lexicographic order = chronological order
 - Applied to both data files and metadata files
