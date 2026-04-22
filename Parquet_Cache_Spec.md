@@ -3241,8 +3241,8 @@ FutureRoot=ES/
     year=Y2023/data_1H4DW01_trimmed.parquet  <- data to be deleted
     year=Y2024/data_1H4DW02.parquet          <- kept (in new snapshot)
 
-_cleanup_1H4Dw0_delete.sh   <- run to permanently delete trimmed files
-_cleanup_1H4Dw0_undo.sh     <- run to restore pre-trim state
+_cleanup_1H4DW00_delete.sh   <- run to permanently delete trimmed files
+_cleanup_1H4DW00_undo.sh     <- run to restore pre-trim state
 ```
 
 **You MUST run one of the two scripts:**
@@ -3300,7 +3300,7 @@ cleanup-cache /path/to/cache --find-orphans
 #     md.minute_bars/_tmp/chunk_def456_0.parquet  (temp file)
 #     ...
 #
-#   Wrote cleanup script: /path/to/cache/_cleanup_1H4Dw0.sh
+#   Wrote cleanup script: /path/to/cache/_cleanup_1H4DW00.sh
 #   Review the script, then run it to delete files.
 ```
 

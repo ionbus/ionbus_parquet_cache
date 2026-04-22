@@ -129,10 +129,10 @@ class DatedParquetDataset(ParquetDataset):
     Example structure:
         md.futures_daily/
             _meta_data/
-                md.futures_daily_1Gz5hK.pkl.gz  <- current snapshot
+                md.futures_daily_1H4DW01.pkl.gz  <- current snapshot
             FutureRoot=ES/
                 year=Y2024/
-                    FutureRoot=ES_year=Y2024_1Gz5hK.parquet
+                    FutureRoot=ES_year=Y2024_1H4DW01.parquet
 
     Attributes:
         date_col: Name of the date column (default "Date").
