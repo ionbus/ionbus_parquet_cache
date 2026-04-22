@@ -2,8 +2,8 @@
 Instrument hash-bucketing utilities for ionbus_parquet_cache.
 
 These functions are the single source of truth for the bucket hash function.
-Both the internal _BucketedDataSourceWrapper and user-written DataSources
-should import from here rather than reimplementing the hash.
+BucketedDataSource subclasses should import from here rather than
+reimplementing the hash.
 
 Hash function: zlib.crc32(instrument.encode()) % num_buckets
 Bucket strings: 2-character base-62 (e.g. "0g") for consistent
@@ -16,6 +16,9 @@ import zlib
 from collections import defaultdict
 
 from ionbus_utils.base_utils import int_to_base
+
+# Reserved partition column name injected by the library for bucketed datasets.
+INSTRUMENT_BUCKET_COL = "__instrument_bucket__"
 
 
 def instrument_bucket(instrument: str, num_buckets: int) -> str:
@@ -35,6 +38,23 @@ def instrument_bucket(instrument: str, num_buckets: int) -> str:
     """
     bucket_num = zlib.crc32(str(instrument).encode()) % num_buckets
     return int_to_base(bucket_num, 62).zfill(2)
+
+
+def all_bucket_strings(num_buckets: int) -> list[str]:
+    """
+    Return the sorted list of all bucket strings for a given bucket count.
+
+    Args:
+        num_buckets: Total number of buckets.
+
+    Returns:
+        List of 2-character base-62 bucket strings in sorted order.
+
+    Example:
+        >>> all_bucket_strings(3)
+        ['00', '01', '02']
+    """
+    return [int_to_base(i, 62).zfill(2) for i in range(num_buckets)]
 
 
 def bucket_instruments(
