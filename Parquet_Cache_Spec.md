@@ -3769,8 +3769,9 @@ in `partition_columns` or `sort_columns`; doing so raises `ValidationError`.
 
 ```python
 import zlib
+from ionbus_utils.base_utils import int_to_base
 bucket_int = zlib.crc32(instrument.encode()) % num_instrument_buckets
-bucket_str = f"{bucket_int:04d}"   # zero-padded to 4 digits
+bucket_str = int_to_base(bucket_int, 62).zfill(2)  # 2-char base-62, e.g. "1U"
 ```
 
 The hash is deterministic and stable across Python versions (zlib.crc32 is
@@ -3795,12 +3796,12 @@ The default `sort_columns` changes from `[date_col]` to
 
 ```
 eod_prices_bucketed/
-    __instrument_bucket__=0042/
+    __instrument_bucket__=0g/
         year=Y2024/
-            eod_prices_bucketed_0042_Y2024_1wXyZa.parquet   # ~125 tickers
-    __instrument_bucket__=0107/
+            eod_prices_bucketed_0g_Y2024_1wXyZa.parquet   # ~125 tickers
+    __instrument_bucket__=1U/
         year=Y2024/
-            eod_prices_bucketed_0107_Y2024_1wXyZa.parquet
+            eod_prices_bucketed_1U_Y2024_1wXyZa.parquet
     ...
 ```
 
@@ -3864,8 +3865,8 @@ never called for empty buckets.
 ### Breaking change detection
 
 `_publish_snapshot()` stores `num_instrument_buckets` in `yaml_config`. On
-`_load_metadata()`, if both the stored value and the current instance value are
-non-None and they differ, a `ValidationError` is raised:
+`_load_metadata()`, if the stored value and the current instance value differ
+(including `None` vs an integer), a `ValidationError` is raised:
 
 ```
 num_instrument_buckets mismatch: cache was built with 4

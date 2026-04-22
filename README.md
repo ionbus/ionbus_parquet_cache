@@ -681,8 +681,8 @@ The resulting layout is:
 
 ```
 eod_prices_bucketed/
-    __instrument_bucket__=0042/year=Y2024/...  # ~125 tickers per bucket
-    __instrument_bucket__=0107/year=Y2024/...
+    __instrument_bucket__=0g/year=Y2024/...  # ~125 tickers per bucket
+    __instrument_bucket__=1U/year=Y2024/...
     ...  (256 directories, not 32,000)
 ```
 
