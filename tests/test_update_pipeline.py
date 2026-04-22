@@ -164,7 +164,7 @@ class TestBuildUpdatePlan:
 
         plan = build_update_plan(simple_dpd, specs, tmp_path)
 
-        assert len(plan.suffix) == 6  # Base-62 suffix
+        assert len(plan.suffix) == 7  # Base-36 suffix
         assert plan.suffix.isalnum()
 
     def test_groups_specs_by_partition_values(
@@ -492,7 +492,7 @@ class TestDPDUpdate:
         )
 
         assert suffix is not None
-        assert len(suffix) == 6
+        assert len(suffix) == 7
 
         # Should be able to read data
         simple_dpd.refresh()

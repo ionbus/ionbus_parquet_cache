@@ -1,4 +1,4 @@
-"""Tests for snapshot.py - base-62 timestamp utilities."""
+"""Tests for snapshot.py - base-36 timestamp utilities."""
 
 from __future__ import annotations
 
@@ -19,13 +19,17 @@ from ionbus_parquet_cache.snapshot import (
 class TestGenerateSnapshotSuffix:
     """Tests for generate_snapshot_suffix()."""
 
-    def test_generates_6_char_string(self) -> None:
-        """Suffix should always be exactly 6 characters."""
+    def test_generates_7_char_string(self) -> None:
+        """Suffix should always be exactly 7 characters."""
         suffix = generate_snapshot_suffix()
         assert len(suffix) == SUFFIX_LENGTH
 
-    def test_all_chars_are_base62(self) -> None:
-        """All characters should be valid base-62."""
+    def test_all_chars_are_base36_uppercase(self) -> None:
+        """All characters should be digits or A-Z."""
+        suffix = generate_snapshot_suffix()
+        assert all(c in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" for c in suffix)
+
+    def test_is_valid_suffix(self) -> None:
         suffix = generate_snapshot_suffix()
         assert is_valid_suffix(suffix)
 
@@ -34,7 +38,6 @@ class TestGenerateSnapshotSuffix:
         # 2024-01-01 00:00:00 UTC = 1704067200
         suffix = generate_snapshot_suffix(1704067200.0)
         assert len(suffix) == SUFFIX_LENGTH
-        # Should decode back to same value
         assert parse_snapshot_suffix(suffix) == 1704067200
 
     def test_monotonic_ordering(self) -> None:
@@ -51,9 +54,7 @@ class TestGenerateSnapshotSuffix:
         """Current time should produce a valid suffix."""
         suffix = generate_snapshot_suffix()
         assert is_valid_suffix(suffix)
-        # Should be parseable
         parsed = parse_snapshot_suffix(suffix)
-        # Should be close to current time
         assert abs(parsed - int(time.time())) < 2
 
 
@@ -67,91 +68,79 @@ class TestParseSnapshotSuffix:
             parsed = parse_snapshot_suffix(suffix)
             assert parsed == timestamp
 
-    def test_invalid_length_raises(self) -> None:
-        """Non-6-character strings should raise ValueError."""
-        with pytest.raises(ValueError, match="must be exactly 6"):
-            parse_snapshot_suffix("12345")  # Too short
-
-        with pytest.raises(ValueError, match="must be exactly 6"):
-            parse_snapshot_suffix("1234567")  # Too long
-
-    def test_invalid_chars_raises(self) -> None:
-        """Invalid characters should raise ValueError."""
-        with pytest.raises(ValueError, match="must be exactly 6"):
-            parse_snapshot_suffix("12345!")  # Invalid char
+    def test_invalid_raises(self) -> None:
+        """Invalid suffixes should raise ValueError."""
+        with pytest.raises(ValueError):
+            parse_snapshot_suffix("12345")    # 5 chars
+        with pytest.raises(ValueError):
+            parse_snapshot_suffix("12345678") # 8 chars
+        with pytest.raises(ValueError):
+            parse_snapshot_suffix("12345!!")  # invalid char
+        with pytest.raises(ValueError):
+            parse_snapshot_suffix("1Gz5hK")   # 6-char — not valid
+        with pytest.raises(ValueError):
+            parse_snapshot_suffix("aaaaaaa")  # lowercase — not valid
 
 
 class TestExtractSuffixFromFilename:
     """Tests for extract_suffix_from_filename()."""
 
     def test_parquet_file(self) -> None:
-        """Extract from .parquet filename."""
-        assert extract_suffix_from_filename("dataset_1Gz5hK.parquet") == "1Gz5hK"
+        assert extract_suffix_from_filename("dataset_1H4DW00.parquet") == "1H4DW00"
 
     def test_pickle_file(self) -> None:
-        """Extract from .pkl.gz filename."""
-        assert extract_suffix_from_filename("dataset_1Gz5hK.pkl.gz") == "1Gz5hK"
+        assert extract_suffix_from_filename("dataset_1H4DW00.pkl.gz") == "1H4DW00"
 
     def test_directory(self) -> None:
-        """Extract from directory name."""
-        assert extract_suffix_from_filename("dataset_1Gz5hK/") == "1Gz5hK"
+        assert extract_suffix_from_filename("dataset_1H4DW00/") == "1H4DW00"
 
     def test_bare_name(self) -> None:
-        """Extract from name without extension."""
-        assert extract_suffix_from_filename("dataset_1Gz5hK") == "1Gz5hK"
+        assert extract_suffix_from_filename("dataset_1H4DW00") == "1H4DW00"
 
     def test_no_suffix(self) -> None:
-        """Return None when no valid suffix found."""
         assert extract_suffix_from_filename("dataset.parquet") is None
         assert extract_suffix_from_filename("dataset") is None
 
     def test_invalid_suffix(self) -> None:
-        """Return None for invalid suffix patterns."""
         assert extract_suffix_from_filename("dataset_short.parquet") is None
-        assert extract_suffix_from_filename("dataset_toolong1.parquet") is None
+        assert extract_suffix_from_filename("dataset_toolongx1.parquet") is None
+        assert extract_suffix_from_filename("dataset_1Gz5hK.parquet") is None  # 6-char
 
 
 class TestGetCurrentSuffix:
     """Tests for get_current_suffix()."""
 
     def test_empty_list(self) -> None:
-        """Empty list should return None."""
         assert get_current_suffix([]) is None
 
     def test_single_suffix(self) -> None:
-        """Single suffix should be returned."""
-        assert get_current_suffix(["1Gz5hK"]) == "1Gz5hK"
+        assert get_current_suffix(["1H4DW00"]) == "1H4DW00"
 
     def test_multiple_suffixes(self) -> None:
-        """Should return lexicographically largest suffix."""
-        suffixes = ["1Gz3zZ", "1Gz5hK", "1Gz4Ab"]
-        assert get_current_suffix(suffixes) == "1Gz5hK"
+        suffixes = ["1H4DW00", "1H4DW02", "1H4DW01"]
+        assert get_current_suffix(suffixes) == "1H4DW02"
 
     def test_filters_invalid(self) -> None:
-        """Should filter out invalid suffixes."""
-        suffixes = ["1Gz5hK", "short", "1Gz3zZ"]
-        assert get_current_suffix(suffixes) == "1Gz5hK"
+        suffixes = ["1H4DW00", "short", "1H4DW01"]
+        assert get_current_suffix(suffixes) == "1H4DW01"
 
     def test_all_invalid(self) -> None:
-        """Should return None if all suffixes are invalid."""
-        assert get_current_suffix(["short", "toolong1"]) is None
+        assert get_current_suffix(["short", "toolongx1"]) is None
 
 
 class TestIsValidSuffix:
     """Tests for is_valid_suffix()."""
 
-    def test_valid_suffixes(self) -> None:
-        """Valid suffixes should return True."""
-        assert is_valid_suffix("1Gz5hK")
-        assert is_valid_suffix("000000")
-        assert is_valid_suffix("zzzzzz")
-        assert is_valid_suffix("ZZZZZZ")
-        assert is_valid_suffix("abc123")
+    def test_valid(self) -> None:
+        assert is_valid_suffix("1H4DW00")
+        assert is_valid_suffix("0000000")
+        assert is_valid_suffix("ZZZZZZZ")
+        assert is_valid_suffix("ABC1234")
 
     def test_invalid_suffixes(self) -> None:
-        """Invalid suffixes should return False."""
-        assert not is_valid_suffix("12345")  # Too short
-        assert not is_valid_suffix("1234567")  # Too long
-        assert not is_valid_suffix("12345!")  # Invalid char
-        assert not is_valid_suffix("")  # Empty
-        assert not is_valid_suffix("12_456")  # Invalid char
+        assert not is_valid_suffix("12345")    # 5 chars
+        assert not is_valid_suffix("12345678") # 8 chars
+        assert not is_valid_suffix("12345!!")  # invalid char
+        assert not is_valid_suffix("")
+        assert not is_valid_suffix("aaaaaaa")  # lowercase
+        assert not is_valid_suffix("1Gz5hK")   # 6-char base-62 — no longer valid

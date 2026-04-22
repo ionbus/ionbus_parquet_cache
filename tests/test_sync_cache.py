@@ -488,8 +488,8 @@ class TestAllSnapshots:
         )
 
         # Use explicit different suffixes to ensure they're distinct
-        suffix1 = "1Aaaaa"
-        suffix2 = "1Bbbbb"
+        suffix1 = "1AAAAAA"
+        suffix2 = "1BBBBB0"
 
         # Create first snapshot
         df1 = pd.DataFrame({
@@ -572,8 +572,8 @@ class TestAllSnapshots:
         )
 
         # Use explicit different suffixes (lexicographically ordered)
-        suffix1 = "1Aaaaa"  # older
-        suffix2 = "1Bbbbb"  # newer (current)
+        suffix1 = "1AAAAAA"  # older
+        suffix2 = "1BBBBB0"  # newer (current)
 
         df1 = pd.DataFrame({
             "Date": pd.date_range("2024-01-01", "2024-01-15"),

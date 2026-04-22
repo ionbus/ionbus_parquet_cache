@@ -259,7 +259,10 @@ print(f"Files: {summary['file_count']}")
 
 ### Reading from historical snapshots
 
-Every update creates a new snapshot with a unique suffix. You can read from any snapshot.
+Every update creates a new snapshot with a unique suffix (7-character base-36
+encoding of the Unix timestamp, e.g. `1H4DW00`). Suffixes sort lexicographically
+in chronological order and are valid through April 5, 4453 (when 36^7 seconds
+elapses since the Unix epoch). You can read from any snapshot.
 
 **Registry methods supporting `snapshot`:**
 - `read_data(name, ..., snapshot=...)` - returns pandas DataFrame
@@ -681,8 +684,8 @@ The resulting layout is:
 
 ```
 eod_prices_bucketed/
-    __instrument_bucket__=0g/year=Y2024/...  # ~125 tickers per bucket
-    __instrument_bucket__=1U/year=Y2024/...
+    __instrument_bucket__=02K/year=Y2024/...  # ~125 tickers per bucket
+    __instrument_bucket__=073/year=Y2024/...
     ...  (256 directories, not 32,000)
 ```
 
@@ -932,7 +935,7 @@ immediately (marking them for deletion) but requires running the generated scrip
 actually delete them.
 
 Generated scripts use the naming pattern `_cleanup_{suffix}.bat/.sh` where
-`{suffix}` is a 6-character base-62 timestamp (e.g., `_cleanup_1H4Dw0.bat`).
+`{suffix}` is a 7-character base-36 timestamp (e.g., `_cleanup_1H4DW00.bat`).
 
 ```bash
 # List all snapshots and reclaimable space (no action taken)

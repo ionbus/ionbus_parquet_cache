@@ -90,7 +90,7 @@ class TestNonDatedDatasetImport:
 
         suffix = npd.import_snapshot(sample_parquet)
 
-        assert len(suffix) == 6
+        assert len(suffix) == 7
         assert npd.current_suffix == suffix
         assert npd.npd_dir.exists()
 
@@ -106,7 +106,7 @@ class TestNonDatedDatasetImport:
 
         suffix = npd.import_snapshot(sample_hive_dir)
 
-        assert len(suffix) == 6
+        assert len(suffix) == 7
         assert npd.current_suffix == suffix
 
         # Should be able to read data
@@ -312,7 +312,7 @@ class TestSnapshotSuffixCollisionDetection:
         # Should succeed without error
         suffix = npd.import_snapshot(sample_parquet)
         assert suffix is not None
-        assert len(suffix) == 6
+        assert len(suffix) == 7
 
     def test_import_when_new_suffix_greater_no_error(
         self, temp_cache: Path, sample_parquet: Path, tmp_path: Path, sample_df: pd.DataFrame
