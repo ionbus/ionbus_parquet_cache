@@ -46,6 +46,8 @@ class DatasetConfig:
     instrument_column: str | None = None
     instruments: list[str] | None = None
     num_instrument_buckets: int | None = None
+    use_update_lock: bool = True
+    lock_dir: Path | None = None
 
     # Data source settings
     source_location: str = ""
@@ -85,6 +87,8 @@ class DatasetConfig:
             instrument_column=self.instrument_column,
             instruments=self.instruments,
             num_instrument_buckets=self.num_instrument_buckets,
+            use_update_lock=self.use_update_lock,
+            lock_dir=self.lock_dir,
         )
 
     def to_yaml_config(self) -> dict[str, Any]:

@@ -8,6 +8,7 @@ when reading data.
 from __future__ import annotations
 
 import datetime as dt
+import os
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -50,11 +51,29 @@ class CacheRegistry:
     _instance: "CacheRegistry | None" = None
 
     def __init__(self) -> None:
-        """Initialize an empty registry."""
-        self._caches: dict[str, Path] = {}
+        """Initialize an empty registry, then load from IBU_PARQUET_CACHE env var."""
+        self._caches: dict[str, str | Path] = {}
         self._cache_order: list[str] = []
         self._dpd_cache: dict[tuple[str, str], DatedParquetDataset] = {}
         self._npd_cache: dict[tuple[str, str], NonDatedParquetDataset] = {}
+        self._load_from_env()
+
+    def _load_from_env(self) -> None:
+        """
+        Load caches from the IBU_PARQUET_CACHE environment variable.
+
+        Format: name|location,name|location
+        Example: local|/data/cache,prod|gs://my-bucket/cache
+        """
+        env_val = os.environ.get("IBU_PARQUET_CACHE", "").strip()
+        if not env_val:
+            return
+        for entry in env_val.split(","):
+            entry = entry.strip()
+            if not entry or "|" not in entry:
+                continue
+            name, location = entry.split("|", 1)
+            self.add_cache(name.strip(), location.strip())
 
     @classmethod
     def instance(cls, **named_paths: str | Path) -> "CacheRegistry":
@@ -92,17 +111,20 @@ class CacheRegistry:
         Register a cache location.
 
         If already registered, updates the path but preserves order.
+        GCS paths (gs://) are stored as strings; local paths as Path objects.
 
         Args:
             name: Name for this cache location.
-            path: Path to the cache directory.
+            path: Path or gs:// URL to the cache directory.
         """
-        path = Path(path)
+        from ionbus_parquet_cache.gcs_utils import is_gcs_path
+        path_str = str(path)
+        stored: str | Path = path_str.rstrip("/") if is_gcs_path(path_str) else Path(path)
         if name not in self._caches:
             self._cache_order.append(name)
-        self._caches[name] = path
+        self._caches[name] = stored
 
-    def get_cache_path(self, name: str) -> Path | None:
+    def get_cache_path(self, name: str) -> str | Path | None:
         """
         Get the path for a named cache.
 
@@ -114,17 +136,22 @@ class CacheRegistry:
         """
         return self._caches.get(name)
 
-    def discover_dpds(self, cache_path: Path) -> dict[str, Path]:
+    def discover_dpds(self, cache_path: str | Path) -> dict[str, str | Path]:
         """
         Discover DPDs in a cache by scanning for _meta_data directories.
 
         Args:
-            cache_path: Path to the cache.
+            cache_path: Path or gs:// URL to the cache.
 
         Returns:
-            Dict mapping dataset name to data directory path.
+            Dict mapping dataset name to data directory path (str for GCS, Path local).
         """
-        dpds = {}
+        from ionbus_parquet_cache.gcs_utils import is_gcs_path
+        if is_gcs_path(str(cache_path)):
+            return self._discover_dpds_gcs(str(cache_path))
+
+        cache_path = Path(cache_path)
+        dpds: dict[str, str | Path] = {}
         if not cache_path.exists():
             return dpds
 
@@ -136,24 +163,41 @@ class CacheRegistry:
 
         return dpds
 
-    def discover_npds(self, cache_path: Path) -> dict[str, Path]:
+    def _discover_dpds_gcs(self, gcs_root: str) -> dict[str, str]:
+        """Discover DPDs in a GCS cache using efficient two-level listing."""
+        from ionbus_parquet_cache.gcs_utils import gcs_ls
+        result: dict[str, str] = {}
+        for item_url in gcs_ls(gcs_root):
+            name = item_url.rstrip("/").split("/")[-1]
+            if name.startswith(".") or name.startswith("_"):
+                continue
+            dataset_url = item_url.rstrip("/")
+            if gcs_ls(f"{dataset_url}/_meta_data"):
+                result[name] = dataset_url
+        return result
+
+    def discover_npds(self, cache_path: str | Path) -> dict[str, str | Path]:
         """
         Discover NPDs by scanning the non-dated directory.
 
         Args:
-            cache_path: Path to the cache.
+            cache_path: Path or gs:// URL to the cache.
 
         Returns:
-            Dict mapping dataset name to NPD directory path.
+            Dict mapping dataset name to NPD directory path (str for GCS, Path local).
         """
-        npds = {}
+        from ionbus_parquet_cache.gcs_utils import is_gcs_path
+        if is_gcs_path(str(cache_path)):
+            return self._discover_npds_gcs(str(cache_path))
+
+        cache_path = Path(cache_path)
+        npds: dict[str, str | Path] = {}
         non_dated = cache_path / "non-dated"
         if not non_dated.exists():
             return npds
 
         for item in non_dated.iterdir():
             if item.is_dir():
-                # Check for snapshot files/directories inside
                 has_snapshots = any(
                     extract_suffix_from_filename(child.name)
                     for child in item.iterdir()
@@ -162,6 +206,22 @@ class CacheRegistry:
                     npds[item.name] = item
 
         return npds
+
+    def _discover_npds_gcs(self, gcs_root: str) -> dict[str, str]:
+        """Discover NPDs in a GCS cache using efficient two-level listing."""
+        from ionbus_parquet_cache.gcs_utils import gcs_ls
+        result: dict[str, str] = {}
+        non_dated_url = f"{gcs_root}/non-dated"
+        for item_url in gcs_ls(non_dated_url):
+            name = item_url.rstrip("/").split("/")[-1]
+            dataset_url = item_url.rstrip("/")
+            children = gcs_ls(dataset_url)
+            if any(
+                extract_suffix_from_filename(c.rstrip("/").split("/")[-1])
+                for c in children
+            ):
+                result[name] = dataset_url
+        return result
 
     def _get_dpd(self, name: str, cache_name: str) -> DatedParquetDataset | None:
         """
@@ -187,27 +247,44 @@ class CacheRegistry:
             return None
 
         # Load metadata to get configuration
-        data_dir = dpds[name]
-        meta_dir = data_dir / "_meta_data"
+        from ionbus_parquet_cache.gcs_utils import is_gcs_path
+        if is_gcs_path(str(cache_path)):
+            # GCS: stream metadata directly; DPD will discover suffix via GCS
+            data_dir_str = str(dpds[name])
+            meta_prefix = f"{data_dir_str}/_meta_data"
+            from ionbus_parquet_cache.gcs_utils import gcs_ls, gcs_open
+            suffixes_gcs = []
+            for blob_url in gcs_ls(meta_prefix):
+                blob_name = blob_url.rstrip("/").split("/")[-1]
+                if "_trimmed" in blob_name:
+                    continue
+                if blob_name.endswith(".pkl.gz"):
+                    suffix = extract_suffix_from_filename(blob_name)
+                    if suffix:
+                        suffixes_gcs.append((suffix, blob_url))
+            if not suffixes_gcs:
+                return None
+            current_suffix, meta_url = max(suffixes_gcs, key=lambda x: x[0])
+            with gcs_open(meta_url) as f:
+                metadata = pd.read_pickle(f)
+        else:
+            data_dir = dpds[name]
+            meta_dir = data_dir / "_meta_data"  # type: ignore[operator]
 
-        # Find current snapshot (excluding trimmed files)
-        suffixes = []
-        for item in meta_dir.iterdir():
-            if "_trimmed" in item.name:
-                continue
-            if item.name.endswith(".pkl.gz"):
-                suffix = extract_suffix_from_filename(item.name)
-                if suffix:
-                    suffixes.append((suffix, item))
+            suffixes_local = []
+            for item in meta_dir.iterdir():
+                if "_trimmed" in item.name:
+                    continue
+                if item.name.endswith(".pkl.gz"):
+                    suffix = extract_suffix_from_filename(item.name)
+                    if suffix:
+                        suffixes_local.append((suffix, item))
 
-        if not suffixes:
-            return None
+            if not suffixes_local:
+                return None
 
-        # Get most recent
-        current_suffix, meta_path = max(suffixes, key=lambda x: x[0])
-
-        # Load metadata to get configuration
-        metadata = SnapshotMetadata.from_pickle(meta_path)
+            current_suffix, meta_path = max(suffixes_local, key=lambda x: x[0])
+            metadata = SnapshotMetadata.from_pickle(meta_path)
         config = metadata.yaml_config
 
         # Create DPD with configuration from metadata

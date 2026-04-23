@@ -52,9 +52,11 @@ class NonDatedParquetDataset(ParquetDataset):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
-    def npd_dir(self) -> Path:
-        """Return the NPD directory path."""
-        return self.cache_dir / "non-dated" / self.name
+    def npd_dir(self) -> Path | str:
+        """Return the NPD directory path (Path for local, str for GCS)."""
+        if self.is_gcs:
+            return f"{self.cache_dir}/non-dated/{self.name}"
+        return self.cache_dir / "non-dated" / self.name  # type: ignore[operator]
 
     def _discover_current_suffix(self) -> str | None:
         """
@@ -66,11 +68,21 @@ class NonDatedParquetDataset(ParquetDataset):
         Returns:
             The current suffix, or None if no snapshots exist.
         """
-        if not self.npd_dir.exists():
+        if self.is_gcs:
+            from ionbus_parquet_cache.gcs_utils import gcs_ls
+            suffixes = []
+            for item_url in gcs_ls(str(self.npd_dir)):
+                name = item_url.rstrip("/").split("/")[-1]
+                suffix = extract_suffix_from_filename(name)
+                if suffix:
+                    suffixes.append(suffix)
+            return get_current_suffix(suffixes)
+
+        if not self.npd_dir.exists():  # type: ignore[union-attr]
             return None
 
         suffixes = []
-        for item in self.npd_dir.iterdir():
+        for item in self.npd_dir.iterdir():  # type: ignore[union-attr]
             suffix = extract_suffix_from_filename(item.name)
             if suffix:
                 suffixes.append(suffix)
@@ -147,14 +159,43 @@ class NonDatedParquetDataset(ParquetDataset):
         Raises:
             SnapshotNotFoundError: If the snapshot does not exist.
         """
-        # Check for directory first, then file
-        dir_path = self.npd_dir / f"{self.name}_{suffix}"
+        if self.is_gcs:
+            from ionbus_parquet_cache.gcs_utils import (
+                gcs_exists,
+                gcs_join,
+                gcs_pa_filesystem,
+                gcs_strip_prefix,
+            )
+            npd_url = str(self.npd_dir)
+            dir_url = gcs_join(npd_url, f"{self.name}_{suffix}")
+            file_url = gcs_join(npd_url, f"{self.name}_{suffix}.parquet")
+            gcs_fs = gcs_pa_filesystem()
+            if gcs_exists(dir_url):
+                return pds.dataset(
+                    gcs_strip_prefix(dir_url),
+                    format="parquet",
+                    partitioning="hive",
+                    filesystem=gcs_fs,
+                )
+            if gcs_exists(file_url):
+                return pds.dataset(
+                    gcs_strip_prefix(file_url),
+                    format="parquet",
+                    filesystem=gcs_fs,
+                )
+            raise SnapshotNotFoundError(
+                f"Snapshot '{suffix}' not found for NPD '{self.name}'",
+                dataset_name=self.name,
+            )
+
+        # Local path handling
+        dir_path = self.npd_dir / f"{self.name}_{suffix}"  # type: ignore[operator]
         if dir_path.is_dir():
             return pds.dataset(
                 dir_path, format="parquet", partitioning="hive"
             )
 
-        file_path = self.npd_dir / f"{self.name}_{suffix}.parquet"
+        file_path = self.npd_dir / f"{self.name}_{suffix}.parquet"  # type: ignore[operator]
         if file_path.is_file():
             return pds.dataset(file_path, format="parquet")
 

@@ -374,11 +374,11 @@ The `CacheRegistry` lets you search across multiple cache locations in priority 
 ```python
 from ionbus_parquet_cache import CacheRegistry
 
-# Register caches in priority order
+# Register caches in priority order (local paths or GCS URLs)
 registry = CacheRegistry.instance(
-    local="c:/Users/me/cache",      # Checked first (fast SSD)
-    team="n:/team/cache",           # Checked second
-    firm="n:/firm/cache",           # Checked last (authoritative)
+    local="c:/Users/me/cache",          # Checked first (fast SSD)
+    team="n:/team/cache",               # Checked second
+    firm="gs://my-bucket/parquet-cache" # GCS — checked last (authoritative)
 )
 
 # Reads from the first cache containing the dataset
@@ -390,6 +390,38 @@ print(registry.data_summary())
 # Force reading from a specific cache
 df = registry.read_data("md.futures_daily", cache_name="firm")
 ```
+
+### Auto-loading caches from an environment variable
+
+Set `IBU_PARQUET_CACHE` to pre-register caches without any code change. The
+registry reads this variable on first instantiation.
+
+Format: `name|location,name|location`
+
+```bash
+# Local paths
+export IBU_PARQUET_CACHE="local|/data/cache,team|/mnt/team/cache"
+
+# Mix of local and GCS
+export IBU_PARQUET_CACHE="local|/data/cache,prod|gs://my-bucket/parquet-cache"
+```
+
+```python
+# No arguments needed — caches loaded from IBU_PARQUET_CACHE automatically
+registry = CacheRegistry.instance()
+df = registry.read_data("md.futures_daily")
+```
+
+### GCS caches
+
+GCS paths (`gs://bucket/prefix`) are supported anywhere a local path is accepted.
+Install the GCS dependency (only required when a `gs://` path is actually used):
+
+```bash
+pip install gcsfs
+```
+
+Authentication uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) — run `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account key file.
 
 ## Updating Data
 
@@ -970,18 +1002,21 @@ Output includes a generated script path. Review the script, then run it to delet
 
 ### sync-cache
 
-Copy data between cache locations. Currently works with local paths only.
+Copy data between cache locations. Supports local paths and GCS (`gs://`).
 S3 support will be implemented in a future release.
 
 ```bash
-# Push local cache to remote
+# Push local cache to remote (local)
 python -m ionbus_parquet_cache.sync_cache push /local/cache /remote/cache
 
-# Pull from remote to local
-python -m ionbus_parquet_cache.sync_cache pull /remote/cache /local/cache
+# Push local cache to GCS
+python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache
+
+# Pull from GCS to local
+python -m ionbus_parquet_cache.sync_cache pull gs://my-bucket/cache /local/cache
 
 # Sync specific datasets
-python -m ionbus_parquet_cache.sync_cache push /local /remote \
+python -m ionbus_parquet_cache.sync_cache push /local gs://my-bucket/cache \
     --dataset md.futures_daily md.equity_daily
 
 # Copy dataset with a new name
@@ -991,13 +1026,15 @@ python -m ionbus_parquet_cache.sync_cache push /local /remote \
 # Include all historical snapshots (not just current)
 python -m ionbus_parquet_cache.sync_cache push /local /remote --all-snapshots
 
-# Delete files at destination not in source
+# Delete files at destination not in source (local only)
 python -m ionbus_parquet_cache.sync_cache push /local /remote --delete
 
-# Continuous sync (daemon mode)
-python -m ionbus_parquet_cache.sync_cache pull /remote /local \
+# Continuous sync from GCS (daemon mode)
+python -m ionbus_parquet_cache.sync_cache pull gs://my-bucket/cache /local \
     --daemon --update-interval 60
 ```
+
+GCS sync uses size-based change detection. Requires `pip install gcsfs`.
 
 ### rename-cache
 

@@ -101,6 +101,42 @@ def sync_cache_main(args: list[str] | None = None) -> int:
         print("Error: S3 sync is not yet implemented", file=sys.stderr)
         return 1
 
+    # Route GCS operations
+    src_is_gcs = parsed.source.startswith("gs://")
+    dst_is_gcs = parsed.destination.startswith("gs://")
+
+    if src_is_gcs or dst_is_gcs:
+        try:
+            if parsed.command == "push":
+                return _run_sync_push_gcs(
+                    source=parsed.source,
+                    destination=parsed.destination,
+                    dataset_names=parsed.dataset,
+                    dpd_only=parsed.dpd_only,
+                    npd_only=parsed.npd_only,
+                    all_snapshots=parsed.all_snapshots,
+                    dry_run=parsed.dry_run,
+                    verbose=parsed.verbose,
+                    rename_map=rename_map,
+                )
+            else:  # pull
+                return _run_sync_pull_gcs(
+                    source=parsed.source,
+                    destination=parsed.destination,
+                    dataset_names=parsed.dataset,
+                    dpd_only=parsed.dpd_only,
+                    npd_only=parsed.npd_only,
+                    all_snapshots=parsed.all_snapshots,
+                    dry_run=parsed.dry_run,
+                    verbose=parsed.verbose,
+                    daemon=parsed.daemon,
+                    update_interval=parsed.update_interval,
+                    rename_map=rename_map,
+                )
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
     # Run sync
     try:
         if parsed.command == "push":
@@ -430,6 +466,199 @@ def _run_sync_pull(
         if not daemon:
             return result
 
+        if verbose:
+            print(f"Sleeping {update_interval} seconds...")
+        time.sleep(update_interval)
+
+
+def _collect_local_sync_files(
+    source_path: Path,
+    dataset_names: list[str] | None,
+    dpd_only: bool,
+    npd_only: bool,
+    all_snapshots: bool,
+    rename_map: dict[str, str],
+) -> list[tuple[Path, str]]:
+    """
+    Collect (local_file, relative_path_str) pairs from a local source cache.
+    The relative_path_str has rename_map applied and uses forward slashes.
+    """
+    pairs: list[tuple[Path, str]] = []
+
+    if not npd_only:
+        dpd_snapshots = _discover_dpd_snapshots(source_path, dataset_names)
+        for name, snapshots in dpd_snapshots.items():
+            if not snapshots:
+                continue
+            targets = snapshots if all_snapshots else [max(snapshots, key=lambda s: s["suffix"])]
+            for snap in targets:
+                files_to_add = [snap["meta_file"]] + list(snap.get("files", []))
+                for f in files_to_add:
+                    rel = _apply_rename(f.relative_to(source_path), rename_map)
+                    pairs.append((f, str(rel).replace("\\", "/")))
+
+    if not dpd_only:
+        npd_snapshots = _discover_npd_snapshots(source_path, dataset_names)
+        for name, snapshots in npd_snapshots.items():
+            if not snapshots:
+                continue
+            targets = snapshots if all_snapshots else [max(snapshots, key=lambda s: s["suffix"])]
+            for snap in targets:
+                item = snap["path"]
+                rel_base = _apply_rename(item.relative_to(source_path), rename_map)
+                if item.is_file():
+                    pairs.append((item, str(rel_base).replace("\\", "/")))
+                else:
+                    for f in item.rglob("*"):
+                        if f.is_file():
+                            rel = _apply_rename(f.relative_to(source_path), rename_map)
+                            pairs.append((f, str(rel).replace("\\", "/")))
+
+    return pairs
+
+
+def _run_sync_push_gcs(
+    source: str,
+    destination: str,
+    dataset_names: list[str] | None,
+    dpd_only: bool,
+    npd_only: bool,
+    all_snapshots: bool,
+    dry_run: bool,
+    verbose: bool,
+    rename_map: dict[str, str] | None = None,
+) -> int:
+    """Push a local cache to GCS, or sync between two GCS locations."""
+    from ionbus_parquet_cache.gcs_utils import (
+        gcs_find,
+        gcs_join,
+        gcs_download,
+        gcs_upload,
+        is_gcs_path,
+        should_download,
+        should_upload,
+    )
+    from ionbus_utils.file_utils import format_size
+
+    rename_map = rename_map or {}
+    src_is_gcs = is_gcs_path(source)
+    dst_is_gcs = is_gcs_path(destination)
+
+    files_synced = 0
+    files_skipped = 0
+    bytes_synced = 0
+
+    if src_is_gcs and dst_is_gcs:
+        # GCS → GCS: list source blobs and copy via download+upload
+        for blob_url in gcs_find(source):
+            rel = blob_url[len(source):].lstrip("/")
+            if dataset_names and not any(
+                rel.startswith(n + "/") or rel.startswith(n + "_") for n in dataset_names
+            ):
+                continue
+            dest_url = gcs_join(destination, rel)
+            # Size-based comparison
+            from ionbus_parquet_cache.gcs_utils import gcs_size, gcs_exists
+            src_size = gcs_size(blob_url)
+            if gcs_exists(dest_url) and gcs_size(dest_url) == src_size:
+                files_skipped += 1
+                continue
+            if verbose:
+                print(f"  {rel}")
+            if not dry_run:
+                import tempfile, os
+                with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                try:
+                    gcs_download(blob_url, tmp_path)
+                    gcs_upload(tmp_path, dest_url)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+            files_synced += 1
+            bytes_synced += src_size
+
+    elif not src_is_gcs and dst_is_gcs:
+        # Local → GCS
+        source_path = Path(source)
+        if not source_path.exists():
+            print(f"Error: Source not found: {source}", file=sys.stderr)
+            return 1
+
+        pairs = _collect_local_sync_files(
+            source_path, dataset_names, dpd_only, npd_only, all_snapshots, rename_map
+        )
+        for local_file, rel_str in pairs:
+            dest_url = gcs_join(destination, rel_str)
+            if not should_upload(local_file, dest_url):
+                files_skipped += 1
+                continue
+            size = local_file.stat().st_size
+            if verbose:
+                print(f"  {rel_str}")
+            if not dry_run:
+                gcs_upload(local_file, dest_url)
+            files_synced += 1
+            bytes_synced += size
+
+    else:
+        # GCS → local
+        dest_path = Path(destination)
+        for blob_url in gcs_find(source):
+            rel = blob_url[len(source):].lstrip("/")
+            if dataset_names and not any(
+                rel.startswith(n + "/") or rel.startswith(n + "_") for n in dataset_names
+            ):
+                continue
+            local_file = dest_path / rel
+            from ionbus_parquet_cache.gcs_utils import gcs_size
+            if not should_download(blob_url, local_file):
+                files_skipped += 1
+                continue
+            size = gcs_size(blob_url)
+            if verbose:
+                print(f"  {rel}")
+            if not dry_run:
+                gcs_download(blob_url, local_file)
+            files_synced += 1
+            bytes_synced += size
+
+    if dry_run:
+        print(f"Would sync {files_synced} files")
+    else:
+        skip_msg = f", skipped {files_skipped} unchanged" if files_skipped else ""
+        print(f"Synced {files_synced} files ({format_size(bytes_synced)}){skip_msg}")
+
+    return 0
+
+
+def _run_sync_pull_gcs(
+    source: str,
+    destination: str,
+    dataset_names: list[str] | None,
+    dpd_only: bool,
+    npd_only: bool,
+    all_snapshots: bool,
+    dry_run: bool,
+    verbose: bool,
+    daemon: bool,
+    update_interval: int,
+    rename_map: dict[str, str] | None = None,
+) -> int:
+    """Pull from GCS to local (or GCS → GCS), with optional daemon mode."""
+    while True:
+        result = _run_sync_push_gcs(
+            source=source,
+            destination=destination,
+            dataset_names=dataset_names,
+            dpd_only=dpd_only,
+            npd_only=npd_only,
+            all_snapshots=all_snapshots,
+            dry_run=dry_run,
+            verbose=verbose,
+            rename_map=rename_map,
+        )
+        if not daemon:
+            return result
         if verbose:
             print(f"Sleeping {update_interval} seconds...")
         time.sleep(update_interval)
