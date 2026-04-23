@@ -21,7 +21,7 @@ requirements:
   run:
     - python >=3.9,<3.14
     - duckdb >=0.10
-    - ionbus-utils >=0.0.0
+    - ionbus-utils >=1.1.1.1
     - pandas <3.0.0
     - polars
     - pyarrow >=16.0.1

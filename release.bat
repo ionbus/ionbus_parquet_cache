@@ -181,6 +181,7 @@ exit /b 0
 call :cleanup_conda
 call :verify_tag
 if errorlevel 1 exit /b 1
+set "GIT_DESCRIBE_TAG=%GIT_DESCRIBE_TAG%"
 call :get_conda_output
 if errorlevel 1 exit /b 1
 

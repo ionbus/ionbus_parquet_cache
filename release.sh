@@ -169,6 +169,7 @@ build_conda_artifacts() {
 
   cleanup_conda_artifacts
   tag="$(ensure_tag_context)"
+  export GIT_DESCRIBE_TAG="$tag"
 
   conda_build_exe="$(get_conda_build_exe)"
   conda_output_path="$(get_conda_output_path)"
