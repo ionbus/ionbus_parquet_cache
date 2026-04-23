@@ -34,22 +34,23 @@ from ionbus_parquet_cache.exceptions import (
 )
 from ionbus_parquet_cache.partition import (
     DATE_PARTITION_GRANULARITIES,
-    PartitionSpec,
     date_partition_column_name,
 )
 from ionbus_parquet_cache.snapshot import (
     extract_suffix_from_filename,
     generate_snapshot_suffix,
     get_current_suffix,
+    is_valid_suffix,
 )
 from ionbus_parquet_cache.update_pipeline import (
     build_update_plan,
     compute_update_window,
     execute_update,
 )
-from ionbus_parquet_cache.bucketing import instrument_bucket, bucket_instruments
-
-INSTRUMENT_BUCKET_COL = "__instrument_bucket__"
+from ionbus_parquet_cache.bucketing import (
+    INSTRUMENT_BUCKET_COL,
+    instrument_bucket,
+)
 
 
 @dataclass
@@ -86,7 +87,7 @@ class SnapshotMetadata:
 
     Attributes:
         name: Dataset name.
-        suffix: Snapshot suffix (base-62 timestamp).
+        suffix: Snapshot suffix (base-36 timestamp).
         schema: PyArrow schema of the data.
         files: List of FileMetadata objects for each parquet file.
         cache_start_date: Earliest date in the cache.
@@ -116,96 +117,6 @@ class SnapshotMetadata:
         return pd.read_pickle(path)
 
 
-class _BucketedDataSourceWrapper:
-    """
-    Wraps a DataSource to add hash-bucket partitioning transparently.
-
-    The inner DataSource returns ticker-level PartitionSpecs. This wrapper
-    groups them by (bucket, year) and presents bucket-level specs to the
-    pipeline. get_data() fetches all tickers in a bucket for a given year,
-    concatenates, and sorts.
-    """
-
-    def __init__(self, inner, instrument_column, num_instrument_buckets, sort_cols, instrument_bucket_col):
-        self._inner = inner
-        self._instrument_col = instrument_column
-        self._num_buckets = num_instrument_buckets
-        self._sort_cols = sort_cols
-        self._bucket_col = instrument_bucket_col
-        self._bucket_specs: dict[tuple, list] = {}  # (bucket_str, ...) -> [PartitionSpec]
-        self.prepared = True
-
-    def _bucket_for(self, instrument: str) -> str:
-        return instrument_bucket(instrument, self._num_buckets)
-
-    def get_partitions(self) -> list:
-        from collections import defaultdict
-        inner_specs = self._inner.get_partitions()
-
-        groups = defaultdict(list)
-        for spec in inner_specs:
-            instrument_val = spec.partition_values[self._instrument_col]
-            bucket_str = self._bucket_for(instrument_val)
-            # Key: (bucket_str, other partition values as sorted tuple)
-            other_vals = tuple(sorted(
-                (k, v) for k, v in spec.partition_values.items()
-                if k != self._instrument_col
-            ))
-            key = (bucket_str,) + other_vals
-            groups[key].append(spec)
-
-        bucket_specs = []
-        self._bucket_specs = {}
-        for key in sorted(groups):
-            specs = groups[key]
-            bucket_str = key[0]
-            other_vals = dict(key[1:])
-            self._bucket_specs[key] = specs
-            start = min(s.start_date for s in specs)
-            end = max(s.end_date for s in specs)
-            bucket_specs.append(PartitionSpec(
-                partition_values={self._bucket_col: bucket_str, **other_vals},
-                start_date=start,
-                end_date=end,
-            ))
-
-        return bucket_specs
-
-    def get_data(self, spec) -> "pa.Table | None":
-        import pyarrow.compute as pc
-
-        bucket_str = spec.partition_values[self._bucket_col]
-        other_vals = tuple(sorted(
-            (k, v) for k, v in spec.partition_values.items()
-            if k != self._bucket_col
-        ))
-        key = (bucket_str,) + other_vals
-
-        inner_specs = self._bucket_specs.get(key, [])
-        tables = []
-        for inner_spec in inner_specs:
-            table = self._inner.get_data(inner_spec)
-            if table is not None:
-                # Validate instrument_col exists on first non-None result
-                if not tables and self._instrument_col not in table.schema.names:
-                    raise ValidationError(
-                        f"instrument_col '{self._instrument_col}' not found in data. "
-                        f"Available columns: {table.schema.names}"
-                    )
-                tables.append(table)
-
-        if not tables:
-            return None
-
-        combined = pa.concat_tables(tables)
-        # Sort by sort_cols
-        sort_keys = [(col, "ascending") for col in self._sort_cols if col in combined.schema.names]
-        if sort_keys:
-            indices = pc.sort_indices(combined, sort_keys=sort_keys)
-            combined = combined.take(indices)
-
-        return combined
-
 
 class DatedParquetDataset(ParquetDataset):
     """
@@ -218,10 +129,10 @@ class DatedParquetDataset(ParquetDataset):
     Example structure:
         md.futures_daily/
             _meta_data/
-                md.futures_daily_1Gz5hK.pkl.gz  <- current snapshot
+                md.futures_daily_1H4DW01.pkl.gz  <- current snapshot
             FutureRoot=ES/
                 year=Y2024/
-                    FutureRoot=ES_year=Y2024_1Gz5hK.parquet
+                    FutureRoot=ES_year=Y2024_1H4DW01.parquet
 
     Attributes:
         date_col: Name of the date column (default "Date").
@@ -376,13 +287,13 @@ class DatedParquetDataset(ParquetDataset):
 
         # Validate num_instrument_buckets consistency
         stored_buckets = metadata.yaml_config.get("num_instrument_buckets")
-        if stored_buckets is not None and self.num_instrument_buckets is not None:
-            if stored_buckets != self.num_instrument_buckets:
-                raise ValidationError(
-                    f"num_instrument_buckets mismatch: cache was built with {stored_buckets} "
-                    f"but current config has {self.num_instrument_buckets}. "
-                    "Changing num_instrument_buckets requires a full rebuild."
-                )
+        if stored_buckets != self.num_instrument_buckets:
+            raise ValidationError(
+                f"num_instrument_buckets mismatch: cache was built with "
+                f"{stored_buckets} but current config has "
+                f"{self.num_instrument_buckets}. "
+                "Changing num_instrument_buckets requires a full rebuild."
+            )
 
         return metadata
 
@@ -622,6 +533,11 @@ class DatedParquetDataset(ParquetDataset):
             SnapshotPublishError: If publishing fails.
         """
         if suffix is not None:
+            if not is_valid_suffix(suffix):
+                raise ValueError(
+                    f"Invalid snapshot suffix '{suffix}': must be 7 base-36 "
+                    f"characters (0-9, A-Z)"
+                )
             new_suffix = suffix
         else:
             new_suffix = generate_snapshot_suffix()
@@ -1123,22 +1039,22 @@ class DatedParquetDataset(ParquetDataset):
 
         update_start, update_end = window
 
+        # Validate bucketed sources use the correct base class
+        if self.num_instrument_buckets is not None:
+            from ionbus_parquet_cache.data_source import BucketedDataSource
+            if not isinstance(source, BucketedDataSource):
+                raise ValidationError(
+                    f"Dataset '{self.name}' has "
+                    f"num_instrument_buckets={self.num_instrument_buckets} "
+                    "but the provided DataSource is not a BucketedDataSource. "
+                    f"Got: {type(source).__name__}"
+                )
+
         # Prepare source
         source._do_prepare(update_start, update_end, instruments)
 
-        # Wrap source with bucket grouping if instrument bucketing is active
-        active_source: Any = source
-        if self.instrument_column is not None and self.num_instrument_buckets is not None:
-            active_source = _BucketedDataSourceWrapper(
-                inner=source,
-                instrument_column=self.instrument_column,
-                num_instrument_buckets=self.num_instrument_buckets,
-                sort_cols=self.sort_columns or [self.instrument_column, self.date_col],
-                instrument_bucket_col=INSTRUMENT_BUCKET_COL,
-            )
-
         # Get partitions
-        specs = active_source.get_partitions()
+        specs = source.get_partitions()
         if not specs:
             return None  # No partitions to update
 
@@ -1155,7 +1071,7 @@ class DatedParquetDataset(ParquetDataset):
             # Execute update
             suffix = execute_update(
                 dataset=self,
-                source=active_source,
+                source=source,
                 plan=plan,
                 cleaner=cleaner,
                 dry_run=dry_run,
@@ -1256,9 +1172,9 @@ class DatedParquetDataset(ParquetDataset):
                 "num_instrument_buckets to be set on this dataset"
             )
 
-        # Normalise to a sorted list
-        if isinstance(instruments, str):
-            instruments_set: set[str] = {instruments}
+        # Normalise to a set — handle single scalar (str, int, etc.) or iterable
+        if isinstance(instruments, (str, int, float)):
+            instruments_set = {instruments}
         else:
             instruments_set = set(instruments)
 

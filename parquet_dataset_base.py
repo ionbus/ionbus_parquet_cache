@@ -34,7 +34,7 @@ class ParquetDataset(PDYaml, ABC):
         name: Unique name for this dataset (inherited from PDYaml).
         cache_dir: Root directory of the cache.
         current_suffix: Suffix of the currently loaded snapshot
-            (e.g., "1Gz5hK").
+            (e.g., "1H4DW01").
         schema: PyArrow schema of the dataset (lazy-loaded property).
     """
 

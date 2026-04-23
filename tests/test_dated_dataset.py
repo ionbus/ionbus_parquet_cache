@@ -103,7 +103,7 @@ class TestSnapshotMetadata:
 
         files = [
             FileMetadata(
-                path="year=Y2024/test_1Gz5hK.parquet",
+                path="year=Y2024/test_1GZ5HK0.parquet",
                 partition_values={"year": "Y2024"},
                 checksum="abc123",
                 size_bytes=1024,
@@ -112,7 +112,7 @@ class TestSnapshotMetadata:
 
         metadata = SnapshotMetadata(
             name="test",
-            suffix="1Gz5hK",
+            suffix="1GZ5HK0",
             schema=schema,
             files=files,
             yaml_config=yaml_config,
@@ -183,7 +183,7 @@ class TestDatedDatasetWithSnapshot:
         year_dir.mkdir(parents=True)
 
         # Write parquet file
-        file_path = year_dir / "test_dataset_1Gz5hK.parquet"
+        file_path = year_dir / "test_dataset_1GZ5HK0.parquet"
         df.to_parquet(file_path, index=False)
 
         # Create schema
@@ -197,7 +197,7 @@ class TestDatedDatasetWithSnapshot:
 
         # Create FileMetadata for the file
         file_metadata = FileMetadata(
-            path="year=Y2024/test_dataset_1Gz5hK.parquet",
+            path="year=Y2024/test_dataset_1GZ5HK0.parquet",
             partition_values={"year": "Y2024"},
             checksum="dummy_checksum_for_test",
             size_bytes=file_path.stat().st_size,
@@ -218,7 +218,7 @@ class TestDatedDatasetWithSnapshot:
         """Should discover the published snapshot."""
         suffix = dpd_with_data._discover_current_suffix()
         assert suffix is not None
-        assert len(suffix) == 6
+        assert len(suffix) == 7
 
     def test_read_data_without_dates(
         self, dpd_with_data: DatedParquetDataset
@@ -734,7 +734,7 @@ class TestBackfillValidation:
 
         # Should return a valid suffix
         assert suffix is not None
-        assert len(suffix) == 6
+        assert len(suffix) == 7
 
 
 class TestSnapshotSuffixCollisionDetection:
@@ -764,7 +764,7 @@ class TestSnapshotSuffixCollisionDetection:
         # Should succeed without error
         suffix = dpd._publish_snapshot(files=[file_metadata], schema=schema)
         assert suffix is not None
-        assert len(suffix) == 6
+        assert len(suffix) == 7
 
     def test_publish_when_new_suffix_greater_no_error(
         self, temp_cache: Path

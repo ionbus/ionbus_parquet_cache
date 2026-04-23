@@ -4,7 +4,7 @@ Tests for the instrument hash bucketing feature in DatedParquetDataset.
 Covers:
 1. Validation errors at construction time
 2. Bucket hash assignment correctness
-3. _BucketedDataSourceWrapper unit tests
+3. BucketedDataSource unit tests
 4. Full integration: build, read, filter
 5. Breaking-change detection (num_instrument_buckets mismatch)
 6. read_data(instruments=...) on a non-bucketed dataset raises ValueError
@@ -15,18 +15,14 @@ from __future__ import annotations
 import datetime as dt
 import zlib
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import pyarrow as pa
 import pytest
 
-from ionbus_parquet_cache.data_source import DataSource
-from ionbus_parquet_cache.dated_dataset import (
-    INSTRUMENT_BUCKET_COL,
-    DatedParquetDataset,
-    _BucketedDataSourceWrapper,
-)
+from ionbus_parquet_cache.bucketing import INSTRUMENT_BUCKET_COL
+from ionbus_parquet_cache.data_source import BucketedDataSource, DataSource
+from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
 from ionbus_parquet_cache.exceptions import ValidationError
 from ionbus_parquet_cache.partition import PartitionSpec
 
@@ -46,19 +42,61 @@ def _make_ticker_data(ticker: str, year: int) -> pa.Table:
         {
             "date": pa.array(dates, type=pa.date32()),
             "ticker": pa.array([ticker] * len(dates)),
-            "close": pa.array([100.0 + hash(ticker + str(year)) % 200] * len(dates)),
+            "close": pa.array(
+                [100.0 + hash(ticker + str(year)) % 200] * len(dates)
+            ),
         }
     )
 
 
-class TickerYearDataSource(DataSource):
-    """
-    MockDataSource that returns one PartitionSpec per (ticker, year) and
-    delivers test data via get_data().  The dataset must have:
-        date_col="date", instrument_column="ticker"
-    """
+class MockBucketedDataSource(BucketedDataSource):
+    """BucketedDataSource returning synthetic ticker data."""
 
-    def __init__(self, dataset: DatedParquetDataset, tickers=TICKERS, years=YEARS):
+    def __init__(self, dataset, tickers=TICKERS, years=YEARS):
+        super().__init__(dataset)
+        self._tickers = list(tickers)
+        self._years = list(years)
+
+    def available_dates(self) -> tuple[dt.date, dt.date]:
+        return (
+            dt.date(min(self._years), 1, 1),
+            dt.date(max(self._years), 12, 31),
+        )
+
+    def get_instruments_for_time_period(
+        self, start_date: dt.date, end_date: dt.date
+    ) -> list:
+        return self._tickers
+
+    def get_data_for_bucket(
+        self, instruments: list, start_date: dt.date, end_date: dt.date
+    ) -> pa.Table | None:
+        tables = []
+        for ticker in instruments:
+            year = start_date.year
+            if year in self._years:
+                t = _make_ticker_data(ticker, year)
+                date_col = t.column("date")
+                import pyarrow.compute as pc
+                mask = pc.and_(
+                    pc.greater_equal(
+                        date_col, pa.scalar(start_date, type=pa.date32())
+                    ),
+                    pc.less_equal(
+                        date_col, pa.scalar(end_date, type=pa.date32())
+                    ),
+                )
+                t = t.filter(mask)
+                if t.num_rows > 0:
+                    tables.append(t)
+        if not tables:
+            return None
+        return pa.concat_tables(tables)
+
+
+# Non-bucketed source kept for tests that need it
+class TickerYearDataSource(DataSource):
+    def __init__(self, dataset, tickers=TICKERS, years=YEARS):
         super().__init__(dataset)
         self._tickers = tickers
         self._years = years
@@ -98,7 +136,7 @@ def bucketed_dpd(temp_cache: Path) -> DatedParquetDataset:
         name="bucketed_test",
         date_col="date",
         date_partition="year",
-        partition_columns=[],  # no extra; bucket + year added by model_post_init
+        partition_columns=[],
         instrument_column="ticker",
         num_instrument_buckets=4,
     )
@@ -110,10 +148,9 @@ def bucketed_dpd(temp_cache: Path) -> DatedParquetDataset:
 
 
 class TestValidationErrors:
-    def test_buckets_only_requires_instrument_column(self, temp_cache: Path) -> None:
-        """instrument_column alone (without num_instrument_buckets) is allowed
-        for the non-bucketed partition-column mode.  Only the reverse is forbidden."""
-        # This should NOT raise — instrument_column alone is valid
+    def test_buckets_only_requires_instrument_column(
+        self, temp_cache: Path
+    ) -> None:
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
             name="plain_instrument",
@@ -121,12 +158,13 @@ class TestValidationErrors:
             date_partition="year",
             partition_columns=["ticker"],
             instrument_column="ticker",
-            # num_instrument_buckets omitted intentionally
         )
         assert dpd.instrument_column == "ticker"
         assert INSTRUMENT_BUCKET_COL not in dpd.partition_columns
 
-    def test_buckets_without_instrument_column_raises(self, temp_cache: Path) -> None:
+    def test_buckets_without_instrument_column_raises(
+        self, temp_cache: Path
+    ) -> None:
         with pytest.raises(ValidationError, match="must both be set or both be None"):
             DatedParquetDataset(
                 cache_dir=temp_cache,
@@ -134,22 +172,25 @@ class TestValidationErrors:
                 date_col="date",
                 date_partition="year",
                 num_instrument_buckets=4,
-                # instrument_column deliberately omitted
             )
 
-    def test_instrument_column_in_partition_columns_raises(self, temp_cache: Path) -> None:
+    def test_instrument_column_in_partition_columns_raises(
+        self, temp_cache: Path
+    ) -> None:
         with pytest.raises(ValidationError, match="must not be in partition_columns"):
             DatedParquetDataset(
                 cache_dir=temp_cache,
                 name="bad",
                 date_col="date",
                 date_partition="year",
-                partition_columns=["ticker"],  # instrument_column in partition_columns
+                partition_columns=["ticker"],
                 instrument_column="ticker",
                 num_instrument_buckets=4,
             )
 
-    def test_bucket_col_in_partition_columns_raises(self, temp_cache: Path) -> None:
+    def test_bucket_col_in_partition_columns_raises(
+        self, temp_cache: Path
+    ) -> None:
         with pytest.raises(ValidationError, match="is reserved"):
             DatedParquetDataset(
                 cache_dir=temp_cache,
@@ -162,7 +203,10 @@ class TestValidationErrors:
             )
 
     def test_bucket_col_in_sort_columns_raises(self, temp_cache: Path) -> None:
-        with pytest.raises(ValidationError, match="is reserved and must not appear in sort_columns"):
+        with pytest.raises(
+            ValidationError,
+            match="is reserved and must not appear in sort_columns",
+        ):
             DatedParquetDataset(
                 cache_dir=temp_cache,
                 name="bad",
@@ -173,6 +217,22 @@ class TestValidationErrors:
                 num_instrument_buckets=4,
             )
 
+    def test_non_bucketed_source_on_bucketed_dpd_raises(
+        self, temp_cache: Path
+    ) -> None:
+        dpd = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="bucketed",
+            date_col="date",
+            date_partition="year",
+            partition_columns=[],
+            instrument_column="ticker",
+            num_instrument_buckets=4,
+        )
+        source = TickerYearDataSource(dpd)
+        with pytest.raises(ValidationError, match="not a BucketedDataSource"):
+            dpd.update(source)
+
 
 # ---------------------------------------------------------------------------
 # 2. Bucket assignment
@@ -181,17 +241,10 @@ class TestValidationErrors:
 
 class TestBucketAssignment:
     def test_same_instrument_same_bucket(self) -> None:
-        """The same ticker always maps to the same bucket."""
         n = 16
         b1 = f"{zlib.crc32('AAPL'.encode()) % n:04d}"
         b2 = f"{zlib.crc32('AAPL'.encode()) % n:04d}"
         assert b1 == b2
-
-    def test_bucket_string_is_4_digits(self) -> None:
-        for ticker in ["AAPL", "MSFT", "Z", "LOOOOOOOOONG"]:
-            bucket = f"{zlib.crc32(ticker.encode()) % 256:04d}"
-            assert len(bucket) == 4
-            assert bucket.isdigit()
 
     def test_bucket_range_respected(self) -> None:
         n = 4
@@ -201,90 +254,75 @@ class TestBucketAssignment:
 
 
 # ---------------------------------------------------------------------------
-# 3. _BucketedDataSourceWrapper unit tests
+# 3. BucketedDataSource unit tests
 # ---------------------------------------------------------------------------
 
 
-class TestBucketedDataSourceWrapper:
-    """Unit tests for the wrapper in isolation."""
-
-    def _make_wrapper(self, num_buckets: int = 4) -> tuple[_BucketedDataSourceWrapper, Any]:
-        """Return (wrapper, inner_source_stub)."""
-        # We don't need a real DatedParquetDataset for the wrapper itself;
-        # build a minimal stub dataset just for TickerYearDataSource.
-        from unittest.mock import MagicMock
-        dataset = MagicMock()
-        dataset.date_col = "date"
-        dataset.date_partition = "year"
-        dataset.partition_columns = [INSTRUMENT_BUCKET_COL, "year"]
-        dataset.instrument_column = "ticker"
-
-        inner = TickerYearDataSource(dataset, tickers=["AAPL", "MSFT"], years=[2022])
-        inner.set_date_instruments(dt.date(2022, 1, 1), dt.date(2022, 12, 31))
-
-        wrapper = _BucketedDataSourceWrapper(
-            inner=inner,
+class TestBucketedDataSource:
+    def _make_dpd_and_source(
+        self, temp_cache: Path, num_buckets: int = 4
+    ) -> tuple[DatedParquetDataset, MockBucketedDataSource]:
+        dpd = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="bucketed_test",
+            date_col="date",
+            date_partition="year",
+            partition_columns=[],
             instrument_column="ticker",
             num_instrument_buckets=num_buckets,
-            sort_cols=["ticker", "date"],
-            instrument_bucket_col=INSTRUMENT_BUCKET_COL,
         )
-        return wrapper, inner
+        source = MockBucketedDataSource(dpd, tickers=["AAPL", "MSFT"], years=[2022])
+        source._do_prepare(dt.date(2022, 1, 1), dt.date(2022, 12, 31))
+        return dpd, source
 
-    def test_get_partitions_groups_correctly(self) -> None:
-        wrapper, _ = self._make_wrapper(num_buckets=4)
-        specs = wrapper.get_partitions()
-        # Each spec must have INSTRUMENT_BUCKET_COL in partition_values
-        for s in specs:
-            assert INSTRUMENT_BUCKET_COL in s.partition_values
-        # We have 2 tickers × 1 year = 2 ticker-specs.
-        # They may land in the same bucket or different buckets.
-        bucket_values = {s.partition_values[INSTRUMENT_BUCKET_COL] for s in specs}
-        assert len(bucket_values) >= 1
+    def test_get_partitions_count(self, temp_cache: Path) -> None:
+        _, source = self._make_dpd_and_source(temp_cache, num_buckets=4)
+        specs = source.get_partitions()
+        # 4 buckets × 1 year = 4 specs
+        assert len(specs) == 4
 
-    def test_get_data_concatenates_and_sorts(self) -> None:
-        # Use 1 bucket so both tickers end up in the same bucket-spec
-        wrapper, _ = self._make_wrapper(num_buckets=1)
-        specs = wrapper.get_partitions()
-        assert len(specs) == 1, "With 1 bucket both tickers should share a spec"
-        table = wrapper.get_data(specs[0])
+    def test_get_partitions_has_bucket_col(self, temp_cache: Path) -> None:
+        _, source = self._make_dpd_and_source(temp_cache, num_buckets=4)
+        for spec in source.get_partitions():
+            assert INSTRUMENT_BUCKET_COL in spec.partition_values
+
+    def test_get_data_returns_none_for_empty_bucket(
+        self, temp_cache: Path
+    ) -> None:
+        _, source = self._make_dpd_and_source(temp_cache, num_buckets=4)
+        specs = source.get_partitions()
+        # With 4 buckets and 2 tickers, at least some buckets will be empty
+        results = [source.get_data(s) for s in specs]
+        assert any(r is None for r in results)
+
+    def test_get_data_instruments_cached_per_period(
+        self, temp_cache: Path
+    ) -> None:
+        _, source = self._make_dpd_and_source(temp_cache, num_buckets=1)
+        specs = source.get_partitions()
+        assert len(specs) == 1
+        source.get_data(specs[0])
+        # Cache should now have one entry
+        assert len(source._period_bucket_cache) == 1
+
+    def test_get_data_all_tickers_present_with_one_bucket(
+        self, temp_cache: Path
+    ) -> None:
+        _, source = self._make_dpd_and_source(temp_cache, num_buckets=1)
+        specs = source.get_partitions()
+        table = source.get_data(specs[0])
         assert table is not None
-        # Should have rows from both tickers
-        tickers_in_result = set(table.column("ticker").to_pylist())
-        assert "AAPL" in tickers_in_result
-        assert "MSFT" in tickers_in_result
-        # Should be sorted by ticker, then date
-        ticker_col = table.column("ticker").to_pylist()
-        date_col = table.column("date").to_pylist()
-        for i in range(len(ticker_col) - 1):
-            if ticker_col[i] == ticker_col[i + 1]:
-                assert date_col[i] <= date_col[i + 1]
-            else:
-                assert ticker_col[i] <= ticker_col[i + 1]
+        tickers = set(table.column("ticker").to_pylist())
+        assert "AAPL" in tickers
+        assert "MSFT" in tickers
 
-    def test_get_data_returns_none_when_all_inner_none(self) -> None:
-        from unittest.mock import MagicMock, patch
-
-        wrapper, inner = self._make_wrapper(num_buckets=1)
-        specs = wrapper.get_partitions()
-
-        # Patch get_data on the inner source to always return None
-        with patch.object(inner, "get_data", return_value=None):
-            result = wrapper.get_data(specs[0])
-        assert result is None
-
-    def test_get_data_raises_when_instrument_col_missing(self) -> None:
-        wrapper, inner = self._make_wrapper(num_buckets=1)
-        specs = wrapper.get_partitions()
-
-        # Patch get_data to return table WITHOUT the ticker column
-        def _bad_data(spec: PartitionSpec) -> pa.Table:
-            return pa.table({"date": [dt.date(2022, 1, 1)], "close": [99.0]})
-
-        import unittest.mock as mock
-        with mock.patch.object(inner, "get_data", side_effect=_bad_data):
-            with pytest.raises(ValidationError, match="not found in data"):
-                wrapper.get_data(specs[0])
+    def test_prepare_clears_cache(self, temp_cache: Path) -> None:
+        _, source = self._make_dpd_and_source(temp_cache, num_buckets=1)
+        specs = source.get_partitions()
+        source.get_data(specs[0])
+        assert len(source._period_bucket_cache) == 1
+        source._do_prepare(dt.date(2022, 1, 1), dt.date(2022, 12, 31))
+        assert len(source._period_bucket_cache) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +331,9 @@ class TestBucketedDataSourceWrapper:
 
 
 class TestFullIntegration:
-    def _build_dataset(self, temp_cache: Path, num_buckets: int = 4) -> DatedParquetDataset:
+    def _build_dataset(
+        self, temp_cache: Path, num_buckets: int = 4
+    ) -> DatedParquetDataset:
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
             name="eod_bucketed",
@@ -303,7 +343,7 @@ class TestFullIntegration:
             instrument_column="ticker",
             num_instrument_buckets=num_buckets,
         )
-        source = TickerYearDataSource(dpd)
+        source = MockBucketedDataSource(dpd)
         suffix = dpd.update(
             source,
             start_date=dt.date(2022, 1, 1),
@@ -313,7 +353,9 @@ class TestFullIntegration:
         dpd.refresh()
         return dpd
 
-    def test_bucket_col_in_partition_columns_after_build(self, temp_cache: Path) -> None:
+    def test_bucket_col_in_partition_columns_after_build(
+        self, temp_cache: Path
+    ) -> None:
         dpd = self._build_dataset(temp_cache)
         assert INSTRUMENT_BUCKET_COL in dpd.partition_columns
 
@@ -329,26 +371,24 @@ class TestFullIntegration:
         assert len(df) > 0
         assert set(df["ticker"].unique()) == {"AAPL", "MSFT"}
 
-    def test_read_data_returns_all_tickers_without_filter(self, temp_cache: Path) -> None:
+    def test_read_data_returns_all_tickers_without_filter(
+        self, temp_cache: Path
+    ) -> None:
         dpd = self._build_dataset(temp_cache)
         df = dpd.read_data()
         assert set(df["ticker"].unique()) == set(TICKERS)
 
     def test_data_sorted_instrument_then_date(self, temp_cache: Path) -> None:
-        """Data within each year partition file should be sorted ticker→date.
-
-        The sort order guarantee is per-partition-file (bucket×year).  With
-        year partitioning, data from 2022 and 2023 live in separate files;
-        we verify that within each year the rows are ticker→date sorted.
-        """
         dpd = self._build_dataset(temp_cache, num_buckets=1)
         df = dpd.read_data(instruments=["AAPL", "MSFT"])
         df["date"] = pd.to_datetime(df["date"])
         df["year"] = df["date"].dt.year
 
-        for year, group in df.groupby("year"):
+        for _year, group in df.groupby("year"):
             group = group.reset_index(drop=True)
-            group_sorted = group.sort_values(["ticker", "date"]).reset_index(drop=True)
+            group_sorted = group.sort_values(["ticker", "date"]).reset_index(
+                drop=True
+            )
             pd.testing.assert_frame_equal(
                 group[["ticker", "date"]],
                 group_sorted[["ticker", "date"]],
@@ -373,8 +413,58 @@ class TestFullIntegration:
 
 
 class TestBreakingChangeBuckets:
-    def test_reopen_with_different_bucket_count_raises(self, temp_cache: Path) -> None:
-        # Build with 4 buckets
+    def test_reopen_unbucketed_cache_with_bucketing_raises(
+        self, temp_cache: Path
+    ) -> None:
+        """Opening a non-bucketed cache with num_instrument_buckets set must fail."""
+        from ionbus_parquet_cache.data_source import DataSource
+        from ionbus_parquet_cache.partition import PartitionSpec
+
+        class SimpleDateSource(DataSource):
+            def available_dates(self):
+                return dt.date(2022, 1, 1), dt.date(2022, 12, 31)
+
+            def get_partitions(self):
+                return [PartitionSpec(
+                    partition_values={"year": "Y2022"},
+                    start_date=dt.date(2022, 1, 1),
+                    end_date=dt.date(2022, 12, 31),
+                )]
+
+            def get_data(self, spec):
+                return pa.table({"date": pa.array(
+                    [dt.date(2022, 1, 3)], type=pa.date32()
+                ), "ticker": ["AAPL"], "close": [150.0]})
+
+        dpd_plain = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="unbucketed_then_bucketed",
+            date_col="date",
+            date_partition="year",
+            partition_columns=["ticker"],
+        )
+        source = SimpleDateSource(dpd_plain)
+        dpd_plain.update(
+            source,
+            start_date=dt.date(2022, 1, 1),
+            end_date=dt.date(2022, 12, 31),
+        )
+
+        dpd_bucketed = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="unbucketed_then_bucketed",
+            date_col="date",
+            date_partition="year",
+            partition_columns=[],
+            instrument_column="ticker",
+            num_instrument_buckets=4,
+        )
+        with pytest.raises(ValidationError, match="num_instrument_buckets mismatch"):
+            dpd_bucketed._load_metadata()
+
+    def test_reopen_with_different_bucket_count_raises(
+        self, temp_cache: Path
+    ) -> None:
         dpd4 = DatedParquetDataset(
             cache_dir=temp_cache,
             name="bucket_change_test",
@@ -384,14 +474,13 @@ class TestBreakingChangeBuckets:
             instrument_column="ticker",
             num_instrument_buckets=4,
         )
-        source = TickerYearDataSource(dpd4, years=[2022])
+        source = MockBucketedDataSource(dpd4, years=[2022])
         dpd4.update(
             source,
             start_date=dt.date(2022, 1, 1),
             end_date=dt.date(2022, 12, 31),
         )
 
-        # Re-open with 8 buckets — should raise
         dpd8 = DatedParquetDataset(
             cache_dir=temp_cache,
             name="bucket_change_test",
@@ -406,14 +495,14 @@ class TestBreakingChangeBuckets:
 
 
 # ---------------------------------------------------------------------------
-# 6. read_data(instruments=...) without bucketing → ValueError
+# 6. Partial instrument update guard
 # ---------------------------------------------------------------------------
 
 
 class TestPartialInstrumentUpdateGuard:
-    """update(..., instruments=...) must be blocked on bucketed datasets."""
-
-    def test_bucketed_update_with_instruments_raises(self, temp_cache: Path) -> None:
+    def test_bucketed_update_with_instruments_raises(
+        self, temp_cache: Path
+    ) -> None:
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
             name="eod_bucketed",
@@ -423,46 +512,10 @@ class TestPartialInstrumentUpdateGuard:
             instrument_column="ticker",
             num_instrument_buckets=4,
         )
-        source = TickerYearDataSource(dpd)
-        with pytest.raises(ValidationError, match="Partial-instrument updates are not yet supported"):
-            dpd.update(source, instruments=["AAPL"])
-
-    def test_non_bucketed_update_with_instruments_allowed(self, temp_cache: Path) -> None:
-        """Passing instruments= to a non-bucketed dataset must not raise ValidationError."""
-        dpd = DatedParquetDataset(
-            cache_dir=temp_cache,
-            name="plain",
-            date_col="date",
-            date_partition="year",
-            partition_columns=["ticker"],
-            instrument_column="ticker",
-        )
-        source = TickerYearDataSource(dpd)
-        # Should not raise ValidationError — may raise other errors downstream
-        # (e.g. no data) but the guard must not trigger
-        try:
-            dpd.update(source, instruments=["AAPL"])
-        except ValidationError as e:
-            assert "Partial-instrument" not in str(e), (
-                "Non-bucketed update raised the bucketed guard unexpectedly"
-            )
-
-
-class TestPartialInstrumentUpdateGuard:
-    """update(..., instruments=...) must be blocked on bucketed datasets."""
-
-    def test_bucketed_update_with_instruments_raises(self, temp_cache: Path) -> None:
-        dpd = DatedParquetDataset(
-            cache_dir=temp_cache,
-            name="eod_bucketed",
-            date_col="date",
-            date_partition="year",
-            partition_columns=[],
-            instrument_column="ticker",
-            num_instrument_buckets=4,
-        )
-        source = TickerYearDataSource(dpd)
-        with pytest.raises(ValidationError, match="Partial-instrument updates are not yet supported"):
+        source = MockBucketedDataSource(dpd)
+        with pytest.raises(
+            ValidationError, match="Partial-instrument updates are not yet supported"
+        ):
             dpd.update(source, instruments=["AAPL"])
 
     def test_non_bucketed_update_with_instruments_does_not_trigger_guard(
@@ -480,9 +533,12 @@ class TestPartialInstrumentUpdateGuard:
         try:
             dpd.update(source, instruments=["AAPL"])
         except ValidationError as e:
-            assert "Partial-instrument" not in str(e), (
-                "Non-bucketed update raised the bucketed guard unexpectedly"
-            )
+            assert "Partial-instrument" not in str(e)
+
+
+# ---------------------------------------------------------------------------
+# 7. read_data(instruments=...) without bucketing → ValueError
+# ---------------------------------------------------------------------------
 
 
 class TestReadDataInstrumentsWithoutBucketing:

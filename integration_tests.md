@@ -108,7 +108,7 @@ Extend `sync-cache` to allow copying a cache to a new location with a different 
 sync-cache push source_cache target_cache --rename "old_name:new_name"
 
 # Copy specific snapshot
-sync-cache push source_cache target_cache --snapshot 1H4Dw0 --rename "old_name:new_name"
+sync-cache push source_cache target_cache --snapshot 1H4DW00 --rename "old_name:new_name"
 ```
 
 ### 2. Update Without Overwriting Config (`--preserve-config`)

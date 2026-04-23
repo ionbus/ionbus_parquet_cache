@@ -18,8 +18,14 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.dataset as pds
 
-from ionbus_parquet_cache.exceptions import DataSourceError, ValidationError
+from ionbus_utils.logging_utils import logger
 
+from ionbus_parquet_cache.bucketing import (
+    INSTRUMENT_BUCKET_COL,
+    all_bucket_strings,
+    bucket_instruments,
+)
+from ionbus_parquet_cache.exceptions import DataSourceError, ValidationError
 from ionbus_parquet_cache.partition import (
     PartitionSpec,
     date_partition_column_name,
@@ -210,7 +216,7 @@ class DataSource(ABC):
     def get_data(
         self,
         partition_spec: PartitionSpec,
-    ) -> DataFrameType:
+    ) -> "DataFrameType | None":
         """
         Return data for a single partition or chunk.
 
@@ -510,12 +516,9 @@ class DataSource(ABC):
                 raise ValidationError(
                     "instruments provided but dataset has no instrument_column set"
                 )
-            # When instrument hash bucketing is active the instrument_column is
-            # managed by _BucketedDataSourceWrapper and is NOT a direct
-            # partition column.  Skip the partition-column check in that case.
-            # Use the reserved column name directly to avoid a circular import.
-            _BUCKET_COL = "__instrument_bucket__"
-            is_bucketed = _BUCKET_COL in getattr(
+            # When bucketing is active, instrument_column is not a direct
+            # partition column — skip the partition-column check.
+            is_bucketed = INSTRUMENT_BUCKET_COL in getattr(
                 self.dataset, "partition_columns", []
             )
             if not is_bucketed and instrument_col not in self.dataset.partition_columns:
@@ -527,3 +530,133 @@ class DataSource(ABC):
 
         # Call prepare which sets state via set_date_instruments
         self.prepare(start_date, end_date, instruments)
+
+
+class BucketedDataSource(DataSource, ABC):
+    """
+    Base class for DataSources that work with hash-bucketed DPDs.
+
+    The dataset must have ``instrument_column`` and ``num_instrument_buckets``
+    set.  This class generates ``(bucket × date_partition)`` specs in
+    ``get_partitions()`` and dispatches to ``get_data_for_bucket()`` lazily,
+    caching the instrument list per date-partition period so
+    ``get_instruments_for_time_period()`` is called only once per period.
+
+    Subclasses implement:
+        available_dates()
+        get_instruments_for_time_period(start_date, end_date) -> list
+        get_data_for_bucket(instruments, start_date, end_date)
+            -> DataFrameType | None
+
+    Do NOT override ``get_partitions()`` or ``get_data()``.
+    """
+
+    def __init__(self, dataset: "Any", **kwargs: Any) -> None:
+        super().__init__(dataset, **kwargs)
+        self._period_bucket_cache: dict[str, dict[str, list]] = {}
+
+    def prepare(
+        self,
+        start_date: dt.date,
+        end_date: dt.date,
+        instruments: list[str] | None = None,
+    ) -> None:
+        self._period_bucket_cache = {}
+        super().prepare(start_date, end_date, instruments)
+
+    @abstractmethod
+    def get_instruments_for_time_period(
+        self,
+        start_date: dt.date,
+        end_date: dt.date,
+    ) -> list:
+        """
+        Return instruments active in this period.
+
+        Called once per date-partition value (e.g. once per year).
+        The result is cached; subsequent specs for the same period reuse it.
+        """
+
+    @abstractmethod
+    def get_data_for_bucket(
+        self,
+        instruments: list,
+        start_date: dt.date,
+        end_date: dt.date,
+    ) -> "DataFrameType | None":
+        """Return all data for these instruments in this date range."""
+
+    def get_partitions(self) -> list[PartitionSpec]:
+        """Generate (bucket × date_partition) specs — no instrument I/O."""
+        if not self.prepared:
+            raise DataSourceError(
+                "prepare() must be called before get_partitions()",
+                source_class=self.__class__.__name__,
+            )
+
+        num_buckets = self.dataset.num_instrument_buckets
+        if num_buckets is None:
+            raise ValidationError(
+                f"{self.__class__.__name__} requires num_instrument_buckets "
+                "to be set on the dataset"
+            )
+
+        date_part_col = date_partition_column_name(
+            self.dataset.date_partition, self.dataset.date_col
+        )
+        date_ranges = date_partitions(
+            self.start_date, self.end_date, self.dataset.date_partition
+        )
+        bucket_strs = all_bucket_strings(num_buckets)
+
+        specs = []
+        for range_start, range_end, date_part_val in date_ranges:
+            for bucket_str in bucket_strs:
+                specs.append(
+                    PartitionSpec(
+                        partition_values={
+                            INSTRUMENT_BUCKET_COL: bucket_str,
+                            date_part_col: date_part_val,
+                        },
+                        start_date=range_start,
+                        end_date=range_end,
+                    )
+                )
+
+        logger.info(
+            f"{self.__class__.__name__}: {len(specs):,} specs "
+            f"({num_buckets} buckets × {len(date_ranges)} periods)"
+        )
+        return specs
+
+    def get_data(self, spec: PartitionSpec) -> "DataFrameType | None":
+        """Lazy cache lookup then dispatch to get_data_for_bucket()."""
+        num_buckets = self.dataset.num_instrument_buckets
+        date_part_col = date_partition_column_name(
+            self.dataset.date_partition, self.dataset.date_col
+        )
+
+        bucket_str = spec.partition_values[INSTRUMENT_BUCKET_COL]
+        date_part_val = spec.partition_values[date_part_col]
+
+        if date_part_val not in self._period_bucket_cache:
+            instruments = self.get_instruments_for_time_period(
+                spec.start_date, spec.end_date
+            )
+            self._period_bucket_cache[date_part_val] = bucket_instruments(
+                instruments, num_buckets
+            )
+            logger.debug(
+                f"{self.__class__.__name__}: cached {len(instruments):,} "
+                f"instruments for {date_part_val}"
+            )
+
+        bucket_instrument_list = self._period_bucket_cache[date_part_val].get(
+            bucket_str, []
+        )
+        if not bucket_instrument_list:
+            return None
+
+        return self.get_data_for_bucket(
+            bucket_instrument_list, spec.start_date, spec.end_date
+        )

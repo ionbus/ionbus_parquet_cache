@@ -601,7 +601,7 @@ class TestTrimUndoScript:
             cache_path=cache_path,
             files=trimmed_files,
             new_meta_files=new_meta_files,
-            suffix="1H4Dw0",
+            suffix="1H4DW00",
         )
 
         content = script_path.read_text()
@@ -611,17 +611,17 @@ class TestTrimUndoScript:
 
 
 class TestCleanupScriptNaming:
-    """Tests for cleanup script filename base-62 suffix format."""
+    """Tests for cleanup script filename base-36 suffix format."""
 
     def test_generate_cleanup_script_suffix_format(self, tmp_path: Path) -> None:
-        """_generate_cleanup_script produces filename with base-62 suffix pattern."""
+        """_generate_cleanup_script produces filename with base-36 suffix pattern."""
         cache_path = tmp_path / "cache"
         cache_path.mkdir()
         files = [cache_path / "test.parquet"]
 
         script_path = _generate_cleanup_script(cache_path, files)
 
-        # Check filename pattern: _cleanup_{6-char-suffix}.bat or .sh
+        # Check filename pattern: _cleanup_{7-char-suffix}.bat or .sh
         name = script_path.name
         assert name.startswith("_cleanup_")
         # Extract suffix (between _cleanup_ and extension)
@@ -630,23 +630,23 @@ class TestCleanupScriptNaming:
         else:
             suffix = name[len("_cleanup_"):-len(".sh")]
 
-        # Verify suffix is exactly 6 characters
-        assert len(suffix) == 6, f"Suffix '{suffix}' is not 6 characters"
-        # Verify suffix contains only base-62 characters
+        # Verify suffix is exactly 7 characters
+        assert len(suffix) == 7, f"Suffix '{suffix}' is not 7 characters"
+        # Verify suffix contains only base-36 characters
         assert SUFFIX_PATTERN.match(suffix), (
-            f"Suffix '{suffix}' does not match base-62 pattern"
+            f"Suffix '{suffix}' does not match base-36 pattern"
         )
 
     def test_generate_trim_delete_script_suffix_format(self, tmp_path: Path) -> None:
-        """_generate_trim_delete_script produces filename with base-62 suffix pattern."""
+        """_generate_trim_delete_script produces filename with base-36 suffix pattern."""
         cache_path = tmp_path / "cache"
         cache_path.mkdir()
         files = [cache_path / "test_trimmed.parquet"]
-        suffix = "1H4Dw0"  # Example base-62 suffix
+        suffix = "1H4DW00"  # Example base-36 suffix
 
         script_path = _generate_trim_delete_script(cache_path, files, suffix)
 
-        # Check filename pattern: _cleanup_{6-char-suffix}_delete.bat or .sh
+        # Check filename pattern: _cleanup_{7-char-suffix}_delete.bat or .sh
         name = script_path.name
         assert name.startswith("_cleanup_")
         assert "_delete" in name
@@ -656,30 +656,30 @@ class TestCleanupScriptNaming:
         else:
             extracted_suffix = name[len("_cleanup_"):name.index("_delete")]
 
-        # Verify suffix is exactly 6 characters
-        assert len(extracted_suffix) == 6, (
-            f"Suffix '{extracted_suffix}' is not 6 characters"
+        # Verify suffix is exactly 7 characters
+        assert len(extracted_suffix) == 7, (
+            f"Suffix '{extracted_suffix}' is not 7 characters"
         )
-        # Verify suffix contains only base-62 characters
+        # Verify suffix contains only base-36 characters
         assert SUFFIX_PATTERN.match(extracted_suffix), (
-            f"Suffix '{extracted_suffix}' does not match base-62 pattern"
+            f"Suffix '{extracted_suffix}' does not match base-36 pattern"
         )
         # Verify it matches the provided suffix
         assert extracted_suffix == suffix
 
     def test_generate_trim_undo_script_suffix_format(self, tmp_path: Path) -> None:
-        """_generate_trim_undo_script produces filename with base-62 suffix pattern."""
+        """_generate_trim_undo_script produces filename with base-36 suffix pattern."""
         cache_path = tmp_path / "cache"
         cache_path.mkdir()
         files = [cache_path / "test_trimmed.parquet"]
         new_meta_files: list[Path] = []
-        suffix = "2AbCdE"  # Example base-62 suffix
+        suffix = "2ABCDE0"  # Example base-36 suffix
 
         script_path = _generate_trim_undo_script(
             cache_path, files, new_meta_files, suffix
         )
 
-        # Check filename pattern: _cleanup_{6-char-suffix}_undo.bat or .sh
+        # Check filename pattern: _cleanup_{7-char-suffix}_undo.bat or .sh
         name = script_path.name
         assert name.startswith("_cleanup_")
         assert "_undo" in name
@@ -689,19 +689,19 @@ class TestCleanupScriptNaming:
         else:
             extracted_suffix = name[len("_cleanup_"):name.index("_undo")]
 
-        # Verify suffix is exactly 6 characters
-        assert len(extracted_suffix) == 6, (
-            f"Suffix '{extracted_suffix}' is not 6 characters"
+        # Verify suffix is exactly 7 characters
+        assert len(extracted_suffix) == 7, (
+            f"Suffix '{extracted_suffix}' is not 7 characters"
         )
-        # Verify suffix contains only base-62 characters
+        # Verify suffix contains only base-36 characters
         assert SUFFIX_PATTERN.match(extracted_suffix), (
-            f"Suffix '{extracted_suffix}' does not match base-62 pattern"
+            f"Suffix '{extracted_suffix}' does not match base-36 pattern"
         )
         # Verify it matches the provided suffix
         assert extracted_suffix == suffix
 
-    def test_suffix_only_contains_base62_characters(self, tmp_path: Path) -> None:
-        """Verify suffix contains only 0-9, A-Z, a-z characters."""
+    def test_suffix_only_contains_base36_characters(self, tmp_path: Path) -> None:
+        """Verify suffix contains only 0-9, A-Z characters."""
         cache_path = tmp_path / "cache"
         cache_path.mkdir()
         files = [cache_path / "test.parquet"]
@@ -716,11 +716,11 @@ class TestCleanupScriptNaming:
             else:
                 suffix = name[len("_cleanup_"):-len(".sh")]
 
-            # Verify all characters are valid base-62
-            valid_chars = set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+            # Verify all characters are valid base-36
+            valid_chars = set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
             for char in suffix:
                 assert char in valid_chars, (
-                    f"Character '{char}' in suffix '{suffix}' is not base-62"
+                    f"Character '{char}' in suffix '{suffix}' is not base-36"
                 )
 
             # Cleanup for next iteration

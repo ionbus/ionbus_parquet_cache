@@ -46,7 +46,7 @@ These modules have no internal dependencies and establish core concepts:
    - Understanding these helps interpret error conditions throughout the code
 
 2. **`snapshot.py`** - Snapshot suffix utilities
-   - `generate_snapshot_suffix()` - Creates 6-char base-62 timestamps
+   - `generate_snapshot_suffix()` - Creates 7-char base-36 timestamps
    - `parse_snapshot_suffix()` - Converts suffix back to Unix timestamp
    - `extract_suffix_from_filename()` - Extracts suffix from file names
    - Key insight: Suffixes are lexicographically ordered = chronologically ordered
@@ -93,6 +93,9 @@ These modules have no internal dependencies and establish core concepts:
    - Must implement: `available_dates()`, `prepare()`, `get_data()`
    - Default `get_partitions()` handles most cases
    - Class attributes: `chunk_days`, `partition_values`
+   - `BucketedDataSource` - Subclass for instrument-bucketed datasets
+   - Must implement: `get_instruments_for_time_period()`, `get_data_for_bucket()`
+   - Base class owns `get_partitions()` (pure math, no I/O) and `get_data()` (lazy bucket dispatch)
 
 10. **`data_cleaner.py`** - Data transformation interface
    - `DataCleaner` - Abstract class for custom transforms
@@ -124,6 +127,10 @@ These modules have no internal dependencies and establish core concepts:
     - `cleanup_cache_main()` - Analyzes old snapshots
     - `sync_cache_main()` - Push/pull between locations
 
+15. **`rename_cache.py`** - In-place dataset rename
+    - `rename_cache(cache_dir, old_name, new_name, dry_run)` - Renames directory and metadata files
+    - Safe recovery ordering: write new metadata → rename dir → delete old metadata
+
 ## Class Hierarchy
 
 ```
@@ -134,6 +141,8 @@ ParquetDataset (parquet_dataset_base.py)
 DataSource (data_source.py)
     ├── HiveParquetSource (builtin_sources.py)
     ├── DPDSource (builtin_sources.py)
+    ├── BucketedDataSource (data_source.py)  ← for num_instrument_buckets datasets
+    │   └── [User implementations]
     └── [User implementations]
 
 DataCleaner (data_cleaner.py)
@@ -191,7 +200,7 @@ update-cache /path/to/cache --dataset my_dataset
 ## Key Concepts
 
 ### Snapshot Suffixes
-- 6-character base-62 string (e.g., `1Gz5hK`)
+- 7-character base-36 string (e.g., `1H4DW00`)
 - Encodes Unix timestamp in seconds
 - Lexicographic order = chronological order
 - Applied to both data files and metadata files

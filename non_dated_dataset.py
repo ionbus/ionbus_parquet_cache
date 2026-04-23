@@ -40,8 +40,8 @@ class NonDatedParquetDataset(ParquetDataset):
     Example structure:
         non-dated/
             instrument_master/
-                instrument_master_1Gz4Ab.parquet  <- old snapshot
-                instrument_master_1Gz5hK.parquet  <- current (largest suffix)
+                instrument_master_1H4DW00.parquet  <- old snapshot
+                instrument_master_1H4DW01.parquet  <- current (largest suffix)
 
     Attributes:
         npd_dir: Path to the NPD directory under `non-dated/`.
