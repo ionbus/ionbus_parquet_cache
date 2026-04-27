@@ -477,6 +477,9 @@ def execute_update(
         SchemaMismatchError: If schema validation fails.
         SnapshotPublishError: If publishing fails.
     """
+    previous_suffix: str | None = (
+        dataset._metadata.suffix if dataset._metadata is not None else None
+    )
     merged_schema: pa.Schema | None = None
     min_date: dt.date | None = None
     max_date: dt.date | None = None
@@ -712,6 +715,8 @@ def execute_update(
         )
 
         logger.info(f"Published snapshot {plan.suffix} for {dataset.name}")
+
+        source.on_update_complete(plan.suffix, previous_suffix)
 
         return plan.suffix
 

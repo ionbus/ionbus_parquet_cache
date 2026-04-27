@@ -498,6 +498,26 @@ class DataSource(ABC):
             source_class=self.__class__.__name__,
         )
 
+    def on_update_complete(
+        self,
+        suffix: str,
+        previous_suffix: str | None,
+    ) -> None:
+        """
+        Called once after all partitions have been written and the snapshot
+        is published.
+
+        Override to record provenance, write audit trails, log metadata, or
+        do any other bookkeeping. ``self.start_date``, ``self.end_date``, and
+        ``self.instruments`` are still set from ``prepare()`` at this point.
+
+        Args:
+            suffix: The snapshot suffix that was just published.
+            previous_suffix: The suffix of the snapshot that existed before
+                this update, or ``None`` if this is the first update of the
+                cache.
+        """
+
     def _do_prepare(
         self,
         start_date: dt.date,

@@ -1080,6 +1080,16 @@ calling `prepare()` directly.
    - YAML transforms and DataCleaner are applied per-chunk (each temp
      file is already cleaned)
 
+7. **DPD calls `source.on_update_complete(suffix, previous_suffix)` once after publish:**
+   - Called after all partitions have been written and the snapshot is
+     published; not called on dry runs or if the update is a no-op
+   - `suffix` is the newly published snapshot; `previous_suffix` is the
+     snapshot that existed before this update, or `None` on first update
+   - `self.start_date`, `self.end_date`, and `self.instruments` are still
+     set from `prepare()` at this point
+   - Default is a no-op; override to record provenance, write audit
+     trails, send notifications, etc.
+
 **Data fetching strategies:**
 
 The DataSource controls how data is fetched. Two common patterns:
@@ -1116,10 +1126,11 @@ that partition are processed. See
 - `available_dates()` - Return the date range the source can provide
 - `get_data()` - Return data for a single partition/chunk
 
-**Two optional methods** (base class provides default implementations):
+**Three optional methods** (base class provides default implementations):
 
 - `prepare()` - Set up for fetching (default calls `set_date_instruments()`)
 - `get_partitions()` - Return list of partitions to update (default uses class attributes)
+- `on_update_complete(suffix)` - Post-update bookkeeping hook (default is a no-op)
 
 **Method details:**
 
@@ -1296,6 +1307,38 @@ The return type can be:
 - `pandas.DataFrame`
 
 The system will convert to the appropriate format internally.
+
+#### `on_update_complete(...)`
+
+```python
+def on_update_complete(self, suffix: str, previous_suffix: str | None) -> None:
+    ...
+```
+
+Called once after all partitions have been written and the snapshot is published.
+The base class provides a no-op default. Override to record provenance, write
+audit trails, send completion notifications, update a separate tracking table,
+etc.
+
+- Called only when an actual snapshot is published — not on dry runs and not
+  when the update is a no-op (no partitions to process).
+- `suffix` is the snapshot suffix that was just published.
+- `previous_suffix` is the suffix of the snapshot that existed before this
+  update, or `None` if this is the first update of the cache.
+- `self.start_date`, `self.end_date`, and `self.instruments` are still set from
+  `prepare()` at this point, giving full context about the completed run.
+
+```python
+class MySource(DataSource):
+    def on_update_complete(self, suffix: str, previous_suffix: str | None) -> None:
+        write_audit_record(
+            snapshot=suffix,
+            previous_snapshot=previous_suffix,  # None on first update
+            start=self.start_date,
+            end=self.end_date,
+            source="my_api",
+        )
+```
 
 #### `date_partitions(...)` (static method)
 

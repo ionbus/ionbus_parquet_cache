@@ -31,6 +31,7 @@
 - [Writing a DataSource](#writing-a-datasource)
    * [Minimal example](#minimal-example)
    * [With chunking for large datasets](#with-chunking-for-large-datasets)
+   * [Post-update bookkeeping](#post-update-bookkeeping)
    * [Built-in sources](#built-in-sources)
 - [YAML Configuration](#yaml-configuration)
    * [Basic example](#basic-example)
@@ -531,6 +532,38 @@ class MySource(DataSource):
             partition_spec.partition_values.get("Exchange"),
         )
 ```
+
+### Post-update bookkeeping
+
+Override `on_update_complete(suffix)` to run any bookkeeping after all partitions
+have been written and the snapshot is published. `self.start_date`,
+`self.end_date`, and `self.instruments` are still set from `prepare()` at this
+point, so you have full context about what was just run.
+
+```python
+class MySource(DataSource):
+    def available_dates(self):
+        return (dt.date(2020, 1, 1), dt.date.today() - dt.timedelta(days=1))
+
+    def get_data(self, partition_spec):
+        return fetch_from_my_api(
+            start=partition_spec.start_date,
+            end=partition_spec.end_date,
+        )
+
+    def on_update_complete(self, suffix: str, previous_suffix: str | None) -> None:
+        # previous_suffix is None on the first update of a cache
+        write_audit_record(
+            snapshot=suffix,
+            previous_snapshot=previous_suffix,
+            start=self.start_date,
+            end=self.end_date,
+            source="my_api",
+        )
+```
+
+Common uses: writing audit trails, recording API call counts or checksums,
+updating a separate provenance table, sending a completion notification.
 
 ### Built-in sources
 
