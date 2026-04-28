@@ -21,6 +21,7 @@ from ionbus_parquet_cache.exceptions import (
     ConfigurationError,
     DataSourceError,
 )
+from ionbus_utils.logging_utils import logger
 
 
 def update_cache_main(args: list[str] | None = None) -> int:
@@ -91,20 +92,18 @@ def update_cache_main(args: list[str] | None = None) -> int:
 
     # Validate arguments
     if parsed.backfill and parsed.restate:
-        print(
-            "Error: --backfill and --restate are mutually exclusive",
-            file=sys.stderr,
+        logger.error(
+            "Error: --backfill and --restate are mutually exclusive"
         )
         return 1
 
     if parsed.backfill and parsed.end_date:
-        print("Error: --end-date not allowed with --backfill", file=sys.stderr)
+        logger.error("Error: --end-date not allowed with --backfill")
         return 1
 
     if parsed.restate and not (parsed.start_date and parsed.end_date):
-        print(
-            "Error: --restate requires both --start-date and --end-date",
-            file=sys.stderr,
+        logger.error(
+            "Error: --restate requires both --start-date and --end-date"
         )
         return 1
 
@@ -115,9 +114,8 @@ def update_cache_main(args: list[str] | None = None) -> int:
         try:
             start_date = dt.date.fromisoformat(parsed.start_date)
         except ValueError:
-            print(
-                f"Error: Invalid start date: {parsed.start_date}",
-                file=sys.stderr,
+            logger.error(
+                f"Error: Invalid start date: {parsed.start_date}"
             )
             return 1
 
@@ -125,7 +123,7 @@ def update_cache_main(args: list[str] | None = None) -> int:
         try:
             end_date = dt.date.fromisoformat(parsed.end_date)
         except ValueError:
-            print(f"Error: Invalid end date: {parsed.end_date}", file=sys.stderr)
+            logger.error(f"Error: Invalid end date: {parsed.end_date}")
             return 1
 
     # Parse instruments
@@ -147,7 +145,7 @@ def update_cache_main(args: list[str] | None = None) -> int:
             verbose=parsed.verbose,
         )
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error(f"Error: {e}")
         return 1
 
 
@@ -165,29 +163,25 @@ def _run_update(
     """Execute update using stored metadata configuration."""
     cache_path = Path(cache_dir)
     if not cache_path.exists():
-        print(f"Error: Cache directory not found: {cache_dir}", file=sys.stderr)
+        logger.error(f"Error: Cache directory not found: {cache_dir}")
         return 1
 
     # Discover datasets from disk
     datasets = _discover_datasets_from_disk(cache_path)
     if not datasets:
-        print(
-            f"Error: No datasets with metadata found in {cache_dir}",
-            file=sys.stderr,
+        logger.error(
+            f"Error: No datasets with metadata found in {cache_dir}"
         )
-        print(
-            "Hint: Use yaml-create-datasets to create datasets from YAML configuration.",
-            file=sys.stderr,
+        logger.error(
+            "Hint: Use yaml-create-datasets to create datasets from "
+            "YAML configuration."
         )
         return 1
 
     # Filter to requested dataset
     if dataset_name:
         if dataset_name not in datasets:
-            print(
-                f"Error: Dataset '{dataset_name}' not found",
-                file=sys.stderr,
-            )
+            logger.error(f"Error: Dataset '{dataset_name}' not found")
             return 1
         datasets = {dataset_name: datasets[dataset_name]}
 
@@ -197,7 +191,7 @@ def _run_update(
 
     for name, dpd in datasets.items():
         if verbose:
-            print(f"Updating {name}...")
+            logger.info(f"Updating {name}...")
 
         try:
             # Create source from stored metadata
@@ -223,20 +217,22 @@ def _run_update(
 
             if suffix:
                 if dry_run:
-                    print(f"  {name}: would create snapshot {suffix}")
+                    logger.info(f"  {name}: would create snapshot {suffix}")
                 else:
-                    print(f"  {name}: created snapshot {suffix}")
+                    logger.info(f"  {name}: created snapshot {suffix}")
                 success_count += 1
             else:
-                print(f"  {name}: no update needed")
+                logger.info(f"  {name}: no update needed")
 
         except (ConfigurationError, DataSourceError) as e:
-            print(f"  {name}: ERROR - {e}", file=sys.stderr)
+            logger.error(f"  {name}: ERROR - {e}")
             error_count += 1
 
     # Summary
     if verbose or error_count > 0:
-        print(f"\nCompleted: {success_count} updated, {error_count} errors")
+        logger.info(
+            f"\nCompleted: {success_count} updated, {error_count} errors"
+        )
 
     return 1 if error_count > 0 else 0
 

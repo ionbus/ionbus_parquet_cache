@@ -9,10 +9,14 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from ionbus_utils.file_utils import format_size, get_file_hash
+from ionbus_utils.logging_utils import logger
 
 # Import discovery functions from cleanup module
 from ionbus_parquet_cache.cleanup_cache import (
@@ -75,9 +79,8 @@ def sync_cache_main(args: list[str] | None = None) -> int:
         parsed.npd_only,
     ])
     if mode_count > 1:
-        print(
-            "Error: --dataset, --dpd-only, and --npd-only are mutually exclusive",
-            file=sys.stderr,
+        logger.error(
+            "Error: --dataset, --dpd-only, and --npd-only are mutually exclusive"
         )
         return 1
 
@@ -85,9 +88,8 @@ def sync_cache_main(args: list[str] | None = None) -> int:
     rename_map: dict[str, str] = {}
     if parsed.rename:
         if ":" not in parsed.rename:
-            print(
-                "Error: --rename must be in format 'source_name:target_name'",
-                file=sys.stderr,
+            logger.error(
+                "Error: --rename must be in format 'source_name:target_name'"
             )
             return 1
         old_name, new_name = parsed.rename.split(":", 1)
@@ -98,7 +100,7 @@ def sync_cache_main(args: list[str] | None = None) -> int:
 
     # Check for S3 paths
     if parsed.source.startswith("s3://") or parsed.destination.startswith("s3://"):
-        print("Error: S3 sync is not yet implemented", file=sys.stderr)
+        logger.error("Error: S3 sync is not yet implemented")
         return 1
 
     # Route GCS operations
@@ -117,6 +119,7 @@ def sync_cache_main(args: list[str] | None = None) -> int:
                     all_snapshots=parsed.all_snapshots,
                     dry_run=parsed.dry_run,
                     verbose=parsed.verbose,
+                    workers=parsed.workers,
                     rename_map=rename_map,
                 )
             else:  # pull
@@ -129,12 +132,13 @@ def sync_cache_main(args: list[str] | None = None) -> int:
                     all_snapshots=parsed.all_snapshots,
                     dry_run=parsed.dry_run,
                     verbose=parsed.verbose,
+                    workers=parsed.workers,
                     daemon=parsed.daemon,
                     update_interval=parsed.update_interval,
                     rename_map=rename_map,
                 )
         except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
+            logger.error(f"Error: {e}")
             return 1
 
     # Run sync
@@ -150,6 +154,7 @@ def sync_cache_main(args: list[str] | None = None) -> int:
                 dry_run=parsed.dry_run,
                 delete=parsed.delete,
                 verbose=parsed.verbose,
+                workers=parsed.workers,
                 rename_map=rename_map,
             )
         else:  # pull
@@ -165,10 +170,11 @@ def sync_cache_main(args: list[str] | None = None) -> int:
                 daemon=parsed.daemon,
                 update_interval=parsed.update_interval,
                 verbose=parsed.verbose,
+                workers=parsed.workers,
                 rename_map=rename_map,
             )
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error(f"Error: {e}")
         return 1
 
 
@@ -216,6 +222,31 @@ def _add_sync_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Verbose output",
     )
+    parser.add_argument(
+        "--workers", "-j",
+        type=int,
+        default=8,
+        metavar="N",
+        help="Parallel upload/download workers (default: 8)",
+    )
+
+
+_ETA_MIN_FILES = 3  # start showing ETA after this many files copied
+
+
+def _format_eta(elapsed: float, done: int, total: int) -> str:
+    """Return a human-readable ETA string, or empty string if not enough data."""
+    if done < _ETA_MIN_FILES or elapsed == 0:
+        return ""
+    secs = (total - done) / (done / elapsed)
+    if secs < 60:
+        return f"  ETA: {secs:.0f}s"
+    elif secs < 3600:
+        m, s = divmod(secs, 60)
+        return f"  ETA: {m:.0f}m {s:.0f}s"
+    else:
+        h, remainder = divmod(secs, 3600)
+        return f"  ETA: {h:.0f}h {remainder/60:.0f}m"
 
 
 def _should_copy_file(source: Path, dest: Path) -> bool:
@@ -259,6 +290,7 @@ def _run_sync_push(
     dry_run: bool,
     delete: bool,
     verbose: bool,
+    workers: int = 8,
     rename_map: dict[str, str] | None = None,
 ) -> int:
     """Execute push sync operation."""
@@ -267,167 +299,144 @@ def _run_sync_push(
     rename_map = rename_map or {}
 
     if not source_path.exists():
-        print(f"Error: Source not found: {source}", file=sys.stderr)
+        logger.error(f"Error: Source not found: {source}")
         return 1
 
     # Create destination if needed
     if not dry_run:
         dest_path.mkdir(parents=True, exist_ok=True)
 
-    # Discover and sync DPDs
-    files_synced = 0
+    # --- Phase 1: discover all files, separate into to_copy / to_skip ---
+    # Each entry: (src_file, dest_file, display_label, size)
+    to_copy: list[tuple[Path, Path, str, int]] = []
     files_skipped = 0
-    bytes_synced = 0
-    synced_paths: set[Path] = set()  # Track synced files for --delete
+    synced_paths: set[Path] = set()
+
+    def _collect(
+        src: Path,
+        dst: Path,
+        rel: Path,
+        dest_rel: Path,
+    ) -> None:
+        nonlocal files_skipped
+        synced_paths.add(dest_rel)
+        if _should_copy_file(src, dst):
+            label = (
+                f"{rel} -> {dest_rel}" if rename_map else str(rel)
+            )
+            to_copy.append((src, dst, label, src.stat().st_size))
+        else:
+            files_skipped += 1
 
     if not npd_only:
         dpd_snapshots = _discover_dpd_snapshots(source_path, dataset_names)
         for name, snapshots in dpd_snapshots.items():
             if not snapshots:
                 continue
-
-            # Get current snapshot (or all if --all-snapshots)
-            if all_snapshots:
-                target_snapshots = snapshots
-            else:
-                target_snapshots = [max(snapshots, key=lambda s: s["suffix"])]
-
-            for snap in target_snapshots:
-                # Sync metadata file
+            targets = (
+                snapshots
+                if all_snapshots
+                else [max(snapshots, key=lambda s: s["suffix"])]
+            )
+            for snap in targets:
                 meta_file = snap["meta_file"]
-                rel_path = meta_file.relative_to(source_path)
-                dest_rel_path = _apply_rename(rel_path, rename_map)
-                dest_file = dest_path / dest_rel_path
-
-                synced_paths.add(dest_rel_path)
-                # Check if file needs copying
-                if _should_copy_file(meta_file, dest_file):
-                    files_synced += 1
-                    bytes_synced += meta_file.stat().st_size
-                    if verbose:
-                        if rename_map:
-                            print(f"  {rel_path} -> {dest_rel_path}")
-                        else:
-                            print(f"  {rel_path}")
-                    if not dry_run:
-                        dest_file.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(meta_file, dest_file)
-                else:
-                    files_skipped += 1
-
-                # Sync data files
+                rel = meta_file.relative_to(source_path)
+                dest_rel = _apply_rename(rel, rename_map)
+                _collect(meta_file, dest_path / dest_rel, rel, dest_rel)
                 for data_file in snap.get("files", []):
-                    rel_path = data_file.relative_to(source_path)
-                    dest_rel_path = _apply_rename(rel_path, rename_map)
-                    dest_file = dest_path / dest_rel_path
-                    synced_paths.add(dest_rel_path)
+                    rel = data_file.relative_to(source_path)
+                    dest_rel = _apply_rename(rel, rename_map)
+                    _collect(
+                        data_file, dest_path / dest_rel, rel, dest_rel
+                    )
 
-                    if _should_copy_file(data_file, dest_file):
-                        files_synced += 1
-                        bytes_synced += data_file.stat().st_size
-                        if verbose:
-                            if rename_map:
-                                print(f"  {rel_path} -> {dest_rel_path}")
-                            else:
-                                print(f"  {rel_path}")
-                        if not dry_run:
-                            dest_file.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(data_file, dest_file)
-                    else:
-                        files_skipped += 1
-
-    # Sync NPDs
     if not dpd_only:
         npd_snapshots = _discover_npd_snapshots(source_path, dataset_names)
         for name, snapshots in npd_snapshots.items():
             if not snapshots:
                 continue
-
-            if all_snapshots:
-                target_snapshots = snapshots
-            else:
-                target_snapshots = [max(snapshots, key=lambda s: s["suffix"])]
-
-            for snap in target_snapshots:
+            targets = (
+                snapshots
+                if all_snapshots
+                else [max(snapshots, key=lambda s: s["suffix"])]
+            )
+            for snap in targets:
                 item = snap["path"]
-                rel_path = item.relative_to(source_path)
-                dest_rel_path = _apply_rename(rel_path, rename_map)
-                dest_item = dest_path / dest_rel_path
-
+                rel = item.relative_to(source_path)
+                dest_rel = _apply_rename(rel, rename_map)
                 if item.is_file():
-                    synced_paths.add(dest_rel_path)
+                    _collect(item, dest_path / dest_rel, rel, dest_rel)
                 else:
-                    # For directories, track all files inside
                     for f in item.rglob("*"):
                         if f.is_file():
                             f_rel = f.relative_to(source_path)
-                            synced_paths.add(_apply_rename(f_rel, rename_map))
+                            f_dest_rel = _apply_rename(f_rel, rename_map)
+                            _collect(
+                                f,
+                                dest_path / f_dest_rel,
+                                f_rel,
+                                f_dest_rel,
+                            )
 
-                if item.is_file():
-                    if _should_copy_file(item, dest_item):
-                        files_synced += 1
-                        bytes_synced += item.stat().st_size
-                        if verbose:
-                            if rename_map:
-                                print(f"  {rel_path} -> {dest_rel_path}")
-                            else:
-                                print(f"  {rel_path}")
-                        if not dry_run:
-                            dest_item.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(item, dest_item)
-                    else:
-                        files_skipped += 1
-                else:
-                    # For directories, sync file by file with checksum check
-                    for src_file in item.rglob("*"):
-                        if not src_file.is_file():
-                            continue
-                        rel_file = src_file.relative_to(item)
-                        dest_file = dest_item / rel_file
-                        if _should_copy_file(src_file, dest_file):
-                            files_synced += 1
-                            bytes_synced += src_file.stat().st_size
-                            if verbose:
-                                src_full = rel_path / rel_file
-                                dest_full = dest_rel_path / rel_file
-                                if rename_map:
-                                    print(f"  {src_full} -> {dest_full}")
-                                else:
-                                    print(f"  {src_full}")
-                            if not dry_run:
-                                dest_file.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(src_file, dest_file)
-                        else:
-                            files_skipped += 1
+    # --- Phase 2: copy with progress ---
+    total = len(to_copy)
+    bytes_synced = 0
+    start_time = time.perf_counter()
+    w = len(str(total))
+
+    if dry_run or total == 0:
+        bytes_synced = sum(size for _, _, _, size in to_copy)
+    else:
+        done = 0
+        lock = threading.Lock()
+
+        def _copy_one(item: tuple) -> int:
+            src, dst, _label, size = item
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            return size
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_copy_one, item): item for item in to_copy}
+            for fut in as_completed(futures):
+                src, dst, label, size = futures[fut]
+                fut.result()  # re-raise any exception
+                with lock:
+                    done += 1
+                    bytes_synced += size
+                    if verbose:
+                        eta = _format_eta(
+                            time.perf_counter() - start_time, done, total
+                        )
+                        logger.info(f"  [{done:{w}}/{total}] {label}{eta}")
 
     # Handle --delete: remove files at destination not in source
     files_deleted = 0
     if delete and dest_path.exists():
-        # Find all data files at destination (parquet and pkl.gz)
         for dest_file in dest_path.rglob("*"):
             if not dest_file.is_file():
                 continue
-            # Skip yaml/ and code/ directories
             rel = dest_file.relative_to(dest_path)
             if rel.parts and rel.parts[0] in ("yaml", "code"):
                 continue
-            # Check if this file was synced
             if rel not in synced_paths:
                 files_deleted += 1
                 if verbose:
-                    print(f"  DELETE {rel}")
+                    logger.info(f"  DELETE {rel}")
                 if not dry_run:
                     dest_file.unlink()
 
     # Summary
     if dry_run:
         delete_msg = f", would delete {files_deleted}" if delete else ""
-        print(f"Would sync {files_synced} files{delete_msg}")
+        logger.info(f"Would sync {total} files{delete_msg}")
     else:
-        skip_msg = f", skipped {files_skipped} unchanged" if files_skipped else ""
+        skip_msg = (
+            f", skipped {files_skipped} unchanged" if files_skipped else ""
+        )
         delete_msg = f", deleted {files_deleted}" if files_deleted else ""
-        print(
-            f"Synced {files_synced} files ({format_size(bytes_synced)})"
+        logger.info(
+            f"Synced {total} files ({format_size(bytes_synced)})"
             f"{skip_msg}{delete_msg}"
         )
 
@@ -446,6 +455,7 @@ def _run_sync_pull(
     daemon: bool,
     update_interval: int,
     verbose: bool,
+    workers: int = 8,
     rename_map: dict[str, str] | None = None,
 ) -> int:
     """Execute pull sync operation."""
@@ -460,6 +470,7 @@ def _run_sync_pull(
             dry_run=dry_run,
             delete=delete,
             verbose=verbose,
+            workers=workers,
             rename_map=rename_map,
         )
 
@@ -467,7 +478,7 @@ def _run_sync_pull(
             return result
 
         if verbose:
-            print(f"Sleeping {update_interval} seconds...")
+            logger.info(f"Sleeping {update_interval} seconds...")
         time.sleep(update_interval)
 
 
@@ -526,6 +537,7 @@ def _run_sync_push_gcs(
     all_snapshots: bool,
     dry_run: bool,
     verbose: bool,
+    workers: int = 8,
     rename_map: dict[str, str] | None = None,
 ) -> int:
     """Push a local cache to GCS, or sync between two GCS locations."""
@@ -544,89 +556,121 @@ def _run_sync_push_gcs(
     src_is_gcs = is_gcs_path(source)
     dst_is_gcs = is_gcs_path(destination)
 
-    files_synced = 0
+    from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_size
+
     files_skipped = 0
-    bytes_synced = 0
+
+    # --- Phase 1: collect files that need copying ---
+    # Each entry: (src_blob_or_path, dest_url_or_path, label, size)
+    to_copy: list[tuple[object, object, str, int]] = []
 
     if src_is_gcs and dst_is_gcs:
-        # GCS → GCS: list source blobs and copy via download+upload
         for blob_url in gcs_find(source):
             rel = blob_url[len(source):].lstrip("/")
             if dataset_names and not any(
-                rel.startswith(n + "/") or rel.startswith(n + "_") for n in dataset_names
+                rel.startswith(n + "/") or rel.startswith(n + "_")
+                for n in dataset_names
             ):
                 continue
             dest_url = gcs_join(destination, rel)
-            # Size-based comparison
-            from ionbus_parquet_cache.gcs_utils import gcs_size, gcs_exists
             src_size = gcs_size(blob_url)
             if gcs_exists(dest_url) and gcs_size(dest_url) == src_size:
                 files_skipped += 1
                 continue
-            if verbose:
-                print(f"  {rel}")
-            if not dry_run:
-                import tempfile, os
-                with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                    tmp_path = Path(tmp.name)
-                try:
-                    gcs_download(blob_url, tmp_path)
-                    gcs_upload(tmp_path, dest_url)
-                finally:
-                    tmp_path.unlink(missing_ok=True)
-            files_synced += 1
-            bytes_synced += src_size
+            to_copy.append((blob_url, dest_url, rel, src_size))
 
     elif not src_is_gcs and dst_is_gcs:
-        # Local → GCS
         source_path = Path(source)
         if not source_path.exists():
-            print(f"Error: Source not found: {source}", file=sys.stderr)
+            logger.error(f"Error: Source not found: {source}")
             return 1
-
         pairs = _collect_local_sync_files(
-            source_path, dataset_names, dpd_only, npd_only, all_snapshots, rename_map
+            source_path,
+            dataset_names,
+            dpd_only,
+            npd_only,
+            all_snapshots,
+            rename_map,
         )
         for local_file, rel_str in pairs:
             dest_url = gcs_join(destination, rel_str)
             if not should_upload(local_file, dest_url):
                 files_skipped += 1
                 continue
-            size = local_file.stat().st_size
-            if verbose:
-                print(f"  {rel_str}")
-            if not dry_run:
-                gcs_upload(local_file, dest_url)
-            files_synced += 1
-            bytes_synced += size
+            to_copy.append(
+                (local_file, dest_url, rel_str, local_file.stat().st_size)
+            )
 
     else:
-        # GCS → local
         dest_path = Path(destination)
         for blob_url in gcs_find(source):
             rel = blob_url[len(source):].lstrip("/")
             if dataset_names and not any(
-                rel.startswith(n + "/") or rel.startswith(n + "_") for n in dataset_names
+                rel.startswith(n + "/") or rel.startswith(n + "_")
+                for n in dataset_names
             ):
                 continue
             local_file = dest_path / rel
-            from ionbus_parquet_cache.gcs_utils import gcs_size
             if not should_download(blob_url, local_file):
                 files_skipped += 1
                 continue
-            size = gcs_size(blob_url)
-            if verbose:
-                print(f"  {rel}")
-            if not dry_run:
-                gcs_download(blob_url, local_file)
-            files_synced += 1
-            bytes_synced += size
+            to_copy.append(
+                (blob_url, local_file, rel, gcs_size(blob_url))
+            )
+
+    # --- Phase 2: copy with progress ---
+    total = len(to_copy)
+    bytes_synced = 0
+    start_time = time.perf_counter()
+    w = len(str(total))
+
+    if dry_run or total == 0:
+        bytes_synced = sum(size for _, _, _, size in to_copy)
+    else:
+        done = 0
+        lock = threading.Lock()
+
+        def _copy_one_gcs(item: tuple) -> int:
+            src, dst, _label, size = item
+            if src_is_gcs and dst_is_gcs:
+                with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                try:
+                    gcs_download(src, tmp_path)
+                    gcs_upload(tmp_path, dst)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+            elif not src_is_gcs and dst_is_gcs:
+                gcs_upload(src, dst)
+            else:
+                gcs_download(src, dst)
+            return size
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_copy_one_gcs, item): item for item in to_copy
+            }
+            for fut in as_completed(futures):
+                src, dst, label, size = futures[fut]
+                fut.result()  # re-raise any exception
+                with lock:
+                    done += 1
+                    bytes_synced += size
+                    if verbose:
+                        eta = _format_eta(
+                            time.perf_counter() - start_time, done, total
+                        )
+                        logger.info(f"  [{done:{w}}/{total}] {label}{eta}")
 
     if dry_run:
-        print(f"Would sync {files_synced} files")
+        logger.info(f"Would sync {total} files")
     else:
-        skip_msg = f", skipped {files_skipped} unchanged" if files_skipped else ""
-        print(f"Synced {files_synced} files ({format_size(bytes_synced)}){skip_msg}")
+        skip_msg = (
+            f", skipped {files_skipped} unchanged" if files_skipped else ""
+        )
+        logger.info(
+            f"Synced {total} files ({format_size(bytes_synced)}){skip_msg}"
+        )
 
     return 0
 
@@ -640,8 +684,9 @@ def _run_sync_pull_gcs(
     all_snapshots: bool,
     dry_run: bool,
     verbose: bool,
-    daemon: bool,
-    update_interval: int,
+    workers: int = 8,
+    daemon: bool = False,
+    update_interval: int = 60,
     rename_map: dict[str, str] | None = None,
 ) -> int:
     """Pull from GCS to local (or GCS → GCS), with optional daemon mode."""
@@ -655,12 +700,13 @@ def _run_sync_pull_gcs(
             all_snapshots=all_snapshots,
             dry_run=dry_run,
             verbose=verbose,
+            workers=workers,
             rename_map=rename_map,
         )
         if not daemon:
             return result
         if verbose:
-            print(f"Sleeping {update_interval} seconds...")
+            logger.info(f"Sleeping {update_interval} seconds...")
         time.sleep(update_interval)
 
 

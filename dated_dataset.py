@@ -412,19 +412,18 @@ class DatedParquetDataset(ParquetDataset):
             SnapshotNotFoundError: If no data files exist.
         """
         # Build dataset from file list (FileMetadata objects)
+        # For GCS, trust the metadata — files listed in the snapshot were
+        # written atomically at publish time. Checking gcs_exists() per file
+        # costs one HTTP round-trip each and makes reads very slow.
         existing_files: list[FileMetadata] = []
         if self.is_gcs:
             from ionbus_parquet_cache.gcs_utils import (
-                gcs_exists,
                 gcs_join,
                 gcs_pa_filesystem,
                 gcs_strip_prefix,
             )
-            dataset_url = str(self.dataset_dir)
             gcs_fs = gcs_pa_filesystem()
-            for fm in metadata.files:
-                if gcs_exists(gcs_join(dataset_url, fm.path)):
-                    existing_files.append(fm)
+            existing_files = list(metadata.files)
         else:
             for fm in metadata.files:
                 full_path = self.dataset_dir / fm.path  # type: ignore[operator]

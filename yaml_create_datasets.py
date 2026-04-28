@@ -24,6 +24,7 @@ from ionbus_parquet_cache.exceptions import (
     SnapshotNotFoundError,
 )
 from ionbus_parquet_cache.yaml_config import load_yaml_file
+from ionbus_utils.logging_utils import logger
 
 # Fields that must not change between YAML config and stored metadata
 IMMUTABLE_FIELDS = [
@@ -150,27 +151,25 @@ def create_cache_main(args: list[str] | None = None) -> int:
 
     # Validate arguments
     if parsed.backfill and parsed.restate:
-        print(
-            "Error: --backfill and --restate are mutually exclusive",
-            file=sys.stderr,
+        logger.error(
+            "Error: --backfill and --restate are mutually exclusive"
         )
         return 1
 
     if parsed.backfill and parsed.end_date:
-        print("Error: --end-date not allowed with --backfill", file=sys.stderr)
+        logger.error("Error: --end-date not allowed with --backfill")
         return 1
 
     if parsed.restate and not (parsed.start_date and parsed.end_date):
-        print(
-            "Error: --restate requires both --start-date and --end-date",
-            file=sys.stderr,
+        logger.error(
+            "Error: --restate requires both --start-date and --end-date"
         )
         return 1
 
     # Validate YAML file exists
     yaml_path = Path(parsed.yaml_file)
     if not yaml_path.exists():
-        print(f"Error: YAML file not found: {yaml_path}", file=sys.stderr)
+        logger.error(f"Error: YAML file not found: {yaml_path}")
         return 1
 
     # Parse dates
@@ -180,9 +179,8 @@ def create_cache_main(args: list[str] | None = None) -> int:
         try:
             start_date = dt.date.fromisoformat(parsed.start_date)
         except ValueError:
-            print(
-                f"Error: Invalid start date: {parsed.start_date}",
-                file=sys.stderr,
+            logger.error(
+                f"Error: Invalid start date: {parsed.start_date}"
             )
             return 1
 
@@ -190,7 +188,7 @@ def create_cache_main(args: list[str] | None = None) -> int:
         try:
             end_date = dt.date.fromisoformat(parsed.end_date)
         except ValueError:
-            print(f"Error: Invalid end date: {parsed.end_date}", file=sys.stderr)
+            logger.error(f"Error: Invalid end date: {parsed.end_date}")
             return 1
 
     # Parse instruments
@@ -213,7 +211,7 @@ def create_cache_main(args: list[str] | None = None) -> int:
             verbose=parsed.verbose,
         )
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error(f"Error: {e}")
         return 1
 
 
@@ -247,24 +245,25 @@ def _run_create_from_yaml(
     cache_path = cache_path.resolve()
 
     if not cache_path.exists():
-        print(f"Error: Cache directory not found: {cache_path}", file=sys.stderr)
+        logger.error(f"Error: Cache directory not found: {cache_path}")
         return 1
 
     if verbose:
-        print(f"Using cache directory: {cache_path}")
+        logger.info(f"Using cache directory: {cache_path}")
 
     # Load configs from the YAML file
     configs = load_yaml_file(yaml_path, cache_path)
     if not configs:
-        print(f"Error: No dataset configurations found in {yaml_path}", file=sys.stderr)
+        logger.error(
+            f"Error: No dataset configurations found in {yaml_path}"
+        )
         return 1
 
     # Filter to requested dataset
     if dataset_name:
         if dataset_name not in configs:
-            print(
-                f"Error: Dataset '{dataset_name}' not found in YAML",
-                file=sys.stderr,
+            logger.error(
+                f"Error: Dataset '{dataset_name}' not found in YAML"
             )
             return 1
         configs = {dataset_name: configs[dataset_name]}
@@ -275,7 +274,7 @@ def _run_create_from_yaml(
 
     for name, config in configs.items():
         if verbose:
-            print(f"Processing {name}...")
+            logger.info(f"Processing {name}...")
 
         try:
             dpd = config.to_dpd()
@@ -290,7 +289,7 @@ def _run_create_from_yaml(
                 if preserve_config:
                     # Use stored config for DPD structure, only use YAML for source
                     if verbose:
-                        print(f"  {name}: Preserving existing config")
+                        logger.info(f"  {name}: Preserving existing config")
                     # Update DPD with stored config values
                     dpd.date_col = stored_config.get("date_col", dpd.date_col)
                     dpd.date_partition = stored_config.get(
@@ -310,17 +309,16 @@ def _run_create_from_yaml(
                         yaml_config, stored_config, name
                     )
                     if errors:
-                        print(
-                            f"  {name}: ERROR - YAML config differs from stored "
-                            "metadata:",
-                            file=sys.stderr,
+                        logger.error(
+                            f"  {name}: ERROR - YAML config differs from "
+                            "stored metadata:"
                         )
                         for err in errors:
-                            print(err, file=sys.stderr)
-                        print(
-                            "  These fields cannot be changed. Use a new dataset "
-                            "name, fix the YAML config, or use --preserve-config.",
-                            file=sys.stderr,
+                            logger.error(err)
+                        logger.error(
+                            "  These fields cannot be changed. Use a new "
+                            "dataset name, fix the YAML config, or use "
+                            "--preserve-config."
                         )
                         error_count += 1
                         continue
@@ -328,15 +326,14 @@ def _run_create_from_yaml(
             except SnapshotNotFoundError:
                 # No existing metadata - this is a new dataset
                 if preserve_config:
-                    print(
-                        f"  {name}: ERROR - --preserve-config requires existing "
-                        "metadata",
-                        file=sys.stderr,
+                    logger.error(
+                        f"  {name}: ERROR - --preserve-config requires "
+                        "existing metadata"
                     )
                     error_count += 1
                     continue
                 if verbose:
-                    print(f"  {name}: Creating new dataset")
+                    logger.info(f"  {name}: Creating new dataset")
 
             source = config.create_source(dpd)
             cleaner = config.create_cleaner(dpd)
@@ -372,20 +369,22 @@ def _run_create_from_yaml(
 
             if suffix:
                 if dry_run:
-                    print(f"  {name}: would create snapshot {suffix}")
+                    logger.info(f"  {name}: would create snapshot {suffix}")
                 else:
-                    print(f"  {name}: created snapshot {suffix}")
+                    logger.info(f"  {name}: created snapshot {suffix}")
                 success_count += 1
             else:
-                print(f"  {name}: no update needed")
+                logger.info(f"  {name}: no update needed")
 
         except (ConfigurationError, DataSourceError) as e:
-            print(f"  {name}: ERROR - {e}", file=sys.stderr)
+            logger.error(f"  {name}: ERROR - {e}")
             error_count += 1
 
     # Summary
     if verbose or error_count > 0:
-        print(f"\nCompleted: {success_count} updated, {error_count} errors")
+        logger.info(
+            f"\nCompleted: {success_count} updated, {error_count} errors"
+        )
 
     return 1 if error_count > 0 else 0
 

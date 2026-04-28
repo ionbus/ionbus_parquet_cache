@@ -270,15 +270,30 @@ elapses since the Unix epoch). You can read from any snapshot.
 - `read_data_pl(name, ..., snapshot=...)` - returns Polars DataFrame
 - `pyarrow_dataset(name, ..., snapshot=...)` - returns PyArrow Dataset
 
+Use `get_latest_snapshot()` to inspect or record the exact snapshot being read
+before passing it explicitly — useful when you need a reproducible read or want
+to log provenance.
+
 ```python
 # Read from current snapshot (default)
 df = registry.read_data("md.futures_daily", start_date="2024-01-01")
 
-# Read from a specific historical snapshot
+# Inspect the latest available snapshot suffix
+suffix = registry.get_latest_snapshot("md.futures_daily")
+print(suffix)  # e.g. "1H4DW01"
+
+# Pin to a specific snapshot for a reproducible read
 df = registry.read_data(
     "md.futures_daily",
     start_date="2024-01-01",
-    snapshot="1H4DW00",  # snapshot suffix
+    snapshot=suffix,
+)
+
+# Read from a specific historical snapshot by known suffix
+df = registry.read_data(
+    "md.futures_daily",
+    start_date="2024-01-01",
+    snapshot="1H4DW00",
 )
 
 # Also works with read_data_pl and pyarrow_dataset

@@ -320,6 +320,7 @@ df = registry.read_data("md.futures_daily", cache_name="official")
 | `read_data_pl(name, filters=None, ...)` | Read data, returning a `pl.DataFrame` |
 | `to_table(name, filters=None, ...)` | Read data, returning a PyArrow `Table` |
 | `pyarrow_dataset(name, start_date=None, end_date=None, filters=None, cache_name=None, snapshot=None)` | Get PyArrow dataset from first matching cache |
+| `get_latest_snapshot(name, cache_name=None)` | Return the latest snapshot suffix string for a dataset |
 | `data_summary()` | DataFrame summarizing all datasets across all caches |
 | `discover_dpds(cache_path)` | Discover DPDs in a cache by scanning for `_meta_data` directories |
 | `discover_npds(cache_path)` | Discover NPDs by scanning the `non-dated` directory |

@@ -265,8 +265,11 @@ class CacheRegistry:
             if not suffixes_gcs:
                 return None
             current_suffix, meta_url = max(suffixes_gcs, key=lambda x: x[0])
+            import gzip
+            import pickle
             with gcs_open(meta_url) as f:
-                metadata = pd.read_pickle(f)
+                with gzip.open(f) as gz:
+                    metadata = pickle.load(gz)
         else:
             data_dir = dpds[name]
             meta_dir = data_dir / "_meta_data"  # type: ignore[operator]
@@ -388,6 +391,32 @@ class CacheRegistry:
                     return npd
 
         return None
+
+    def get_latest_snapshot(
+        self,
+        name: str,
+        cache_name: str | None = None,
+    ) -> str:
+        """
+        Return the latest snapshot suffix available for a dataset.
+
+        Args:
+            name: Dataset name.
+            cache_name: Optional specific cache to search.
+
+        Returns:
+            Snapshot suffix string (e.g. "20240501_120000").
+
+        Raises:
+            SnapshotNotFoundError: If dataset not found.
+        """
+        dataset = self.get_dataset(name, cache_name)
+        if dataset is None:
+            raise SnapshotNotFoundError(
+                f"Dataset '{name}' not found in any cache",
+                dataset_name=name,
+            )
+        return dataset.current_suffix
 
     def read_data(
         self,
