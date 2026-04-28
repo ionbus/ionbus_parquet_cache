@@ -85,10 +85,17 @@ These modules have no internal dependencies and establish core concepts:
    - `CacheRegistry` - Singleton pattern with `instance()`
    - Searches multiple cache locations in priority order
    - Auto-discovers DPDs (by `_meta_data/`) and NPDs (by `non-dated/`)
+   - Auto-loads caches from `IBU_PARQUET_CACHE` env var on first instantiation (`name|location,name|location`)
+   - Accepts `gs://` GCS paths alongside local paths
+
+9. **`gcs_utils.py`** - GCS I/O utilities (lazy `gcsfs` import)
+   - `is_gcs_path()`, `get_gcs_filesystem()`, `gcs_pa_filesystem()` (PyArrow-compatible)
+   - `gcs_upload()`, `gcs_download()`, `gcs_find()`, `gcs_open()`, `should_upload()`, `should_download()`
+   - All operations are no-ops until a `gs://` path is actually used; `gcsfs` is only imported then
 
 ### Level 3: Data Pipeline
 
-9. **`data_source.py`** - Data input interface
+10. **`data_source.py`** - Data input interface
    - `DataSource` - Abstract class for supplying data
    - Must implement: `available_dates()`, `prepare()`, `get_data()`
    - Default `get_partitions()` handles most cases
@@ -97,12 +104,12 @@ These modules have no internal dependencies and establish core concepts:
    - Must implement: `get_instruments_for_time_period()`, `get_data_for_bucket()`
    - Base class owns `get_partitions()` (pure math, no I/O) and `get_data()` (lazy bucket dispatch)
 
-10. **`data_cleaner.py`** - Data transformation interface
+11. **`data_cleaner.py`** - Data transformation interface
    - `DataCleaner` - Abstract class for custom transforms
    - Operates on DuckDB relations (lazy evaluation)
    - `NoOpCleaner` - Pass-through implementation
 
-11. **`update_pipeline.py`** - Update execution
+12. **`update_pipeline.py`** - Update execution
     - `WriteGroup` - Groups specs with same partition values
     - `UpdatePlan` - Complete plan with temp file paths
     - `compute_update_window()` - Determines date range to fetch
@@ -111,23 +118,23 @@ These modules have no internal dependencies and establish core concepts:
 
 ### Level 4: Configuration & CLI
 
-12. **`yaml_config.py`** - YAML-based configuration
+13. **`yaml_config.py`** - YAML-based configuration
     - `DatasetConfig` - All settings for a DPD
     - `load_all_configs()` - Loads from `yaml/` directory
     - `apply_yaml_transforms()` - Rename, drop, dropna, dedup via DuckDB
     - Dynamic class loading from `code/` directory
 
-13. **`builtin_sources.py`** - Standard data sources
+14. **`builtin_sources.py`** - Standard data sources
     - `HiveParquetSource` - Reads existing parquet files
     - `DPDSource` - Reads from another DatedParquetDataset
     - Used when `source_location` is empty in YAML
 
-14. **`cli.py`** - Command-line interface
+15. **`cli.py`** - Command-line interface
     - `update_cache_main()` - Updates datasets from sources
     - `cleanup_cache_main()` - Analyzes old snapshots
     - `sync_cache_main()` - Push/pull between locations
 
-15. **`rename_cache.py`** - In-place dataset rename
+16. **`rename_cache.py`** - In-place dataset rename
     - `rename_cache(cache_dir, old_name, new_name, dry_run)` - Renames directory and metadata files
     - Safe recovery ordering: write new metadata → rename dir → delete old metadata
 

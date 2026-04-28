@@ -253,7 +253,7 @@ class TestCleanupCacheMain:
         assert result == 0
 
     def test_single_snapshot_message_without_verbose(
-        self, configured_cache: Path, capsys: pytest.CaptureFixture[str]
+        self, configured_cache: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """cleanup-cache should list single-snapshot datasets without --verbose."""
         # Create a single snapshot
@@ -268,9 +268,8 @@ class TestCleanupCacheMain:
         result = cleanup_cache_main([str(configured_cache)])
         assert result == 0
 
-        stdout = capsys.readouterr().out
         # Should mention "only current snapshot" even without --verbose
-        assert "only current snapshot" in stdout
+        assert "only current snapshot" in caplog.text
 
 
 class TestSyncCacheMain:
@@ -527,7 +526,7 @@ class TestSyncPushPull:
         assert data_files[0].stat().st_mtime == original_mtime
 
     def test_dry_run_reports_pending_work(
-        self, configured_cache: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, configured_cache: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Dry-run sync should report files that would actually be copied."""
         create_cache_main([
@@ -547,12 +546,11 @@ class TestSyncPushPull:
         assert result == 0
         assert not dest.exists()
 
-        stdout = capsys.readouterr().out
-        assert "Would sync 0 files" not in stdout
-        assert "Would sync " in stdout
+        assert "Would sync 0 files" not in caplog.text
+        assert "Would sync " in caplog.text
 
     def test_sync_reports_skipped_unchanged_files(
-        self, configured_cache: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, configured_cache: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A repeat sync should report skipped unchanged files in the summary."""
         create_cache_main([
@@ -568,7 +566,6 @@ class TestSyncPushPull:
             str(configured_cache),
             str(dest),
         ])
-        capsys.readouterr()
 
         sync_cache_main([
             "push",
@@ -576,9 +573,8 @@ class TestSyncPushPull:
             str(dest),
         ])
 
-        stdout = capsys.readouterr().out
-        assert "skipped " in stdout
-        assert "unchanged" in stdout
+        assert "skipped " in caplog.text
+        assert "unchanged" in caplog.text
 
 
 class TestTrimUndoScript:

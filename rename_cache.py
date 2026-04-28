@@ -156,7 +156,7 @@ def main() -> None:
             dry_run=args.dry_run,
         )
     except (FileNotFoundError, FileExistsError, ValueError) as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error(f"Error: {e}")
         sys.exit(1)
 
 

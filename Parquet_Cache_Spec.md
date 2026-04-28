@@ -320,6 +320,7 @@ df = registry.read_data("md.futures_daily", cache_name="official")
 | `read_data_pl(name, filters=None, ...)` | Read data, returning a `pl.DataFrame` |
 | `to_table(name, filters=None, ...)` | Read data, returning a PyArrow `Table` |
 | `pyarrow_dataset(name, start_date=None, end_date=None, filters=None, cache_name=None, snapshot=None)` | Get PyArrow dataset from first matching cache |
+| `get_latest_snapshot(name, cache_name=None)` | Return the latest snapshot suffix string for a dataset |
 | `data_summary()` | DataFrame summarizing all datasets across all caches |
 | `discover_dpds(cache_path)` | Discover DPDs in a cache by scanning for `_meta_data` directories |
 | `discover_npds(cache_path)` | Discover NPDs by scanning the `non-dated` directory |
@@ -892,6 +893,7 @@ class FuturesDataCleaner(DataCleaner):
 | `start_date_str` | `str` | `None` | **Debugging/testing only.** Optional override for earliest date (ISO format). If set, the DPD guarantees that `get_data()` will never be called with a start date earlier than this value. Rarely used in production YAML files. |
 | `end_date_str` | `str` | `None` | **Debugging/testing only.** Optional override for latest date (ISO format). If set, the DPD guarantees that `get_data()` will never be called with an end date later than this value. Rarely used in production YAML files. |
 | `repull_n_days` | `int` | `0` | Number of trailing business days to re-fetch each update |
+| `row_group_size` | `int \| None` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values allow row-group-level predicate pushdown within a file at the cost of more metadata overhead. Only relevant when files are large enough to contain multiple row groups. |
 | `instrument_column` | `str` | `None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Must also be a partition column. |
 | `instruments` | `list[str]` | `None` | Instruments to include in updates. If `None`, fetches all instruments. Can be expanded over time using backfill (see below). |
 | `source_location` | `str` | `""` | Path to the Python file containing the `DataSource` subclass. Can be relative to the cache root directory (e.g., `code/futures_source.py`) or an absolute path. If empty/blank, uses a built-in data source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)). |
@@ -1080,6 +1082,16 @@ calling `prepare()` directly.
    - YAML transforms and DataCleaner are applied per-chunk (each temp
      file is already cleaned)
 
+7. **DPD calls `source.on_update_complete(suffix, previous_suffix)` once after publish:**
+   - Called after all partitions have been written and the snapshot is
+     published; not called on dry runs or if the update is a no-op
+   - `suffix` is the newly published snapshot; `previous_suffix` is the
+     snapshot that existed before this update, or `None` on first update
+   - `self.start_date`, `self.end_date`, and `self.instruments` are still
+     set from `prepare()` at this point
+   - Default is a no-op; override to record provenance, write audit
+     trails, send notifications, etc.
+
 **Data fetching strategies:**
 
 The DataSource controls how data is fetched. Two common patterns:
@@ -1116,10 +1128,11 @@ that partition are processed. See
 - `available_dates()` - Return the date range the source can provide
 - `get_data()` - Return data for a single partition/chunk
 
-**Two optional methods** (base class provides default implementations):
+**Three optional methods** (base class provides default implementations):
 
 - `prepare()` - Set up for fetching (default calls `set_date_instruments()`)
 - `get_partitions()` - Return list of partitions to update (default uses class attributes)
+- `on_update_complete(suffix)` - Post-update bookkeeping hook (default is a no-op)
 
 **Method details:**
 
@@ -1296,6 +1309,38 @@ The return type can be:
 - `pandas.DataFrame`
 
 The system will convert to the appropriate format internally.
+
+#### `on_update_complete(...)`
+
+```python
+def on_update_complete(self, suffix: str, previous_suffix: str | None) -> None:
+    ...
+```
+
+Called once after all partitions have been written and the snapshot is published.
+The base class provides a no-op default. Override to record provenance, write
+audit trails, send completion notifications, update a separate tracking table,
+etc.
+
+- Called only when an actual snapshot is published — not on dry runs and not
+  when the update is a no-op (no partitions to process).
+- `suffix` is the snapshot suffix that was just published.
+- `previous_suffix` is the suffix of the snapshot that existed before this
+  update, or `None` if this is the first update of the cache.
+- `self.start_date`, `self.end_date`, and `self.instruments` are still set from
+  `prepare()` at this point, giving full context about the completed run.
+
+```python
+class MySource(DataSource):
+    def on_update_complete(self, suffix: str, previous_suffix: str | None) -> None:
+        write_audit_record(
+            snapshot=suffix,
+            previous_snapshot=previous_suffix,  # None on first update
+            start=self.start_date,
+            end=self.end_date,
+            source="my_api",
+        )
+```
 
 #### `date_partitions(...)` (static method)
 
@@ -3558,6 +3603,63 @@ yaml-create-datasets /path/to/cache md.futures_daily --preserve-config
 **Note:** `--preserve-config` requires the dataset to already exist in the
 cache. If the dataset doesn't exist, the flag is ignored and the full YAML
 configuration is applied.
+
+---
+
+## GCS Support
+
+Google Cloud Storage paths (`gs://`) are supported for **reading** and
+**syncing**, but not yet for direct write operations. The intended workflow
+is to maintain and update the cache locally, then push it to GCS using
+`sync-cache push`.
+
+**What works today:**
+
+- **`CacheRegistry` reads:** A `CacheRegistry` can be opened with a
+  `gs://bucket-name/path/to/cache` root. All `DatedParquetDataset` and
+  `NonDatedParquetDataset` discovery, metadata loading, and data reads
+  work against GCS paths.
+- **`sync-cache push/pull`:** Both directions are supported. Use
+  `sync-cache push /local/cache gs://bucket/cache` to replicate a local
+  cache to GCS, and `sync-cache pull gs://bucket/cache /local/cache` to
+  download a remote cache locally.
+- **NPD snapshot path resolution:** A
+  `NonDatedParquetDataset` stored on GCS correctly resolves its current
+  snapshot path, allowing reads via the standard API.
+
+**What does not work yet:**
+
+- **`DatedParquetDataset.update()` / `publish()`:** Writing new snapshots
+  or updating data directly to a GCS-backed DPD is not supported.
+  Atomic metadata writes and locking rely on local filesystem semantics
+  that are not yet adapted for GCS.
+- **`NonDatedParquetDataset.import_snapshot()`:** Importing a new snapshot
+  directly into a GCS-backed NPD is not supported. Write locally and
+  sync to GCS instead.
+
+**Recommended workflow:**
+
+```python
+# 1. Update the cache locally
+dpd = registry.get_dataset("md.futures_daily", cache_name="local")
+dpd.update()
+
+# 2. Push the updated cache to GCS (via CLI or Python)
+# sync-cache push /local/cache gs://bucket-name/cache
+
+# 3. Readers access GCS directly via CacheRegistry
+from ionbus_parquet_cache import CacheRegistry
+
+registry = CacheRegistry.instance(gcs="gs://bucket-name/cache")
+df = registry.read_data(
+    "md.futures_daily",
+    start_date="2024-01-01",
+    cache_name="gcs",
+)
+```
+
+Full GCS write support (direct DPD updates and NPD snapshot imports
+against GCS-backed caches) is planned for a future release.
 
 ---
 

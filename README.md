@@ -31,6 +31,7 @@
 - [Writing a DataSource](#writing-a-datasource)
    * [Minimal example](#minimal-example)
    * [With chunking for large datasets](#with-chunking-for-large-datasets)
+   * [Post-update bookkeeping](#post-update-bookkeeping)
    * [Built-in sources](#built-in-sources)
 - [YAML Configuration](#yaml-configuration)
    * [Basic example](#basic-example)
@@ -269,15 +270,30 @@ elapses since the Unix epoch). You can read from any snapshot.
 - `read_data_pl(name, ..., snapshot=...)` - returns Polars DataFrame
 - `pyarrow_dataset(name, ..., snapshot=...)` - returns PyArrow Dataset
 
+Use `get_latest_snapshot()` to inspect or record the exact snapshot being read
+before passing it explicitly — useful when you need a reproducible read or want
+to log provenance.
+
 ```python
 # Read from current snapshot (default)
 df = registry.read_data("md.futures_daily", start_date="2024-01-01")
 
-# Read from a specific historical snapshot
+# Inspect the latest available snapshot suffix
+suffix = registry.get_latest_snapshot("md.futures_daily")
+print(suffix)  # e.g. "1H4DW01"
+
+# Pin to a specific snapshot for a reproducible read
 df = registry.read_data(
     "md.futures_daily",
     start_date="2024-01-01",
-    snapshot="1H4DW00",  # snapshot suffix
+    snapshot=suffix,
+)
+
+# Read from a specific historical snapshot by known suffix
+df = registry.read_data(
+    "md.futures_daily",
+    start_date="2024-01-01",
+    snapshot="1H4DW00",
 )
 
 # Also works with read_data_pl and pyarrow_dataset
@@ -374,11 +390,11 @@ The `CacheRegistry` lets you search across multiple cache locations in priority 
 ```python
 from ionbus_parquet_cache import CacheRegistry
 
-# Register caches in priority order
+# Register caches in priority order (local paths or GCS URLs)
 registry = CacheRegistry.instance(
-    local="c:/Users/me/cache",      # Checked first (fast SSD)
-    team="n:/team/cache",           # Checked second
-    firm="n:/firm/cache",           # Checked last (authoritative)
+    local="c:/Users/me/cache",          # Checked first (fast SSD)
+    team="n:/team/cache",               # Checked second
+    firm="gs://my-bucket/parquet-cache" # GCS — checked last (authoritative)
 )
 
 # Reads from the first cache containing the dataset
@@ -390,6 +406,42 @@ print(registry.data_summary())
 # Force reading from a specific cache
 df = registry.read_data("md.futures_daily", cache_name="firm")
 ```
+
+### Auto-loading caches from an environment variable
+
+Set `IBU_PARQUET_CACHE` to pre-register caches without any code change. The
+registry reads this variable on first instantiation.
+
+Format: `name|location,name|location`
+
+```bash
+# Local paths
+export IBU_PARQUET_CACHE="local|/data/cache,team|/mnt/team/cache"
+
+# Mix of local and GCS
+export IBU_PARQUET_CACHE="local|/data/cache,prod|gs://my-bucket/parquet-cache"
+```
+
+```python
+# No arguments needed — caches loaded from IBU_PARQUET_CACHE automatically
+registry = CacheRegistry.instance()
+df = registry.read_data("md.futures_daily")
+```
+
+### GCS caches
+
+GCS paths (`gs://bucket/prefix`) are supported for **reading** and **syncing**.
+Direct GCS-backed writes and dataset updates are not yet supported — the intended
+workflow is to update locally and sync to GCS with `sync-cache push`. Full
+GCS write support is planned for a future release.
+
+Install the GCS dependency (only required when a `gs://` path is actually used):
+
+```bash
+pip install gcsfs
+```
+
+Authentication uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) — run `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account key file.
 
 ## Updating Data
 
@@ -500,6 +552,38 @@ class MySource(DataSource):
         )
 ```
 
+### Post-update bookkeeping
+
+Override `on_update_complete(suffix)` to run any bookkeeping after all partitions
+have been written and the snapshot is published. `self.start_date`,
+`self.end_date`, and `self.instruments` are still set from `prepare()` at this
+point, so you have full context about what was just run.
+
+```python
+class MySource(DataSource):
+    def available_dates(self):
+        return (dt.date(2020, 1, 1), dt.date.today() - dt.timedelta(days=1))
+
+    def get_data(self, partition_spec):
+        return fetch_from_my_api(
+            start=partition_spec.start_date,
+            end=partition_spec.end_date,
+        )
+
+    def on_update_complete(self, suffix: str, previous_suffix: str | None) -> None:
+        # previous_suffix is None on the first update of a cache
+        write_audit_record(
+            snapshot=suffix,
+            previous_snapshot=previous_suffix,
+            start=self.start_date,
+            end=self.end_date,
+            source="my_api",
+        )
+```
+
+Common uses: writing audit trails, recording API call counts or checksums,
+updating a separate provenance table, sending a completion notification.
+
 ### Built-in sources
 
 For common cases, you don't need to write a DataSource:
@@ -608,6 +692,7 @@ datasets:
 | `partition_columns` | `list[str]` | `[]` | Columns to partition by (in directory order) |
 | `sort_columns` | `list[str]` | `[date_col]` | Sort order within partition files; defaults to `[date_col]` if not provided |
 | `repull_n_days` | `int` | `0` | Re-fetch this many recent business days on each update |
+| `row_group_size` | `int` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values enable row-group-level predicate pushdown at the cost of more file metadata. |
 | `instrument_column` | `str` | `None` | Column name holding instrument identifiers (e.g., `"ticker"`). Required when `num_instrument_buckets` is set. |
 | `num_instrument_buckets` | `int` | `None` | Enable hash bucketing: group tickers into this many bucket directories instead of one directory per ticker. Must be set together with `instrument_column`. |
 | `instruments` | `list[str]` | `None` | List of instruments to filter on (uses `instrument_column`) |
@@ -970,18 +1055,21 @@ Output includes a generated script path. Review the script, then run it to delet
 
 ### sync-cache
 
-Copy data between cache locations. Currently works with local paths only.
+Copy data between cache locations. Supports local paths and GCS (`gs://`).
 S3 support will be implemented in a future release.
 
 ```bash
-# Push local cache to remote
+# Push local cache to remote (local)
 python -m ionbus_parquet_cache.sync_cache push /local/cache /remote/cache
 
-# Pull from remote to local
-python -m ionbus_parquet_cache.sync_cache pull /remote/cache /local/cache
+# Push local cache to GCS
+python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache
+
+# Pull from GCS to local
+python -m ionbus_parquet_cache.sync_cache pull gs://my-bucket/cache /local/cache
 
 # Sync specific datasets
-python -m ionbus_parquet_cache.sync_cache push /local /remote \
+python -m ionbus_parquet_cache.sync_cache push /local gs://my-bucket/cache \
     --dataset md.futures_daily md.equity_daily
 
 # Copy dataset with a new name
@@ -991,13 +1079,15 @@ python -m ionbus_parquet_cache.sync_cache push /local /remote \
 # Include all historical snapshots (not just current)
 python -m ionbus_parquet_cache.sync_cache push /local /remote --all-snapshots
 
-# Delete files at destination not in source
+# Delete files at destination not in source (local only)
 python -m ionbus_parquet_cache.sync_cache push /local /remote --delete
 
-# Continuous sync (daemon mode)
-python -m ionbus_parquet_cache.sync_cache pull /remote /local \
+# Continuous sync from GCS (daemon mode)
+python -m ionbus_parquet_cache.sync_cache pull gs://my-bucket/cache /local \
     --daemon --update-interval 60
 ```
+
+GCS sync uses size-based change detection. Requires `pip install gcsfs`.
 
 ### rename-cache
 

@@ -10,15 +10,26 @@ from __future__ import annotations
 import datetime as dt
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar
 
 import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pyarrow.dataset as pds
-from pydantic import PrivateAttr
+from pydantic import BeforeValidator, PrivateAttr
 
 from ionbus_parquet_cache.exceptions import SnapshotNotFoundError
+
+
+def _parse_cache_dir(v: Any) -> str | Path:
+    """Accept GCS strings as-is; coerce everything else to Path."""
+    s = str(v)
+    if s.startswith("gs://"):
+        return s.rstrip("/")
+    return Path(v)
+
+
+CacheDirField = Annotated[str | Path, BeforeValidator(_parse_cache_dir)]
 from ionbus_parquet_cache.filter_utils import build_dataset_filter
 from ionbus_utils.yaml_utils.pdyaml import PDYaml
 
@@ -41,8 +52,13 @@ class ParquetDataset(PDYaml, ABC):
     is_dated_dataset_type: ClassVar[bool] = False
     date_col: str | None = None
 
-    cache_dir: Path
+    cache_dir: CacheDirField  # type: ignore[assignment]
     current_suffix: str | None = None
+
+    @property
+    def is_gcs(self) -> bool:
+        """True when this dataset is backed by GCS storage."""
+        return isinstance(self.cache_dir, str)
 
     # Private attributes for cached state (not serialized)
     _schema: pa.Schema | None = PrivateAttr(default=None)

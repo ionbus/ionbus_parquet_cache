@@ -16,6 +16,7 @@ import pandas as pd
 
 from ionbus_utils.date_utils import date_partition_range
 from ionbus_utils.file_utils import format_size
+from ionbus_utils.logging_utils import logger
 
 from ionbus_parquet_cache.dated_dataset import (
     DatedParquetDataset,
@@ -114,9 +115,8 @@ def cleanup_cache_main(args: list[str] | None = None) -> int:
         parsed.npd_only,
     ])
     if mode_count > 1:
-        print(
-            "Error: --dataset, --dpd-only, and --npd-only are mutually exclusive",
-            file=sys.stderr,
+        logger.error(
+            "Error: --dataset, --dpd-only, and --npd-only are mutually exclusive"
         )
         return 1
 
@@ -136,7 +136,7 @@ def cleanup_cache_main(args: list[str] | None = None) -> int:
             verbose=parsed.verbose,
         )
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error(f"Error: {e}")
         return 1
 
 
@@ -156,7 +156,7 @@ def _run_cleanup(
     """Execute the cleanup analysis."""
     cache_path = Path(cache_dir)
     if not cache_path.exists():
-        print(f"Error: Cache directory not found: {cache_dir}", file=sys.stderr)
+        logger.error(f"Error: Cache directory not found: {cache_dir}")
         return 1
 
     # Trim operations are dangerous - run separately
@@ -191,14 +191,14 @@ def _run_cleanup(
     # Process DPDs
     for name, snapshots in dpd_snapshots.items():
         if len(snapshots) <= 1:
-            print(f"{name}: only current snapshot, nothing to clean")
+            logger.info(f"{name}: only current snapshot, nothing to clean")
             continue
 
         # Sort by suffix (oldest first)
         snapshots = sorted(snapshots, key=lambda s: s["suffix"])
         current = snapshots[-1]
 
-        print(f"{name}:")
+        logger.info(f"{name}:")
         for snap in snapshots:
             is_current = snap == current
             suffix = snap["suffix"]
@@ -215,12 +215,12 @@ def _run_cleanup(
                     should_delete = True
 
             if is_current:
-                print(f"  {suffix} <- current snapshot")
+                logger.info(f"  {suffix} <- current snapshot")
             elif should_delete:
                 size = snap.get("size", 0)
                 total_size += size
                 size_str = format_size(size)
-                print(
+                logger.info(
                     f"  {suffix}: {len(snap.get('files', []))} files, "
                     f"{size_str} reclaimable"
                 )
@@ -230,18 +230,18 @@ def _run_cleanup(
                 if meta_file:
                     files_to_delete.append(meta_file)
             else:
-                print(f"  {suffix}: {len(snap.get('files', []))} files")
+                logger.info(f"  {suffix}: {len(snap.get('files', []))} files")
 
     # Process NPDs
     for name, snapshots in npd_snapshots.items():
         if len(snapshots) <= 1:
-            print(f"{name} (NPD): only current snapshot, nothing to clean")
+            logger.info(f"{name} (NPD): only current snapshot, nothing to clean")
             continue
 
         snapshots = sorted(snapshots, key=lambda s: s["suffix"])
         current = snapshots[-1]
 
-        print(f"{name} (NPD):")
+        logger.info(f"{name} (NPD):")
         for snap in snapshots:
             is_current = snap == current
             suffix = snap["suffix"]
@@ -256,47 +256,53 @@ def _run_cleanup(
                     should_delete = True
 
             if is_current:
-                print(f"  {suffix} <- current snapshot")
+                logger.info(f"  {suffix} <- current snapshot")
             elif should_delete:
                 size = snap.get("size", 0)
                 total_size += size
                 size_str = format_size(size)
-                print(f"  {suffix}: {size_str} reclaimable")
+                logger.info(f"  {suffix}: {size_str} reclaimable")
                 if snap.get("path"):
                     files_to_delete.append(snap["path"])
             else:
                 size_str = format_size(snap.get("size", 0))
-                print(f"  {suffix}: {size_str}")
+                logger.info(f"  {suffix}: {size_str}")
 
     # Summary
     if files_to_delete:
-        print(f"\nTotal reclaimable: {format_size(total_size)}")
+        logger.info(f"\nTotal reclaimable: {format_size(total_size)}")
 
         # Generate cleanup script
         if older_than_days or keep_last or snapshot_suffix:
             script_path = _generate_cleanup_script(cache_path, files_to_delete)
-            print(f"\nWrote cleanup script: {script_path}")
-            print("Review the script, then run it to delete files.")
+            logger.info(
+                f"\nWrote cleanup script: {script_path}\n"
+                "Review the script, then run it to delete files."
+            )
     else:
-        print("\nNo files to clean up.")
+        logger.info("\nNo files to clean up.")
 
     # Find orphans if requested
     if find_orphans:
         orphans = _find_orphaned_files(cache_path, dpd_snapshots, npd_snapshots)
         if orphans:
             total_size = sum(f.stat().st_size for f in orphans if f.exists())
-            print(f"\nOrphaned files ({len(orphans)}, {format_size(total_size)}):")
+            logger.info(
+                f"\nOrphaned files ({len(orphans)}, {format_size(total_size)}):"
+            )
             for f in orphans[:10]:
-                print(f"  {f}")
+                logger.info(f"  {f}")
             if len(orphans) > 10:
-                print(f"  ... and {len(orphans) - 10} more")
+                logger.info(f"  ... and {len(orphans) - 10} more")
 
             # Generate cleanup script
             script_path = _generate_cleanup_script(cache_path, orphans)
-            print(f"\nWrote orphan cleanup script: {script_path}")
-            print("Review the script, then run it to delete orphaned files.")
+            logger.info(
+                f"\nWrote orphan cleanup script: {script_path}\n"
+                "Review the script, then run it to delete orphaned files."
+            )
         else:
-            print("\nNo orphaned files found.")
+            logger.info("\nNo orphaned files found.")
 
     return 0
 
@@ -314,8 +320,10 @@ def _run_trim(
     Trims data older than the specified threshold and generates
     delete/undo scripts.
     """
-    print("WARNING: Trim operations immediately modify data.", file=sys.stderr)
-    print("Ensure all readers are stopped before proceeding.", file=sys.stderr)
+    logger.error(
+        "WARNING: Trim operations immediately modify data.\n"
+        "Ensure all readers are stopped before proceeding."
+    )
 
     # Calculate cutoff date
     if keep_days is not None:
@@ -323,12 +331,14 @@ def _run_trim(
         today = pd.Timestamp.today().normalize()
         cutoff_ts = today - pd.offsets.BDay(keep_days)
         cutoff_date = cutoff_ts.date()
-        print(f"Trimming data before {cutoff_date} ({keep_days} business days)")
+        logger.info(
+            f"Trimming data before {cutoff_date} ({keep_days} business days)"
+        )
     elif before_date is not None:
         cutoff_date = dt.date.fromisoformat(before_date)
-        print(f"Trimming data before {cutoff_date}")
+        logger.info(f"Trimming data before {cutoff_date}")
     else:
-        print("Error: Must specify --keep-days or --before-date", file=sys.stderr)
+        logger.error("Error: Must specify --keep-days or --before-date")
         return 1
 
     # Find DPDs to trim
@@ -361,7 +371,7 @@ def _run_trim(
 
             metadata = dpd._load_metadata()
         except Exception as e:
-            print(f"  {name}: ERROR loading metadata - {e}", file=sys.stderr)
+            logger.error(f"  {name}: ERROR loading metadata - {e}")
             continue
 
         # Find files to trim
@@ -402,10 +412,10 @@ def _run_trim(
 
         if not files_to_trim:
             if verbose:
-                print(f"{name}: no files to trim")
+                logger.info(f"{name}: no files to trim")
             continue
 
-        print(
+        logger.info(
             f"{name}: trimming {len(files_to_trim)} files, "
             f"keeping {len(files_to_keep)}"
         )
@@ -470,7 +480,7 @@ def _run_trim(
         datasets_trimmed += 1
 
     if not trimmed_files and not trimmed_meta_files:
-        print("\nNo files to trim.")
+        logger.info("\nNo files to trim.")
         return 0
 
     # Generate scripts
@@ -485,15 +495,15 @@ def _run_trim(
         cache_path, all_trimmed, new_meta_files, suffix
     )
 
-    print(f"\nTrimmed {datasets_trimmed} dataset(s)")
-    print(
+    logger.info(
+        f"\nTrimmed {datasets_trimmed} dataset(s)\n"
         f"Marked {len(all_trimmed)} files for deletion "
-        f"({format_size(total_size)})"
+        f"({format_size(total_size)})\n"
+        f"\nGenerated scripts:\n"
+        f"  Delete: {delete_script}\n"
+        f"  Undo:   {undo_script}\n"
+        "\nYou MUST run one of these scripts to complete the trim."
     )
-    print(f"\nGenerated scripts:")
-    print(f"  Delete: {delete_script}")
-    print(f"  Undo:   {undo_script}")
-    print(f"\nYou MUST run one of these scripts to complete the trim.")
 
     return 0
 

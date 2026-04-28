@@ -354,7 +354,7 @@ class TestDryRunFlag:
         assert len(parquet_files) == 0
 
     def test_dry_run_with_verbose(
-        self, temp_cache: Path, sample_yaml: Path, capsys: pytest.CaptureFixture[str]
+        self, temp_cache: Path, sample_yaml: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Dry run with verbose should show what would happen."""
         result = create_cache_main([
@@ -367,8 +367,7 @@ class TestDryRunFlag:
         ])
         assert result == 0
 
-        output = capsys.readouterr().out
-        assert "would create" in output.lower() or "test_dataset" in output
+        assert "would create" in caplog.text.lower() or "test_dataset" in caplog.text
 
 
 class TestErrorHandlingInvalidYaml:

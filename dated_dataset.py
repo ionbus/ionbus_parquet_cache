@@ -160,6 +160,7 @@ class DatedParquetDataset(ParquetDataset):
     num_instrument_buckets: int | None = None
     lock_dir: Path | None = None
     use_update_lock: bool = True
+    row_group_size: int | None = None
 
     # Private attributes for cached state
     _metadata: SnapshotMetadata | None = PrivateAttr(default=None)
@@ -221,14 +222,18 @@ class DatedParquetDataset(ParquetDataset):
                 self.sort_columns = [self.instrument_column, self.date_col]
 
     @property
-    def dataset_dir(self) -> Path:
-        """Return the dataset directory path."""
-        return self.cache_dir / self.name
+    def dataset_dir(self) -> Path | str:
+        """Return the dataset directory path (Path for local, str for GCS)."""
+        if self.is_gcs:
+            return f"{self.cache_dir}/{self.name}"
+        return self.cache_dir / self.name  # type: ignore[operator]
 
     @property
-    def meta_dir(self) -> Path:
-        """Return the metadata directory path."""
-        return self.dataset_dir / "_meta_data"
+    def meta_dir(self) -> Path | str:
+        """Return the metadata directory path (Path for local, str for GCS)."""
+        if self.is_gcs:
+            return f"{self.cache_dir}/{self.name}/_meta_data"
+        return self.dataset_dir / "_meta_data"  # type: ignore[union-attr]
 
     def _discover_current_suffix(self) -> str | None:
         """
@@ -241,11 +246,14 @@ class DatedParquetDataset(ParquetDataset):
         Returns:
             The current suffix, or None if no snapshots exist.
         """
-        if not self.meta_dir.exists():
+        if self.is_gcs:
+            return self._discover_current_suffix_gcs()
+
+        if not self.meta_dir.exists():  # type: ignore[union-attr]
             return None
 
         suffixes = []
-        for item in self.meta_dir.iterdir():
+        for item in self.meta_dir.iterdir():  # type: ignore[union-attr]
             # Skip trimmed snapshots (staged for deletion)
             if "_trimmed" in item.name:
                 continue
@@ -254,6 +262,20 @@ class DatedParquetDataset(ParquetDataset):
                 if suffix:
                     suffixes.append(suffix)
 
+        return get_current_suffix(suffixes)
+
+    def _discover_current_suffix_gcs(self) -> str | None:
+        """Discover the current suffix by listing GCS metadata blobs."""
+        from ionbus_parquet_cache.gcs_utils import gcs_ls
+        suffixes = []
+        for blob_url in gcs_ls(str(self.meta_dir)):
+            name = blob_url.rstrip("/").split("/")[-1]
+            if "_trimmed" in name:
+                continue
+            if name.endswith(".pkl.gz"):
+                suffix = extract_suffix_from_filename(name)
+                if suffix:
+                    suffixes.append(suffix)
         return get_current_suffix(suffixes)
 
     def _load_metadata(self) -> SnapshotMetadata:
@@ -275,15 +297,26 @@ class DatedParquetDataset(ParquetDataset):
                 dataset_name=self.name,
             )
 
-        meta_path = self.meta_dir / f"{self.name}_{self.current_suffix}.pkl.gz"
-        if not meta_path.exists():
-            raise SnapshotNotFoundError(
-                f"Metadata file not found: {meta_path}",
-                dataset_name=self.name,
-            )
-
-        logger.debug(f"Loading metadata for {self.name} from {meta_path}")
-        metadata = SnapshotMetadata.from_pickle(meta_path)
+        if self.is_gcs:
+            meta_url = f"{self.meta_dir}/{self.name}_{self.current_suffix}.pkl.gz"
+            from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_open
+            if not gcs_exists(meta_url):
+                raise SnapshotNotFoundError(
+                    f"Metadata file not found: {meta_url}",
+                    dataset_name=self.name,
+                )
+            logger.debug(f"Loading metadata for {self.name} from {meta_url}")
+            with gcs_open(meta_url) as f:
+                metadata = pd.read_pickle(f)
+        else:
+            meta_path = self.meta_dir / f"{self.name}_{self.current_suffix}.pkl.gz"  # type: ignore[operator]
+            if not meta_path.exists():
+                raise SnapshotNotFoundError(
+                    f"Metadata file not found: {meta_path}",
+                    dataset_name=self.name,
+                )
+            logger.debug(f"Loading metadata for {self.name} from {meta_path}")
+            metadata = SnapshotMetadata.from_pickle(meta_path)
 
         # Validate num_instrument_buckets consistency
         stored_buckets = metadata.yaml_config.get("num_instrument_buckets")
@@ -341,14 +374,24 @@ class DatedParquetDataset(ParquetDataset):
         Raises:
             SnapshotNotFoundError: If the snapshot does not exist.
         """
-        meta_path = self.meta_dir / f"{self.name}_{suffix}.pkl.gz"
-        if not meta_path.exists():
-            raise SnapshotNotFoundError(
-                f"Snapshot '{suffix}' not found for DPD '{self.name}'",
-                dataset_name=self.name,
-            )
-
-        metadata = SnapshotMetadata.from_pickle(meta_path)
+        if self.is_gcs:
+            meta_url = f"{self.meta_dir}/{self.name}_{suffix}.pkl.gz"
+            from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_open
+            if not gcs_exists(meta_url):
+                raise SnapshotNotFoundError(
+                    f"Snapshot '{suffix}' not found for DPD '{self.name}'",
+                    dataset_name=self.name,
+                )
+            with gcs_open(meta_url) as f:
+                metadata = pd.read_pickle(f)
+        else:
+            meta_path = self.meta_dir / f"{self.name}_{suffix}.pkl.gz"  # type: ignore[operator]
+            if not meta_path.exists():
+                raise SnapshotNotFoundError(
+                    f"Snapshot '{suffix}' not found for DPD '{self.name}'",
+                    dataset_name=self.name,
+                )
+            metadata = SnapshotMetadata.from_pickle(meta_path)
         return self._build_dataset_from_metadata(metadata, suffix)
 
     def _build_dataset_from_metadata(
@@ -370,11 +413,23 @@ class DatedParquetDataset(ParquetDataset):
             SnapshotNotFoundError: If no data files exist.
         """
         # Build dataset from file list (FileMetadata objects)
+        # For GCS, trust the metadata — files listed in the snapshot were
+        # written atomically at publish time. Checking gcs_exists() per file
+        # costs one HTTP round-trip each and makes reads very slow.
         existing_files: list[FileMetadata] = []
-        for fm in metadata.files:
-            full_path = self.dataset_dir / fm.path
-            if full_path.exists():
-                existing_files.append(fm)
+        if self.is_gcs:
+            from ionbus_parquet_cache.gcs_utils import (
+                gcs_join,
+                gcs_pa_filesystem,
+                gcs_strip_prefix,
+            )
+            gcs_fs = gcs_pa_filesystem()
+            existing_files = list(metadata.files)
+        else:
+            for fm in metadata.files:
+                full_path = self.dataset_dir / fm.path  # type: ignore[operator]
+                if full_path.exists():
+                    existing_files.append(fm)
 
         if not existing_files:
             raise SnapshotNotFoundError(
@@ -398,8 +453,22 @@ class DatedParquetDataset(ParquetDataset):
             for fm in existing_files
         ]
 
+        if self.is_gcs:
+            dataset_url = str(self.dataset_dir)
+            paths = [
+                gcs_strip_prefix(gcs_join(dataset_url, fm.path))
+                for fm in existing_files
+            ]
+            return pds.FileSystemDataset.from_paths(
+                paths=paths,
+                schema=schema,
+                format=pds.ParquetFileFormat(),
+                filesystem=gcs_fs,
+                partitions=partitions,
+            )
+
         return pds.FileSystemDataset.from_paths(
-            paths=[str(self.dataset_dir / fm.path) for fm in existing_files],
+            paths=[str(self.dataset_dir / fm.path) for fm in existing_files],  # type: ignore[operator]
             schema=schema,
             format=pds.ParquetFileFormat(),
             filesystem=pafs.LocalFileSystem(),
@@ -565,6 +634,7 @@ class DatedParquetDataset(ParquetDataset):
                 "instrument_column": self.instrument_column,
                 "instruments": self.instruments,
                 "num_instrument_buckets": self.num_instrument_buckets,
+                "row_group_size": self.row_group_size,
             }
         else:
             # Caller-supplied yaml_config may have pre-expansion partition_columns
