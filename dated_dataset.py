@@ -160,6 +160,7 @@ class DatedParquetDataset(ParquetDataset):
     num_instrument_buckets: int | None = None
     lock_dir: Path | None = None
     use_update_lock: bool = True
+    row_group_size: int | None = None
 
     # Private attributes for cached state
     _metadata: SnapshotMetadata | None = PrivateAttr(default=None)

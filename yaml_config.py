@@ -48,6 +48,7 @@ class DatasetConfig:
     num_instrument_buckets: int | None = None
     use_update_lock: bool = True
     lock_dir: Path | None = None
+    row_group_size: int | None = None
 
     # Data source settings
     source_location: str = ""
@@ -89,6 +90,7 @@ class DatasetConfig:
             num_instrument_buckets=self.num_instrument_buckets,
             use_update_lock=self.use_update_lock,
             lock_dir=self.lock_dir,
+            row_group_size=self.row_group_size,
         )
 
     def to_yaml_config(self) -> dict[str, Any]:
@@ -114,6 +116,7 @@ class DatasetConfig:
             "instrument_column": self.instrument_column,
             "instruments": self.instruments,
             "num_instrument_buckets": self.num_instrument_buckets,
+            "row_group_size": self.row_group_size,
             # Source settings
             "source_location": self.source_location,
             "source_class_name": self.source_class_name,
@@ -291,6 +294,7 @@ def load_yaml_file(yaml_path: Path, cache_dir: Path) -> dict[str, DatasetConfig]
             instrument_column=settings.get("instrument_column"),
             instruments=settings.get("instruments"),
             num_instrument_buckets=settings.get("num_instrument_buckets"),
+            row_group_size=settings.get("row_group_size"),
             source_location=settings.get("source_location", ""),
             source_class_name=settings.get("source_class_name", ""),
             source_init_args=settings.get("source_init_args", {}),

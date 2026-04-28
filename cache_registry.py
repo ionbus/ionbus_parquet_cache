@@ -306,6 +306,7 @@ class CacheRegistry:
             instrument_column=config.get("instrument_column"),
             num_instrument_buckets=config.get("num_instrument_buckets"),
             instruments=config.get("instruments"),
+            row_group_size=config.get("row_group_size"),
         )
 
         # Set loaded state so is_update_available() and summary() work

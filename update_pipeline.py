@@ -574,7 +574,11 @@ def execute_update(
             # Write temp file
             temp_path = Path(spec.temp_file_path)
             temp_path.parent.mkdir(parents=True, exist_ok=True)
-            pq.write_table(table, temp_path)
+            pq.write_table(
+                table,
+                temp_path,
+                row_group_size=dataset.row_group_size,
+            )
 
         if dry_run:
             logger.debug(f"Dry run complete for {dataset.name}, suffix={plan.suffix}")
@@ -661,7 +665,11 @@ def execute_update(
 
             final_path = group.final_path
             final_path.parent.mkdir(parents=True, exist_ok=True)
-            pq.write_table(combined, final_path)
+            pq.write_table(
+                combined,
+                final_path,
+                row_group_size=dataset.row_group_size,
+            )
             file_metadata_list.append(
                 FileMetadata.from_path(
                     final_path, dataset.dataset_dir, dict(group.partition_values)

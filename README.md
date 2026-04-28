@@ -688,6 +688,7 @@ datasets:
 | `partition_columns` | `list[str]` | `[]` | Columns to partition by (in directory order) |
 | `sort_columns` | `list[str]` | `[date_col]` | Sort order within partition files; defaults to `[date_col]` if not provided |
 | `repull_n_days` | `int` | `0` | Re-fetch this many recent business days on each update |
+| `row_group_size` | `int` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values enable row-group-level predicate pushdown at the cost of more file metadata. |
 | `instrument_column` | `str` | `None` | Column name holding instrument identifiers (e.g., `"ticker"`). Required when `num_instrument_buckets` is set. |
 | `num_instrument_buckets` | `int` | `None` | Enable hash bucketing: group tickers into this many bucket directories instead of one directory per ticker. Must be set together with `instrument_column`. |
 | `instruments` | `list[str]` | `None` | List of instruments to filter on (uses `instrument_column`) |
