@@ -291,6 +291,7 @@ def _discover_datasets_from_disk(
                 repull_n_days=config.get("repull_n_days", 0),
                 instrument_column=config.get("instrument_column"),
                 instruments=config.get("instruments"),
+                row_group_size=config.get("row_group_size"),
             )
             dpd._metadata = metadata
 

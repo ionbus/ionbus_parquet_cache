@@ -430,7 +430,11 @@ df = registry.read_data("md.futures_daily")
 
 ### GCS caches
 
-GCS paths (`gs://bucket/prefix`) are supported anywhere a local path is accepted.
+GCS paths (`gs://bucket/prefix`) are supported for **reading** and **syncing**.
+Direct GCS-backed writes and dataset updates are not yet supported — the intended
+workflow is to update locally and sync to GCS with `sync-cache push`. Full
+GCS write support is planned for a future release.
+
 Install the GCS dependency (only required when a `gs://` path is actually used):
 
 ```bash

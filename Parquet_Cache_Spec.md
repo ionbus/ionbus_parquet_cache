@@ -3606,6 +3606,63 @@ configuration is applied.
 
 ---
 
+## GCS Support
+
+Google Cloud Storage paths (`gs://`) are supported for **reading** and
+**syncing**, but not yet for direct write operations. The intended workflow
+is to maintain and update the cache locally, then push it to GCS using
+`sync-cache push`.
+
+**What works today:**
+
+- **`CacheRegistry` reads:** A `CacheRegistry` can be opened with a
+  `gs://bucket-name/path/to/cache` root. All `DatedParquetDataset` and
+  `NonDatedParquetDataset` discovery, metadata loading, and data reads
+  work against GCS paths.
+- **`sync-cache push/pull`:** Both directions are supported. Use
+  `sync-cache push /local/cache gs://bucket/cache` to replicate a local
+  cache to GCS, and `sync-cache pull gs://bucket/cache /local/cache` to
+  download a remote cache locally.
+- **NPD snapshot path resolution:** A
+  `NonDatedParquetDataset` stored on GCS correctly resolves its current
+  snapshot path, allowing reads via the standard API.
+
+**What does not work yet:**
+
+- **`DatedParquetDataset.update()` / `publish()`:** Writing new snapshots
+  or updating data directly to a GCS-backed DPD is not supported.
+  Atomic metadata writes and locking rely on local filesystem semantics
+  that are not yet adapted for GCS.
+- **`NonDatedParquetDataset.import_snapshot()`:** Importing a new snapshot
+  directly into a GCS-backed NPD is not supported. Write locally and
+  sync to GCS instead.
+
+**Recommended workflow:**
+
+```python
+# 1. Update the cache locally
+dpd = registry.get_dataset("md.futures_daily", cache_name="local")
+dpd.update()
+
+# 2. Push the updated cache to GCS (via CLI or Python)
+# sync-cache push /local/cache gs://bucket-name/cache
+
+# 3. Readers access GCS directly via CacheRegistry
+from ionbus_parquet_cache import CacheRegistry
+
+registry = CacheRegistry.instance(gcs="gs://bucket-name/cache")
+df = registry.read_data(
+    "md.futures_daily",
+    start_date="2024-01-01",
+    cache_name="gcs",
+)
+```
+
+Full GCS write support (direct DPD updates and NPD snapshot imports
+against GCS-backed caches) is planned for a future release.
+
+---
+
 ## Future Work: Auto-Partitioning for Large Datasets
 
 **Not implemented in initial release**, but planned for future versions.

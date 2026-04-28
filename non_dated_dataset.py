@@ -89,12 +89,13 @@ class NonDatedParquetDataset(ParquetDataset):
 
         return get_current_suffix(suffixes)
 
-    def _get_current_snapshot_path(self) -> Path | None:
+    def _get_current_snapshot_path(self) -> Path | str | None:
         """
         Get the path to the current snapshot file or directory.
 
         Returns:
-            Path to current snapshot, or None if no snapshots exist.
+            Path (local) or str URL (GCS) to current snapshot, or None if
+            no snapshots exist.
         """
         if self.current_suffix is None:
             self.current_suffix = self._discover_current_suffix()
@@ -102,13 +103,28 @@ class NonDatedParquetDataset(ParquetDataset):
         if self.current_suffix is None:
             return None
 
-        # Check for directory first, then file
-        dir_path = self.npd_dir / f"{self.name}_{self.current_suffix}"
+        if self.is_gcs:
+            from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_join
+            npd_url = str(self.npd_dir)
+            dir_url = gcs_join(npd_url, f"{self.name}_{self.current_suffix}")
+            if gcs_exists(dir_url):
+                self._is_directory_snapshot = True
+                return dir_url
+            file_url = gcs_join(
+                npd_url, f"{self.name}_{self.current_suffix}.parquet"
+            )
+            if gcs_exists(file_url):
+                self._is_directory_snapshot = False
+                return file_url
+            return None
+
+        # Local path handling
+        dir_path = self.npd_dir / f"{self.name}_{self.current_suffix}"  # type: ignore[operator]
         if dir_path.is_dir():
             self._is_directory_snapshot = True
             return dir_path
 
-        file_path = self.npd_dir / f"{self.name}_{self.current_suffix}.parquet"
+        file_path = self.npd_dir / f"{self.name}_{self.current_suffix}.parquet"  # type: ignore[operator]
         if file_path.is_file():
             self._is_directory_snapshot = False
             return file_path
@@ -277,10 +293,20 @@ class NonDatedParquetDataset(ParquetDataset):
         result["is_directory_snapshot"] = self._is_directory_snapshot
 
         # Count snapshots
-        if self.npd_dir.exists():
+        if self.is_gcs:
+            from ionbus_parquet_cache.gcs_utils import gcs_ls
             snapshot_count = sum(
                 1
-                for item in self.npd_dir.iterdir()
+                for item_url in gcs_ls(str(self.npd_dir))
+                if extract_suffix_from_filename(
+                    item_url.rstrip("/").split("/")[-1]
+                )
+            )
+            result["snapshot_count"] = snapshot_count
+        elif self.npd_dir.exists():  # type: ignore[union-attr]
+            snapshot_count = sum(
+                1
+                for item in self.npd_dir.iterdir()  # type: ignore[union-attr]
                 if extract_suffix_from_filename(item.name)
             )
             result["snapshot_count"] = snapshot_count
