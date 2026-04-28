@@ -13,7 +13,6 @@ Handles the full update flow:
 from __future__ import annotations
 
 import datetime as dt
-import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,20 +30,21 @@ from ionbus_parquet_cache.exceptions import (
     DataSourceError,
     SchemaMismatchError,
     SnapshotNotFoundError,
-    SnapshotPublishError,
     ValidationError,
 )
 from ionbus_parquet_cache.partition import (
     PartitionSpec,
     date_partition_column_name,
-    date_partition_value,
 )
 from ionbus_parquet_cache.snapshot import generate_snapshot_suffix
 
 if TYPE_CHECKING:
     from ionbus_parquet_cache.data_cleaner import DataCleaner
     from ionbus_parquet_cache.data_source import DataSource
-    from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, FileMetadata
+    from ionbus_parquet_cache.dated_dataset import (
+        DatedParquetDataset,
+        FileMetadata,
+    )
 
 
 @dataclass
@@ -175,7 +175,9 @@ def build_update_plan(
     for spec in specs:
         key = spec.partition_key
         if key not in groups:
-            groups[key] = WriteGroup(partition_values=dict(spec.partition_values))
+            groups[key] = WriteGroup(
+                partition_values=dict(spec.partition_values)
+            )
         groups[key].specs.append(spec)
 
     # Assign temp file paths and final paths
@@ -216,7 +218,8 @@ def build_update_plan(
             partition_dir = partition_dir / part
 
         # File name based on partition values
-        # Use all partition values from the group (not just dataset.partition_columns)
+        # Use all partition values from the group (not just
+        # dataset.partition_columns)
         # to ensure unique file names even when partition_columns is empty
         name_parts = [
             f"{col}={group.partition_values[col]}"
@@ -229,7 +232,7 @@ def build_update_plan(
         for i, spec in enumerate(group.specs):
             if len(group.specs) > 1:
                 # Multiple chunks - use _01, _02 suffix
-                temp_name = f"{file_base}_{suffix}_{i+1:02d}.parquet"
+                temp_name = f"{file_base}_{suffix}_{i + 1:02d}.parquet"
             else:
                 temp_name = f"{file_base}_{suffix}.parquet"
 
@@ -385,14 +388,14 @@ def _apply_yaml_transforms(
     if columns_to_rename:
         current_cols = rel.columns
         other_cols = [
-            f'"{c}"' for c in current_cols
-            if c not in columns_to_rename
+            f'"{c}"' for c in current_cols if c not in columns_to_rename
         ]
         renames = ", ".join(
-            f'"{old}" AS "{new}"'
-            for old, new in columns_to_rename.items()
+            f'"{old}" AS "{new}"' for old, new in columns_to_rename.items()
         )
-        select_clause = ", ".join(other_cols + [renames]) if other_cols else renames
+        select_clause = (
+            ", ".join(other_cols + [renames]) if other_cols else renames
+        )
         rel = duckdb.sql(f"SELECT {select_clause} FROM rel")
 
     # 2. Drop columns
@@ -406,9 +409,7 @@ def _apply_yaml_transforms(
     # 3. Drop rows with nulls
     dropna_columns = transforms.get("dropna_columns", [])
     if dropna_columns:
-        conditions = " AND ".join(
-            f'"{c}" IS NOT NULL' for c in dropna_columns
-        )
+        conditions = " AND ".join(f'"{c}" IS NOT NULL' for c in dropna_columns)
         rel = duckdb.sql(f"SELECT * FROM rel WHERE {conditions}")
 
     # 4. Deduplicate
@@ -502,7 +503,8 @@ def execute_update(
                 data = source.get_data(spec)
             except Exception as e:
                 raise DataSourceError(
-                    f"Failed to fetch data for partition {spec.partition_values}: {e}",
+                    f"Failed to fetch data for partition "
+                    f"{spec.partition_values}: {e}",
                     source_class=source.__class__.__name__,
                     partition_info=spec.partition_values,
                 ) from e
@@ -510,7 +512,8 @@ def execute_update(
             # None means the source has no data for this partition — skip it
             if data is None:
                 logger.debug(
-                    f"Skipping partition {spec.partition_values}: source returned None"
+                    f"Skipping partition {spec.partition_values}: "
+                    f"source returned None"
                 )
                 continue
 
@@ -563,9 +566,12 @@ def execute_update(
             if cols_to_drop:
                 table = table.drop(cols_to_drop)
 
-            # Sort chunk by sort_columns before writing (enables efficient merge)
+            # Sort chunk by sort_columns before writing (enables efficient
+            # merge)
             if dataset.sort_columns:
-                sort_cols = [c for c in dataset.sort_columns if c in table.column_names]
+                sort_cols = [
+                    c for c in dataset.sort_columns if c in table.column_names
+                ]
                 if sort_cols:
                     df = table.to_pandas()
                     df = df.sort_values(sort_cols)
@@ -581,7 +587,9 @@ def execute_update(
             )
 
         if dry_run:
-            logger.debug(f"Dry run complete for {dataset.name}, suffix={plan.suffix}")
+            logger.debug(
+                f"Dry run complete for {dataset.name}, suffix={plan.suffix}"
+            )
             return plan.suffix
 
         logger.debug(f"Consolidating {len(plan.groups)} partition groups")
@@ -628,17 +636,29 @@ def execute_update(
                         )
                         # Filter new_data to only dates not in existing
                         new_df = new_data.to_pandas()
-                        new_df = new_df[~new_df[dataset.date_col].isin(existing_dates)]
-                        new_data = pa.Table.from_pandas(new_df, preserve_index=False)
+                        new_df = new_df[
+                            ~new_df[dataset.date_col].isin(existing_dates)
+                        ]
+                        new_data = pa.Table.from_pandas(
+                            new_df, preserve_index=False
+                        )
 
                     combined = pa.concat_tables([existing_data, new_data])
                 else:
                     # Normal/Restate: remove rows in update window from existing
-                    if dataset.date_col in existing_data.column_names and min_date:
+                    if (
+                        dataset.date_col in existing_data.column_names
+                        and min_date
+                    ):
                         existing_df = existing_data.to_pandas()
                         # Keep rows outside the update window
-                        mask = (existing_df[dataset.date_col] < pd.Timestamp(min_date)) | \
-                               (existing_df[dataset.date_col] > pd.Timestamp(max_date))
+                        mask = (
+                            existing_df[dataset.date_col]
+                            < pd.Timestamp(min_date)
+                        ) | (
+                            existing_df[dataset.date_col]
+                            > pd.Timestamp(max_date)
+                        )
                         existing_df = existing_df[mask]
                         existing_data = pa.Table.from_pandas(
                             existing_df, preserve_index=False
@@ -650,7 +670,11 @@ def execute_update(
 
             # Sort by sort_columns
             if dataset.sort_columns and len(combined) > 0:
-                sort_cols = [c for c in dataset.sort_columns if c in combined.column_names]
+                sort_cols = [
+                    c
+                    for c in dataset.sort_columns
+                    if c in combined.column_names
+                ]
                 if sort_cols:
                     df = combined.to_pandas()
                     df = df.sort_values(sort_cols)
@@ -672,7 +696,9 @@ def execute_update(
             )
             file_metadata_list.append(
                 FileMetadata.from_path(
-                    final_path, dataset.dataset_dir, dict(group.partition_values)
+                    final_path,
+                    dataset.dataset_dir,
+                    dict(group.partition_values),
                 )
             )
 
@@ -695,20 +721,28 @@ def execute_update(
 
             # Extend date range to include previous snapshot dates
             if dataset._metadata.cache_start_date:
-                if min_date is None or dataset._metadata.cache_start_date < min_date:
+                if (
+                    min_date is None
+                    or dataset._metadata.cache_start_date < min_date
+                ):
                     min_date = dataset._metadata.cache_start_date
             if dataset._metadata.cache_end_date:
-                if max_date is None or dataset._metadata.cache_end_date > max_date:
+                if (
+                    max_date is None
+                    or dataset._metadata.cache_end_date > max_date
+                ):
                     max_date = dataset._metadata.cache_end_date
 
         # Build partition values dict for metadata
         pv_dict = {
-            col: sorted(list(vals)) for col, vals in partition_values_seen.items()
+            col: sorted(list(vals))
+            for col, vals in partition_values_seen.items()
         }
 
         logger.debug(
             f"Publishing snapshot for {dataset.name}: "
-            f"{len(file_metadata_list)} files, date range {min_date} to {max_date}"
+            f"{len(file_metadata_list)} files, date range {min_date} to "
+            f"{max_date}"
         )
 
         # Publish snapshot (use the suffix from the plan to match data files)
