@@ -277,13 +277,27 @@ def _discover_datasets_from_disk(
             metadata = SnapshotMetadata.from_pickle(meta_files[0])
             config = metadata.yaml_config
 
+            # When bucketing is enabled, __instrument_bucket__ is auto-injected
+            # into partition_columns during model_post_init. The stored config
+            # includes it, but we must remove it when reconstructing because
+            # the library doesn't allow explicitly passing it.
+            partition_cols = config.get("partition_columns", [])
+            num_buckets = config.get("num_instrument_buckets")
+            if num_buckets is not None:
+                from ionbus_parquet_cache.bucketing import INSTRUMENT_BUCKET_COL
+                # Remove auto-injected bucket column for reconstruction
+                partition_cols = [
+                    c for c in partition_cols
+                    if c != INSTRUMENT_BUCKET_COL
+                ]
+
             # Create DPD from stored config
             dpd = DatedParquetDataset(
                 cache_dir=cache_path,
                 name=item.name,
                 date_col=config.get("date_col", "Date"),
                 date_partition=config.get("date_partition", "day"),
-                partition_columns=config.get("partition_columns", []),
+                partition_columns=partition_cols,
                 sort_columns=config.get("sort_columns"),
                 description=config.get("description", ""),
                 start_date_str=config.get("start_date_str"),
@@ -291,6 +305,7 @@ def _discover_datasets_from_disk(
                 repull_n_days=config.get("repull_n_days", 0),
                 instrument_column=config.get("instrument_column"),
                 instruments=config.get("instruments"),
+                num_instrument_buckets=num_buckets,
                 row_group_size=config.get("row_group_size"),
             )
             dpd._metadata = metadata

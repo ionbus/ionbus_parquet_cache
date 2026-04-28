@@ -634,6 +634,7 @@ class DatedParquetDataset(ParquetDataset):
                 "instrument_column": self.instrument_column,
                 "instruments": self.instruments,
                 "num_instrument_buckets": self.num_instrument_buckets,
+                "row_group_size": self.row_group_size,
             }
         else:
             # Caller-supplied yaml_config may have pre-expansion partition_columns
