@@ -229,7 +229,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         date_col="date",
         partition_columns=["date"],
     )
-    
+
     # Publish a snapshot manually
     data = pd.DataFrame({
         "date": pd.date_range("2024-01-01", periods=100),
@@ -245,7 +245,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         yaml_config={},
         suffix="1AAAAAA",
     )
-    
+
     # Now read and verify
     df = dpd.read_data()
     assert len(df) == 100

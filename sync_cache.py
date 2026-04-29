@@ -110,6 +110,13 @@ def sync_cache_main(args: list[str] | None = None) -> int:
         # If renaming, must also filter to that dataset
         if not parsed.datasets:
             parsed.datasets = [old_name]
+        # Enforce exactly 1 dataset when renaming
+        if len(parsed.datasets) != 1:
+            logger.error(
+                "Error: --rename works with exactly one dataset, "
+                f"but got {len(parsed.datasets)}: {parsed.datasets}"
+            )
+            return 1
 
     # Check for S3 paths
     if parsed.source.startswith("s3://") or parsed.destination.startswith("s3://"):
@@ -394,11 +401,13 @@ def _collect_gcs_sync_blobs(
     npd_only: bool,
     all_snapshots: bool,
     snapshot_suffixes: list[str] | None,
+    rename_map: dict[str, str] | None = None,
 ) -> list[tuple[str, str]]:
     """Collect GCS blobs selected for sync as (blob_url, relative_path)."""
     source_prefix = source.rstrip("/")
     available: dict[tuple[bool, str], set[str]] = {}
     candidates: list[tuple[str, str, str, bool, str]] = []
+    rename_map = rename_map or {}
 
     for blob_url in blob_urls:
         rel = blob_url[len(source_prefix):].lstrip("/")
@@ -430,7 +439,7 @@ def _collect_gcs_sync_blobs(
     )
 
     return [
-        (blob_url, rel)
+        (blob_url, _apply_rename(Path(rel), rename_map).as_posix())
         for blob_url, rel, name, is_npd, suffix in candidates
         if suffix in selected.get((is_npd, name), set())
     ]
@@ -788,6 +797,7 @@ def _run_sync_push_gcs(
             npd_only,
             all_snapshots,
             snapshot_suffixes,
+            rename_map,
         )
         if dst_is_gcs:
             for blob_url, rel in pairs:

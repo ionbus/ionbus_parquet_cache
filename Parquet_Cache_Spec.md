@@ -3380,7 +3380,7 @@ The tool detects the current platform and generates the appropriate script forma
 ### `sync-cache`
 
 Syncs a cache between locations. Supports both **push** (local -> remote)
-and **pull** (remote -> local). Currently works with local paths only.
+and **pull** (remote -> local). Works with local paths and GCS (`gs://...`).
 S3 support will be implemented in a future release.
 By default, only the current snapshot is synced (not historical
 snapshots), making it efficient for replication.
