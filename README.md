@@ -181,6 +181,79 @@ df = registry.read_data(
 )
 ```
 
+### Two workflows with CacheRegistry
+
+**Workflow 1: Read via registry (convenience)**
+
+Use `registry.read_data()` for straightforward single reads:
+
+```python
+from ionbus_parquet_cache import CacheRegistry
+
+registry = CacheRegistry.instance(cache="/path/to/cache")
+
+# Read data, one call at a time
+df1 = registry.read_data("md.futures_daily", start_date="2024-01-01")
+df2 = registry.read_data("md.futures_daily", start_date="2024-02-01")
+df3 = registry.read_data("different_dataset")
+
+# Refresh all when needed
+if registry.refresh_all():
+    print("New data available")
+```
+
+**Workflow 2: Grab a dataset instance for repeated use**
+
+Get a dataset instance from the registry when you plan to use it repeatedly
+or compare different snapshots:
+
+```python
+from ionbus_parquet_cache import CacheRegistry
+
+registry = CacheRegistry.instance(cache="/path/to/cache")
+
+# Grab a dataset instance
+dpd = registry.get_dataset("md.futures_daily")
+
+# Use it repeatedly
+df_jan = dpd.read_data(start_date="2024-01-01", end_date="2024-01-31")
+df_feb = dpd.read_data(start_date="2024-02-01", end_date="2024-02-28")
+
+# Control refresh behavior for this instance
+if dpd.is_update_available():
+    dpd.refresh()
+```
+
+**Comparing different snapshots or caches**
+
+Register multiple caches and read from each:
+
+```python
+from ionbus_parquet_cache import CacheRegistry
+
+# Register both caches in the singleton registry
+registry = CacheRegistry.instance(
+    prod="/prod/cache",
+    archive="/archive/cache"
+)
+
+# Get current version from prod cache
+current_dpd = registry.get_dataset("md.futures_daily", cache_name="prod")
+df_current = current_dpd.read_data(start_date="2024-01-01")
+
+# Get old version from archive cache (can specify snapshot)
+archive_dpd = registry.get_dataset("md.futures_daily", cache_name="archive")
+df_old = archive_dpd.read_data(
+    snapshot="1H4DW00",  # specific old snapshot
+    start_date="2024-01-01"
+)
+
+# Compare the two
+print(f"Current rows: {len(df_current)}")
+print(f"Old rows: {len(df_old)}")
+diff = df_current.compare(df_old)
+```
+
 ### Filtering data
 
 Use the `filters` parameter to filter rows. Filters use tuple syntax: `(column, operator, value)`.
@@ -257,6 +330,28 @@ summary = dpd.summary()
 print(f"Date range: {summary['cache_start_date']} to {summary['cache_end_date']}")
 print(f"Files: {summary['file_count']}")
 ```
+
+### Cache invalidation
+
+When `refresh()` detects new data, it automatically clears the internal read cache
+to ensure subsequent reads use fresh data. You can also manually invalidate the cache:
+
+```python
+dpd = registry.get_dataset("my_dataset")
+
+# Manual cache invalidation (next read will reload from disk)
+dpd.invalidate_read_cache()
+
+# View dataset summary with fresh snapshots discovered
+# WARNING: This mutates cached DPD instances!
+df = registry.data_summary(refresh_and_possibly_change_loaded_caches=True)
+```
+
+**Important:** The `refresh_and_possibly_change_loaded_caches` parameter in
+`data_summary()` discovers new snapshots and reloads metadata, which changes
+the behavior of cached DPD instances. Only use this if you have no active
+references to DPD instances and understand that existing reads will now return
+different data.
 
 ### Reading from historical snapshots
 
@@ -1059,25 +1154,31 @@ Copy data between cache locations. Supports local paths and GCS (`gs://`).
 S3 support will be implemented in a future release.
 
 ```bash
-# Push local cache to remote (local)
+# Sync all datasets
 python -m ionbus_parquet_cache.sync_cache push /local/cache /remote/cache
-
-# Push local cache to GCS
-python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache
-
-# Pull from GCS to local
 python -m ionbus_parquet_cache.sync_cache pull gs://my-bucket/cache /local/cache
 
-# Sync specific datasets
-python -m ionbus_parquet_cache.sync_cache push /local gs://my-bucket/cache \
-    --dataset md.futures_daily md.equity_daily
+# Sync specific datasets (whitelist)
+python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache \
+    --datasets md.futures_daily
+python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache \
+    --datasets md.futures_daily md.equity_daily
 
-# Copy dataset with a new name
-python -m ionbus_parquet_cache.sync_cache push /local /remote \
-    --rename "md.futures:md.futures_backup"
+# Exclude specific datasets (blacklist)
+python -m ionbus_parquet_cache.sync_cache pull gs://my-bucket/cache /local/cache \
+    --ignore-datasets eod_prices_bucketed
+
+# Sync specific snapshots
+python -m ionbus_parquet_cache.sync_cache pull gs://my-bucket/cache /local/cache \
+    --datasets md.futures_daily --snapshot 1H4DW01 1H4DW02
 
 # Include all historical snapshots (not just current)
-python -m ionbus_parquet_cache.sync_cache push /local /remote --all-snapshots
+python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache \
+    --datasets md.futures_daily --all-snapshots
+
+# Copy dataset with a new name (single dataset only)
+python -m ionbus_parquet_cache.sync_cache push /local /remote \
+    --rename "md.futures:md.futures_backup"
 
 # Delete files at destination not in source (local only)
 python -m ionbus_parquet_cache.sync_cache push /local /remote --delete
@@ -1085,6 +1186,10 @@ python -m ionbus_parquet_cache.sync_cache push /local /remote --delete
 # Continuous sync from GCS (daemon mode)
 python -m ionbus_parquet_cache.sync_cache pull gs://my-bucket/cache /local \
     --daemon --update-interval 60
+
+# Parallel upload/download (8 workers by default)
+python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache \
+    --workers 16
 ```
 
 GCS sync uses size-based change detection. Requires `pip install gcsfs`.

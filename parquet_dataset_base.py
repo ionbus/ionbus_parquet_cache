@@ -282,6 +282,11 @@ class ParquetDataset(PDYaml, ABC):
             return True
         return latest > self.current_suffix
 
+    def invalidate_read_cache(self) -> None:
+        """Invalidate cached read state (dataset and schema)."""
+        self._dataset = None
+        self._schema = None
+
     def refresh(self) -> bool:
         """
         Invalidate cached dataset and load the latest snapshot.
@@ -296,15 +301,13 @@ class ParquetDataset(PDYaml, ABC):
         if latest is None:
             # No snapshots exist
             self.current_suffix = None
-            self._dataset = None
-            self._schema = None
+            self.invalidate_read_cache()
             return False
 
         if latest != self.current_suffix:
             # New snapshot available - invalidate cache
             self.current_suffix = latest
-            self._dataset = None
-            self._schema = None
+            self.invalidate_read_cache()
             return True
 
         return False

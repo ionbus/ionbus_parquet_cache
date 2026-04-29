@@ -610,13 +610,42 @@ class CacheRegistry:
             snapshot=snapshot,
         )
 
-    def data_summary(self) -> pd.DataFrame:
+    def data_summary(
+        self,
+        *,
+        refresh_and_possibly_change_loaded_caches: bool = False,
+    ) -> pd.DataFrame:
         """
         Get a summary of all datasets across all caches.
 
+        Args:
+            refresh_and_possibly_change_loaded_caches: If False (default),
+                uses cached metadata without discovering new snapshots.
+                If True, discovers fresh snapshots and reloads metadata,
+                which MUTATES cached DPD instances in this registry.
+
+                CRITICAL: When set to True, this function:
+                - Discovers new snapshots on disk
+                - Reloads SnapshotMetadata for changed datasets
+                - Clears the internal read cache (_dataset, _schema,
+                  _metadata) for any reloaded DPD
+                - Causes subsequent reads to return data from the NEW
+                  snapshot, not the one that was originally loaded
+
+                Only use this if you have NO active references to DPD
+                instances from this registry, and you understand that
+                any code holding a reference will now read from a
+                different snapshot than before.
+
         Returns:
-            DataFrame with columns: cache, name, type, current_suffix, etc.
+            DataFrame with columns:
+            - cache, name, type, current_suffix (all types)
+            - start_date, end_date, file_count, total_size_mb,
+              partition_columns, instrument_buckets, description (DPDs only)
+            - days_since_update (all types, calculated from suffix timestamp)
         """
+        import datetime as dt
+
         rows = []
 
         for cache_name in self._cache_order:
@@ -627,16 +656,72 @@ class CacheRegistry:
                 dpd = self._get_dpd(dpd_name, cache_name)
                 if dpd:
                     try:
-                        suffix = dpd._discover_current_suffix()
-                        rows.append(
-                            {
-                                "cache": cache_name,
-                                "name": dpd_name,
-                                "type": "DPD",
-                                "current_suffix": suffix,
-                            }
+                        from ionbus_parquet_cache.snapshot import (
+                            parse_snapshot_suffix,
                         )
-                    except Exception:
+
+                        meta = dpd._metadata
+                        suffix = meta.suffix if meta else dpd.current_suffix
+
+                        # If refresh is enabled, discover fresh suffix and
+                        # reload metadata (with side effects on cached DPD)
+                        if refresh_and_possibly_change_loaded_caches:
+                            suffix = dpd._discover_current_suffix()
+                            if meta is None or meta.suffix != suffix:
+                                dpd.current_suffix = suffix
+                                dpd.invalidate_read_cache()
+                                meta = dpd._load_metadata()
+
+                        if meta:
+                            total_size = sum(
+                                f.size_bytes for f in meta.files
+                            ) / (1024 * 1024)
+                            snapshot_ts = parse_snapshot_suffix(suffix)
+                            snapshot_dt = dt.datetime.fromtimestamp(
+                                snapshot_ts, tz=dt.timezone.utc
+                            )
+                            days_since = (
+                                dt.datetime.now(dt.timezone.utc)
+                                - snapshot_dt
+                            ).total_seconds() / 86400
+                            partition_cols = meta.yaml_config.get(
+                                "partition_columns", []
+                            )
+                            bucketing = meta.yaml_config.get(
+                                "num_instrument_buckets"
+                            )
+                            rows.append(
+                                {
+                                    "cache": cache_name,
+                                    "name": dpd_name,
+                                    "type": "DPD",
+                                    "current_suffix": suffix,
+                                    "start_date": meta.cache_start_date,
+                                    "end_date": meta.cache_end_date,
+                                    "file_count": len(meta.files),
+                                    "total_size_mb": round(total_size, 2),
+                                    "partition_columns": partition_cols,
+                                    "instrument_buckets": bucketing,
+                                    "days_since_update": round(days_since, 2),
+                                    "description": meta.yaml_config.get(
+                                        "description", ""
+                                    ),
+                                }
+                            )
+                        else:
+                            rows.append(
+                                {
+                                    "cache": cache_name,
+                                    "name": dpd_name,
+                                    "type": "DPD",
+                                    "current_suffix": suffix,
+                                }
+                            )
+                    except Exception as e:
+                        from ionbus_utils.logging_utils import logger
+                        logger.error(
+                            f"Failed to load metadata for {dpd_name}: {e}"
+                        )
                         rows.append(
                             {
                                 "cache": cache_name,
@@ -651,16 +736,51 @@ class CacheRegistry:
                 npd = self._get_npd(npd_name, cache_name)
                 if npd:
                     try:
-                        suffix = npd._discover_current_suffix()
-                        rows.append(
-                            {
-                                "cache": cache_name,
-                                "name": npd_name,
-                                "type": "NPD",
-                                "current_suffix": suffix,
-                            }
+                        from ionbus_parquet_cache.snapshot import (
+                            parse_snapshot_suffix,
                         )
-                    except Exception:
+
+                        # Only discover fresh suffix if refresh is enabled
+                        if refresh_and_possibly_change_loaded_caches:
+                            suffix = npd._discover_current_suffix()
+                        else:
+                            # Use cached current_suffix if available
+                            suffix = npd.current_suffix
+                            if suffix is None:
+                                suffix = npd._discover_current_suffix()
+
+                        if suffix:
+                            snapshot_ts = parse_snapshot_suffix(suffix)
+                            snapshot_dt = dt.datetime.fromtimestamp(
+                                snapshot_ts, tz=dt.timezone.utc
+                            )
+                            days_since = (
+                                dt.datetime.now(dt.timezone.utc)
+                                - snapshot_dt
+                            ).total_seconds() / 86400
+                            rows.append(
+                                {
+                                    "cache": cache_name,
+                                    "name": npd_name,
+                                    "type": "NPD",
+                                    "current_suffix": suffix,
+                                    "days_since_update": round(days_since, 2),
+                                }
+                            )
+                        else:
+                            rows.append(
+                                {
+                                    "cache": cache_name,
+                                    "name": npd_name,
+                                    "type": "NPD",
+                                    "current_suffix": None,
+                                }
+                            )
+                    except Exception as e:
+                        from ionbus_utils.logging_utils import logger
+                        logger.error(
+                            f"Failed to discover NPD {npd_name}: {e}"
+                        )
                         rows.append(
                             {
                                 "cache": cache_name,

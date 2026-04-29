@@ -12,10 +12,19 @@ import pyarrow.parquet as pq
 import pytest
 
 from ionbus_parquet_cache.sync_cache import (
-    sync_cache_main,
+    _collect_gcs_sync_blobs,
     _should_copy_file,
+    sync_cache_main,
 )
 from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, FileMetadata
+
+
+GCS_CACHE = "gs://bucket/cache"
+
+
+def _gcs_urls(*relative_paths: str) -> list[str]:
+    """Build GCS blob URLs under the test cache prefix."""
+    return [f"{GCS_CACHE}/{rel}" for rel in relative_paths]
 
 
 @pytest.fixture
@@ -412,6 +421,26 @@ class TestSyncPush:
         assert yaml_file.exists()
         assert code_file.exists()
 
+    def test_push_delete_preserves_ignored_datasets(
+        self, source_with_dpd: Path, dest_cache: Path
+    ) -> None:
+        """Push --delete should not remove ignored destination datasets."""
+        ignored_file = dest_cache / "ignored_dataset" / "extra.parquet"
+        ignored_file.parent.mkdir(parents=True)
+        ignored_file.write_bytes(b"ignored data")
+
+        result = sync_cache_main([
+            "push",
+            str(source_with_dpd),
+            str(dest_cache),
+            "--ignore-datasets",
+            "ignored_dataset",
+            "--delete",
+        ])
+
+        assert result == 0
+        assert ignored_file.exists()
+
 
 class TestSyncPull:
     """Tests for pull sync operation."""
@@ -429,6 +458,102 @@ class TestSyncPull:
 
         # Check data was copied
         assert (dest_cache / "test_dataset").exists()
+
+
+class TestGcsBlobSelection:
+    """Tests for GCS-source snapshot selection."""
+
+    def test_defaults_to_current_snapshots(self) -> None:
+        """GCS source sync should select only current DPD and NPD snapshots."""
+        rels = [
+            "dpd/_meta_data/dpd_1AAAAAA.pkl.gz",
+            "dpd/month=M2024-01/data_1AAAAAA.parquet",
+            "dpd/_meta_data/dpd_1BBBBB0.pkl.gz",
+            "dpd/month=M2024-01/data_1BBBBB0.parquet",
+            "non-dated/ref/ref_1AAAAAA/data.parquet",
+            "non-dated/ref/ref_1BBBBB0/data.parquet",
+        ]
+
+        selected = _collect_gcs_sync_blobs(
+            _gcs_urls(*rels),
+            GCS_CACHE,
+            None,
+            None,
+            False,
+            False,
+            False,
+            None,
+        )
+
+        assert {rel for _, rel in selected} == {
+            "dpd/_meta_data/dpd_1BBBBB0.pkl.gz",
+            "dpd/month=M2024-01/data_1BBBBB0.parquet",
+            "non-dated/ref/ref_1BBBBB0/data.parquet",
+        }
+
+    def test_dataset_filter_matches_npd_dataset_name(self) -> None:
+        """Dataset filters should match NPD names under non-dated/."""
+        rels = [
+            "dpd/_meta_data/dpd_1BBBBB0.pkl.gz",
+            "dpd/month=M2024-01/data_1BBBBB0.parquet",
+            "non-dated/ref/ref_1BBBBB0/data.parquet",
+        ]
+
+        selected = _collect_gcs_sync_blobs(
+            _gcs_urls(*rels),
+            GCS_CACHE,
+            ["ref"],
+            None,
+            False,
+            False,
+            False,
+            None,
+        )
+
+        assert {rel for _, rel in selected} == {
+            "non-dated/ref/ref_1BBBBB0/data.parquet",
+        }
+
+    def test_honors_type_and_snapshot_filters(self) -> None:
+        """GCS source sync should honor type and explicit snapshot filters."""
+        rels = [
+            "dpd/_meta_data/dpd_1AAAAAA.pkl.gz",
+            "dpd/month=M2024-01/data_1AAAAAA.parquet",
+            "dpd/_meta_data/dpd_1BBBBB0.pkl.gz",
+            "dpd/month=M2024-01/data_1BBBBB0.parquet",
+            "non-dated/ref/ref_1AAAAAA/data.parquet",
+            "non-dated/ref/ref_1BBBBB0/data.parquet",
+        ]
+        urls = _gcs_urls(*rels)
+
+        dpd_only = _collect_gcs_sync_blobs(
+            urls, GCS_CACHE, None, None, True, False, False, None
+        )
+        assert {rel for _, rel in dpd_only} == {
+            "dpd/_meta_data/dpd_1BBBBB0.pkl.gz",
+            "dpd/month=M2024-01/data_1BBBBB0.parquet",
+        }
+
+        npd_only = _collect_gcs_sync_blobs(
+            urls, GCS_CACHE, None, None, False, True, False, None
+        )
+        assert {rel for _, rel in npd_only} == {
+            "non-dated/ref/ref_1BBBBB0/data.parquet",
+        }
+
+        explicit_snapshot = _collect_gcs_sync_blobs(
+            urls, GCS_CACHE, None, None, False, False, False, ["1AAAAAA"]
+        )
+        assert {rel for _, rel in explicit_snapshot} == {
+            "dpd/_meta_data/dpd_1AAAAAA.pkl.gz",
+            "dpd/month=M2024-01/data_1AAAAAA.parquet",
+            "non-dated/ref/ref_1AAAAAA/data.parquet",
+        }
+
+        all_snapshots = _collect_gcs_sync_blobs(
+            urls, GCS_CACHE, None, None, False, False, True, None
+        )
+        assert {rel for _, rel in all_snapshots} == set(rels)
 
 
 class TestShouldCopyFile:
@@ -678,7 +803,9 @@ class TestRename:
 
         # Metadata file should have new name
         meta_files = list(
-            (dest_cache / "renamed_dataset" / "_meta_data").glob("renamed_dataset_*.pkl.gz")
+            (dest_cache / "renamed_dataset" / "_meta_data").glob(
+                "renamed_dataset_*.pkl.gz"
+            )
         )
         assert len(meta_files) == 1
 
