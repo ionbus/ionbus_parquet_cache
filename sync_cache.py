@@ -23,6 +23,7 @@ from ionbus_parquet_cache.cleanup_cache import (
     _discover_dpd_snapshots,
     _discover_npd_snapshots,
 )
+from ionbus_parquet_cache.snapshot import extract_suffix_from_filename
 
 
 def sync_cache_main(args: list[str] | None = None) -> int:
@@ -73,14 +74,26 @@ def sync_cache_main(args: list[str] | None = None) -> int:
     parsed = parser.parse_args(args)
 
     # Validate mutually exclusive options
+    if parsed.datasets and parsed.ignore_datasets:
+        logger.error(
+            "Error: --datasets and --ignore-datasets are mutually exclusive"
+        )
+        return 1
+
+    if parsed.snapshot and parsed.all_snapshots:
+        logger.error(
+            "Error: --snapshot and --all-snapshots are mutually exclusive"
+        )
+        return 1
+
     mode_count = sum([
-        bool(parsed.dataset),
+        bool(parsed.datasets),
         parsed.dpd_only,
         parsed.npd_only,
     ])
     if mode_count > 1:
         logger.error(
-            "Error: --dataset, --dpd-only, and --npd-only are mutually exclusive"
+            "Error: --datasets, --dpd-only, and --npd-only are mutually exclusive"
         )
         return 1
 
@@ -95,8 +108,8 @@ def sync_cache_main(args: list[str] | None = None) -> int:
         old_name, new_name = parsed.rename.split(":", 1)
         rename_map[old_name] = new_name
         # If renaming, must also filter to that dataset
-        if not parsed.dataset:
-            parsed.dataset = [old_name]
+        if not parsed.datasets:
+            parsed.datasets = [old_name]
 
     # Check for S3 paths
     if parsed.source.startswith("s3://") or parsed.destination.startswith("s3://"):
@@ -113,10 +126,12 @@ def sync_cache_main(args: list[str] | None = None) -> int:
                 return _run_sync_push_gcs(
                     source=parsed.source,
                     destination=parsed.destination,
-                    dataset_names=parsed.dataset,
+                    dataset_names=parsed.datasets,
+                    ignore_dataset_names=parsed.ignore_datasets,
                     dpd_only=parsed.dpd_only,
                     npd_only=parsed.npd_only,
                     all_snapshots=parsed.all_snapshots,
+                    snapshot_suffixes=parsed.snapshot,
                     dry_run=parsed.dry_run,
                     verbose=parsed.verbose,
                     workers=parsed.workers,
@@ -126,10 +141,12 @@ def sync_cache_main(args: list[str] | None = None) -> int:
                 return _run_sync_pull_gcs(
                     source=parsed.source,
                     destination=parsed.destination,
-                    dataset_names=parsed.dataset,
+                    dataset_names=parsed.datasets,
+                    ignore_dataset_names=parsed.ignore_datasets,
                     dpd_only=parsed.dpd_only,
                     npd_only=parsed.npd_only,
                     all_snapshots=parsed.all_snapshots,
+                    snapshot_suffixes=parsed.snapshot,
                     dry_run=parsed.dry_run,
                     verbose=parsed.verbose,
                     workers=parsed.workers,
@@ -147,10 +164,12 @@ def sync_cache_main(args: list[str] | None = None) -> int:
             return _run_sync_push(
                 source=parsed.source,
                 destination=parsed.destination,
-                dataset_names=parsed.dataset,
+                dataset_names=parsed.datasets,
+                ignore_dataset_names=parsed.ignore_datasets,
                 dpd_only=parsed.dpd_only,
                 npd_only=parsed.npd_only,
                 all_snapshots=parsed.all_snapshots,
+                snapshot_suffixes=parsed.snapshot,
                 dry_run=parsed.dry_run,
                 delete=parsed.delete,
                 verbose=parsed.verbose,
@@ -161,10 +180,12 @@ def sync_cache_main(args: list[str] | None = None) -> int:
             return _run_sync_pull(
                 source=parsed.source,
                 destination=parsed.destination,
-                dataset_names=parsed.dataset,
+                dataset_names=parsed.datasets,
+                ignore_dataset_names=parsed.ignore_datasets,
                 dpd_only=parsed.dpd_only,
                 npd_only=parsed.npd_only,
                 all_snapshots=parsed.all_snapshots,
+                snapshot_suffixes=parsed.snapshot,
                 dry_run=parsed.dry_run,
                 delete=parsed.delete,
                 daemon=parsed.daemon,
@@ -181,10 +202,23 @@ def sync_cache_main(args: list[str] | None = None) -> int:
 def _add_sync_options(parser: argparse.ArgumentParser) -> None:
     """Add common sync options to a parser."""
     parser.add_argument(
+        "--datasets",
         "--dataset",
         nargs="+",
         metavar="NAME",
-        help="Sync only these datasets",
+        help="Sync only these datasets (whitelist)",
+    )
+    parser.add_argument(
+        "--ignore-datasets",
+        nargs="+",
+        metavar="NAME",
+        help="Exclude these datasets from sync (blacklist)",
+    )
+    parser.add_argument(
+        "--snapshot",
+        nargs="+",
+        metavar="SUFFIX",
+        help="Sync specific snapshots by suffix",
     )
     parser.add_argument(
         "--rename",
@@ -280,13 +314,150 @@ def _apply_rename(rel_path: Path, rename_map: dict[str, str]) -> Path:
     return Path(*parts)
 
 
+def _rel_parts(rel_path: str | Path) -> list[str]:
+    """Return normalized relative path parts for local and GCS paths."""
+    return [p for p in str(rel_path).replace("\\", "/").split("/") if p]
+
+
+def _dataset_name_from_rel(rel_path: str | Path) -> str | None:
+    """Return the cache dataset name for a relative cache path."""
+    parts = _rel_parts(rel_path)
+    if not parts or parts[0] in ("yaml", "code"):
+        return None
+    if parts[0] == "non-dated":
+        return parts[1] if len(parts) > 1 else None
+    return parts[0]
+
+
+def _gcs_rel_snapshot_info(rel_path: str) -> tuple[str, bool, str] | None:
+    """
+    Return (dataset_name, is_npd, suffix) for a GCS cache blob relpath.
+
+    DPD suffixes are encoded in metadata/data filenames. NPD directory
+    snapshots encode the suffix in the snapshot directory name, while nested
+    files usually have ordinary names like ``data.parquet``.
+    """
+    parts = _rel_parts(rel_path)
+    if not parts or parts[0] in ("yaml", "code"):
+        return None
+
+    if parts[0] == "non-dated":
+        if len(parts) < 3:
+            return None
+        suffix = extract_suffix_from_filename(parts[2])
+        if suffix is None:
+            return None
+        return parts[1], True, suffix
+
+    suffix = extract_suffix_from_filename(parts[-1])
+    if suffix is None:
+        return None
+    return parts[0], False, suffix
+
+
+def _is_gcs_dpd_metadata_rel(rel_path: str) -> bool:
+    """Return True when rel_path is a DPD metadata pickle."""
+    parts = _rel_parts(rel_path)
+    return (
+        len(parts) >= 3
+        and parts[1] == "_meta_data"
+        and parts[-1].endswith(".pkl.gz")
+    )
+
+
+def _select_snapshot_suffixes(
+    available: dict[tuple[bool, str], set[str]],
+    all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
+) -> dict[tuple[bool, str], set[str]]:
+    """Select snapshot suffixes using the same latest/all/explicit policy."""
+    requested = set(snapshot_suffixes or [])
+    selected: dict[tuple[bool, str], set[str]] = {}
+
+    for key, suffixes in available.items():
+        if all_snapshots:
+            selected[key] = set(suffixes)
+        elif requested:
+            selected[key] = suffixes & requested
+        elif suffixes:
+            selected[key] = {max(suffixes)}
+
+    return selected
+
+
+def _collect_gcs_sync_blobs(
+    blob_urls: list[str],
+    source: str,
+    dataset_names: list[str] | None,
+    ignore_dataset_names: list[str] | None,
+    dpd_only: bool,
+    npd_only: bool,
+    all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
+) -> list[tuple[str, str]]:
+    """Collect GCS blobs selected for sync as (blob_url, relative_path)."""
+    source_prefix = source.rstrip("/")
+    available: dict[tuple[bool, str], set[str]] = {}
+    candidates: list[tuple[str, str, str, bool, str]] = []
+
+    for blob_url in blob_urls:
+        rel = blob_url[len(source_prefix):].lstrip("/")
+        info = _gcs_rel_snapshot_info(rel)
+        if info is None:
+            continue
+
+        name, is_npd, suffix = info
+        if dataset_names and name not in dataset_names:
+            continue
+        if ignore_dataset_names and name in ignore_dataset_names:
+            continue
+        if dpd_only and is_npd:
+            continue
+        if npd_only and not is_npd:
+            continue
+
+        candidates.append((blob_url, rel, name, is_npd, suffix))
+
+        # DPD snapshots are defined by metadata files. NPD snapshots are
+        # self-describing, so any blob under the snapshot contributes suffix.
+        if is_npd or _is_gcs_dpd_metadata_rel(rel):
+            available.setdefault((is_npd, name), set()).add(suffix)
+
+    selected = _select_snapshot_suffixes(
+        available=available,
+        all_snapshots=all_snapshots,
+        snapshot_suffixes=snapshot_suffixes,
+    )
+
+    return [
+        (blob_url, rel)
+        for blob_url, rel, name, is_npd, suffix in candidates
+        if suffix in selected.get((is_npd, name), set())
+    ]
+
+
+def _select_local_snapshots(
+    snapshots: list[dict],
+    all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
+) -> list[dict]:
+    """Select local snapshot records using latest/all/explicit policy."""
+    if all_snapshots:
+        return snapshots
+    if snapshot_suffixes:
+        return [s for s in snapshots if s["suffix"] in snapshot_suffixes]
+    return [max(snapshots, key=lambda s: s["suffix"])]
+
+
 def _run_sync_push(
     source: str,
     destination: str,
     dataset_names: list[str] | None,
+    ignore_dataset_names: list[str] | None,
     dpd_only: bool,
     npd_only: bool,
     all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
     dry_run: bool,
     delete: bool,
     verbose: bool,
@@ -330,13 +501,17 @@ def _run_sync_push(
 
     if not npd_only:
         dpd_snapshots = _discover_dpd_snapshots(source_path, dataset_names)
+        # Filter out ignored datasets
+        if ignore_dataset_names:
+            dpd_snapshots = {
+                k: v for k, v in dpd_snapshots.items()
+                if k not in ignore_dataset_names
+            }
         for name, snapshots in dpd_snapshots.items():
             if not snapshots:
                 continue
-            targets = (
-                snapshots
-                if all_snapshots
-                else [max(snapshots, key=lambda s: s["suffix"])]
+            targets = _select_local_snapshots(
+                snapshots, all_snapshots, snapshot_suffixes
             )
             for snap in targets:
                 meta_file = snap["meta_file"]
@@ -352,13 +527,17 @@ def _run_sync_push(
 
     if not dpd_only:
         npd_snapshots = _discover_npd_snapshots(source_path, dataset_names)
+        # Filter out ignored datasets
+        if ignore_dataset_names:
+            npd_snapshots = {
+                k: v for k, v in npd_snapshots.items()
+                if k not in ignore_dataset_names
+            }
         for name, snapshots in npd_snapshots.items():
             if not snapshots:
                 continue
-            targets = (
-                snapshots
-                if all_snapshots
-                else [max(snapshots, key=lambda s: s["suffix"])]
+            targets = _select_local_snapshots(
+                snapshots, all_snapshots, snapshot_suffixes
             )
             for snap in targets:
                 item = snap["path"]
@@ -419,6 +598,11 @@ def _run_sync_push(
             rel = dest_file.relative_to(dest_path)
             if rel.parts and rel.parts[0] in ("yaml", "code"):
                 continue
+            if (
+                ignore_dataset_names
+                and _dataset_name_from_rel(rel) in ignore_dataset_names
+            ):
+                continue
             if rel not in synced_paths:
                 files_deleted += 1
                 if verbose:
@@ -447,9 +631,11 @@ def _run_sync_pull(
     source: str,
     destination: str,
     dataset_names: list[str] | None,
+    ignore_dataset_names: list[str] | None,
     dpd_only: bool,
     npd_only: bool,
     all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
     dry_run: bool,
     delete: bool,
     daemon: bool,
@@ -464,9 +650,11 @@ def _run_sync_pull(
             source=source,
             destination=destination,
             dataset_names=dataset_names,
+            ignore_dataset_names=ignore_dataset_names,
             dpd_only=dpd_only,
             npd_only=npd_only,
             all_snapshots=all_snapshots,
+            snapshot_suffixes=snapshot_suffixes,
             dry_run=dry_run,
             delete=delete,
             verbose=verbose,
@@ -485,9 +673,11 @@ def _run_sync_pull(
 def _collect_local_sync_files(
     source_path: Path,
     dataset_names: list[str] | None,
+    ignore_dataset_names: list[str] | None,
     dpd_only: bool,
     npd_only: bool,
     all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
     rename_map: dict[str, str],
 ) -> list[tuple[Path, str]]:
     """
@@ -498,10 +688,18 @@ def _collect_local_sync_files(
 
     if not npd_only:
         dpd_snapshots = _discover_dpd_snapshots(source_path, dataset_names)
+        # Filter out ignored datasets
+        if ignore_dataset_names:
+            dpd_snapshots = {
+                k: v for k, v in dpd_snapshots.items()
+                if k not in ignore_dataset_names
+            }
         for name, snapshots in dpd_snapshots.items():
             if not snapshots:
                 continue
-            targets = snapshots if all_snapshots else [max(snapshots, key=lambda s: s["suffix"])]
+            targets = _select_local_snapshots(
+                snapshots, all_snapshots, snapshot_suffixes
+            )
             for snap in targets:
                 files_to_add = [snap["meta_file"]] + list(snap.get("files", []))
                 for f in files_to_add:
@@ -510,19 +708,33 @@ def _collect_local_sync_files(
 
     if not dpd_only:
         npd_snapshots = _discover_npd_snapshots(source_path, dataset_names)
+        # Filter out ignored datasets
+        if ignore_dataset_names:
+            npd_snapshots = {
+                k: v for k, v in npd_snapshots.items()
+                if k not in ignore_dataset_names
+            }
         for name, snapshots in npd_snapshots.items():
             if not snapshots:
                 continue
-            targets = snapshots if all_snapshots else [max(snapshots, key=lambda s: s["suffix"])]
+            targets = _select_local_snapshots(
+                snapshots, all_snapshots, snapshot_suffixes
+            )
             for snap in targets:
                 item = snap["path"]
-                rel_base = _apply_rename(item.relative_to(source_path), rename_map)
+                rel_base = _apply_rename(
+                    item.relative_to(source_path),
+                    rename_map,
+                )
                 if item.is_file():
                     pairs.append((item, str(rel_base).replace("\\", "/")))
                 else:
                     for f in item.rglob("*"):
                         if f.is_file():
-                            rel = _apply_rename(f.relative_to(source_path), rename_map)
+                            rel = _apply_rename(
+                                f.relative_to(source_path),
+                                rename_map,
+                            )
                             pairs.append((f, str(rel).replace("\\", "/")))
 
     return pairs
@@ -532,9 +744,11 @@ def _run_sync_push_gcs(
     source: str,
     destination: str,
     dataset_names: list[str] | None,
+    ignore_dataset_names: list[str] | None,
     dpd_only: bool,
     npd_only: bool,
     all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
     dry_run: bool,
     verbose: bool,
     workers: int = 8,
@@ -564,22 +778,37 @@ def _run_sync_push_gcs(
     # Each entry: (src_blob_or_path, dest_url_or_path, label, size)
     to_copy: list[tuple[object, object, str, int]] = []
 
-    if src_is_gcs and dst_is_gcs:
-        for blob_url in gcs_find(source):
-            rel = blob_url[len(source):].lstrip("/")
-            if dataset_names and not any(
-                rel.startswith(n + "/") or rel.startswith(n + "_")
-                for n in dataset_names
-            ):
-                continue
-            dest_url = gcs_join(destination, rel)
-            src_size = gcs_size(blob_url)
-            if gcs_exists(dest_url) and gcs_size(dest_url) == src_size:
-                files_skipped += 1
-                continue
-            to_copy.append((blob_url, dest_url, rel, src_size))
+    if src_is_gcs:
+        pairs = _collect_gcs_sync_blobs(
+            gcs_find(source),
+            source,
+            dataset_names,
+            ignore_dataset_names,
+            dpd_only,
+            npd_only,
+            all_snapshots,
+            snapshot_suffixes,
+        )
+        if dst_is_gcs:
+            for blob_url, rel in pairs:
+                dest_url = gcs_join(destination, rel)
+                src_size = gcs_size(blob_url)
+                if gcs_exists(dest_url) and gcs_size(dest_url) == src_size:
+                    files_skipped += 1
+                    continue
+                to_copy.append((blob_url, dest_url, rel, src_size))
+        else:
+            dest_path = Path(destination)
+            for blob_url, rel in pairs:
+                local_file = dest_path / rel
+                if not should_download(blob_url, local_file):
+                    files_skipped += 1
+                    continue
+                to_copy.append(
+                    (blob_url, local_file, rel, gcs_size(blob_url))
+                )
 
-    elif not src_is_gcs and dst_is_gcs:
+    elif dst_is_gcs:
         source_path = Path(source)
         if not source_path.exists():
             logger.error(f"Error: Source not found: {source}")
@@ -587,9 +816,11 @@ def _run_sync_push_gcs(
         pairs = _collect_local_sync_files(
             source_path,
             dataset_names,
+            ignore_dataset_names,
             dpd_only,
             npd_only,
             all_snapshots,
+            snapshot_suffixes,
             rename_map,
         )
         for local_file, rel_str in pairs:
@@ -599,23 +830,6 @@ def _run_sync_push_gcs(
                 continue
             to_copy.append(
                 (local_file, dest_url, rel_str, local_file.stat().st_size)
-            )
-
-    else:
-        dest_path = Path(destination)
-        for blob_url in gcs_find(source):
-            rel = blob_url[len(source):].lstrip("/")
-            if dataset_names and not any(
-                rel.startswith(n + "/") or rel.startswith(n + "_")
-                for n in dataset_names
-            ):
-                continue
-            local_file = dest_path / rel
-            if not should_download(blob_url, local_file):
-                files_skipped += 1
-                continue
-            to_copy.append(
-                (blob_url, local_file, rel, gcs_size(blob_url))
             )
 
     # --- Phase 2: copy with progress ---
@@ -679,9 +893,11 @@ def _run_sync_pull_gcs(
     source: str,
     destination: str,
     dataset_names: list[str] | None,
+    ignore_dataset_names: list[str] | None,
     dpd_only: bool,
     npd_only: bool,
     all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
     dry_run: bool,
     verbose: bool,
     workers: int = 8,
@@ -695,9 +911,11 @@ def _run_sync_pull_gcs(
             source=source,
             destination=destination,
             dataset_names=dataset_names,
+            ignore_dataset_names=ignore_dataset_names,
             dpd_only=dpd_only,
             npd_only=npd_only,
             all_snapshots=all_snapshots,
+            snapshot_suffixes=snapshot_suffixes,
             dry_run=dry_run,
             verbose=verbose,
             workers=workers,

@@ -3407,19 +3407,23 @@ yaml/ and code/ git repos separately.
 | Default | Sync both DPDs and NPDs |
 | `--dpd-only` | Sync DPDs only, exclude all NPDs |
 | `--npd-only` | Sync NPDs only, exclude all DPDs |
-| `--dataset NAME [NAME ...]` | Sync only the named datasets (DPDs or NPDs) |
+| `--datasets NAME [NAME ...]` | Sync only the named datasets (whitelist) |
+| `--ignore-datasets NAME [NAME ...]` | Exclude named datasets from sync (blacklist) |
 
-Only one mode can be specified. Combining `--dpd-only`, `--npd-only`, or
-`--dataset` raises an error.
+Only one filtering mode can be specified. Combining `--dpd-only`, `--npd-only`,
+or `--datasets` raises an error. `--datasets` and `--ignore-datasets` are mutually exclusive.
 
 **Push (local to remote):**
 
 ```bash
-# Push to another local path
+# Push all datasets
 sync-cache push /path/to/cache /path/to/destination
 
 # Push specific dataset(s) only
-sync-cache push /path/to/cache /path/to/destination --dataset md.futures_daily md.futures_intraday
+sync-cache push /path/to/cache /path/to/destination --datasets md.futures_daily md.futures_intraday
+
+# Exclude specific datasets
+sync-cache push /path/to/cache /path/to/destination --ignore-datasets eod_prices_bucketed
 
 # Push DPDs only (no NPDs)
 sync-cache push /path/to/cache /path/to/destination --dpd-only
@@ -3431,11 +3435,29 @@ sync-cache push /path/to/cache /path/to/destination --npd-only
 **Pull (remote to local):**
 
 ```bash
-# Pull from another local path
+# Pull all datasets
 sync-cache pull /path/to/source /path/to/local/cache
 
 # Pull specific dataset(s) only
-sync-cache pull /path/to/source /path/to/local/cache --dataset md.futures_daily instrument_master
+sync-cache pull /path/to/source /path/to/local/cache --datasets md.futures_daily instrument_master
+
+# Exclude specific datasets
+sync-cache pull /path/to/source /path/to/local/cache --ignore-datasets eod_prices_bucketed
+```
+
+**Snapshot selection:**
+
+By default, only the current (latest) snapshot is synced. Use `--snapshot`
+to sync specific historical snapshots, or `--all-snapshots` for all snapshots:
+
+```bash
+# Sync specific snapshots only
+sync-cache push /path/to/cache /path/to/destination \
+    --datasets md.futures_daily --snapshot 1H4DW01 1H4DW02
+
+# Include all historical snapshots
+sync-cache push /path/to/cache /path/to/destination \
+    --datasets md.futures_daily --all-snapshots
 ```
 
 **Daemon mode (continuous sync):**
@@ -3462,15 +3484,18 @@ for details.
 **Options:**
 
 ```bash
---dataset NAME [NAME ...]  # Sync only these datasets (can be DPDs or NPDs)
---dpd-only                 # Sync DPDs only, exclude all NPDs
---npd-only                 # Sync NPDs only, exclude all DPDs
---all-snapshots            # Include historical snapshots, not just current
---dry-run                  # Show what would be synced without copying
---delete                   # Delete files at destination that aren't in source
---daemon                   # Run continuously instead of once
---update-interval N        # Seconds between sync checks (default: 60)
---rename OLD:NEW           # Copy dataset with a different name at destination
+--datasets NAME [NAME ...]      # Sync only these datasets (whitelist)
+--ignore-datasets NAME [NAME ...] # Exclude these datasets (blacklist)
+--snapshot SUFFIX [SUFFIX ...]  # Sync specific snapshots by suffix
+--dpd-only                      # Sync DPDs only, exclude all NPDs
+--npd-only                      # Sync NPDs only, exclude all DPDs
+--all-snapshots                 # Include all historical snapshots
+--dry-run                       # Show what would be synced without copying
+--delete                        # Delete files at destination that aren't in source
+--daemon                        # Run continuously instead of once
+--update-interval N             # Seconds between sync checks (default: 60)
+--rename OLD:NEW                # Copy dataset with a different name at destination
+--workers N                     # Parallel upload/download workers (default: 8)
 ```
 
 **Renaming datasets during sync:**
@@ -3482,16 +3507,18 @@ without modifying the source cache.
 ```bash
 # Copy md.futures_daily as md.futures_daily_backup
 sync-cache push /path/to/cache /path/to/destination \
-    --dataset md.futures_daily --rename md.futures_daily:md.futures_daily_backup
+    --datasets md.futures_daily --rename md.futures_daily:md.futures_daily_backup
 
 # Pull and rename
 sync-cache pull /path/to/source /path/to/local \
-    --dataset instrument_master --rename instrument_master:instrument_master_v2
+    --datasets instrument_master --rename instrument_master:instrument_master_v2
 ```
 
-The rename option requires `--dataset` to specify which dataset to rename.
-Only one rename mapping can be specified per command. The source dataset
-name must match one of the datasets being synced.
+**Important:** The rename option works with only a single dataset. When you
+use `--rename`, you must specify `--datasets` with exactly one dataset name.
+If you do not specify `--datasets`, the old dataset name is automatically
+used as the filter. Only one rename mapping can be specified per command.
+The source dataset name must match the dataset being synced.
 
 **S3 paths (future release):**
 

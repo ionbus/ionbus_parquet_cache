@@ -16,7 +16,7 @@ import datetime as dt
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import duckdb
 import pandas as pd
@@ -165,6 +165,7 @@ def build_update_plan(
     Returns:
         UpdatePlan with all file paths assigned.
     """
+    assert not dataset.is_gcs
     if suffix is None:
         suffix = generate_snapshot_suffix()
     plan = UpdatePlan(suffix=suffix)
@@ -213,7 +214,7 @@ def build_update_plan(
             path_parts.append(f"{col}={val}")
 
         # Final file path
-        partition_dir = dataset.dataset_dir
+        partition_dir = cast(Path, dataset.dataset_dir)
         for part in path_parts:
             partition_dir = partition_dir / part
 
@@ -311,33 +312,35 @@ def validate_schema(
     seen_names: set[str] = set()
 
     # First, add all fields from new_schema (with type promotion if needed)
-    for field in new_schema:
-        if field.name in existing_schema.names:
-            existing_field = existing_schema.field(field.name)
-            if not field.type.equals(existing_field.type):
+    for schema_field in new_schema:
+        if schema_field.name in existing_schema.names:
+            existing_field = existing_schema.field(schema_field.name)
+            if not schema_field.type.equals(existing_field.type):
                 # Check if it's a compatible promotion
-                if not _types_compatible(existing_field.type, field.type):
+                if not _types_compatible(
+                    existing_field.type, schema_field.type
+                ):
                     raise SchemaMismatchError(
-                        f"Column '{field.name}' type changed from "
-                        f"{existing_field.type} to {field.type}",
-                        column=field.name,
+                        f"Column '{schema_field.name}' type changed from "
+                        f"{existing_field.type} to {schema_field.type}",
+                        column=schema_field.name,
                         expected_type=str(existing_field.type),
-                        actual_type=str(field.type),
+                        actual_type=str(schema_field.type),
                     )
                 # Use the promoted (wider) type
-                merged_fields.append(field)
+                merged_fields.append(schema_field)
             else:
-                merged_fields.append(field)
+                merged_fields.append(schema_field)
         else:
             # New column
-            merged_fields.append(field)
-        seen_names.add(field.name)
+            merged_fields.append(schema_field)
+        seen_names.add(schema_field.name)
 
     # Then, add columns from existing_schema that aren't in new_schema
     # These columns will be null in new data but present in old files
-    for field in existing_schema:
-        if field.name not in seen_names:
-            merged_fields.append(field)
+    for schema_field in existing_schema:
+        if schema_field.name not in seen_names:
+            merged_fields.append(schema_field)
 
     return pa.schema(merged_fields)
 
@@ -478,6 +481,7 @@ def execute_update(
         SchemaMismatchError: If schema validation fails.
         SnapshotPublishError: If publishing fails.
     """
+    assert not dataset.is_gcs
     previous_suffix: str | None = (
         dataset._metadata.suffix if dataset._metadata is not None else None
     )
@@ -578,6 +582,7 @@ def execute_update(
                     table = pa.Table.from_pandas(df, preserve_index=False)
 
             # Write temp file
+            assert spec.temp_file_path is not None
             temp_path = Path(spec.temp_file_path)
             temp_path.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(
@@ -601,7 +606,7 @@ def execute_update(
         existing_files_by_partition: dict[tuple, Path] = {}
         if dataset._metadata:
             for fm in dataset._metadata.files:
-                full_path = dataset.dataset_dir / fm.path
+                full_path = cast(Path, dataset.dataset_dir) / fm.path
                 if full_path.exists():
                     key = tuple(sorted(fm.partition_values.items()))
                     existing_files_by_partition[key] = full_path
@@ -650,6 +655,7 @@ def execute_update(
                         dataset.date_col in existing_data.column_names
                         and min_date
                     ):
+                        assert max_date is not None
                         existing_df = existing_data.to_pandas()
                         # Keep rows outside the update window
                         mask = (
@@ -688,6 +694,7 @@ def execute_update(
                 combined = combined.drop(cols_to_drop)
 
             final_path = group.final_path
+            assert final_path is not None
             final_path.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(
                 combined,
@@ -697,7 +704,7 @@ def execute_update(
             file_metadata_list.append(
                 FileMetadata.from_path(
                     final_path,
-                    dataset.dataset_dir,
+                    cast(Path, dataset.dataset_dir),
                     dict(group.partition_values),
                 )
             )
@@ -712,7 +719,7 @@ def execute_update(
             for fm in dataset._metadata.files:
                 key = tuple(sorted(fm.partition_values.items()))
                 if key not in updated_partition_keys:
-                    full_path = dataset.dataset_dir / fm.path
+                    full_path = cast(Path, dataset.dataset_dir) / fm.path
                     if full_path.exists():
                         file_metadata_list.append(fm)
                         # Track partition values from unchanged files
