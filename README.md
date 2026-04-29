@@ -181,6 +181,79 @@ df = registry.read_data(
 )
 ```
 
+### Two workflows: Registry vs Direct Cache
+
+**Workflow 1: Using CacheRegistry**
+
+Use the registry when you want to read from one or more caches with centralized
+state management and automatic refresh handling.
+
+```python
+from ionbus_parquet_cache import CacheRegistry
+
+# Create registry once (singleton)
+registry = CacheRegistry.instance(cache="/path/to/cache")
+
+# Read data multiple times
+df1 = registry.read_data("md.futures_daily", start_date="2024-01-01")
+df2 = registry.read_data("md.futures_daily", start_date="2024-02-01")
+df3 = registry.read_data("different_dataset")
+
+# Refresh all when needed
+if registry.refresh_all():
+    print("New data available")
+```
+
+**Workflow 2: Grabbing a cache directly**
+
+Grab a dataset instance directly when you want to work with a specific cache
+or compare different versions of the same dataset.
+
+```python
+from ionbus_parquet_cache import DatedParquetDataset
+
+# Create a dataset instance (no registry singleton)
+cache = DatedParquetDataset.from_cache_dir(
+    cache_dir="/path/to/cache",
+    name="md.futures_daily"
+)
+
+# Use the same instance repeatedly
+df_jan = cache.read_data(start_date="2024-01-01", end_date="2024-01-31")
+df_feb = cache.read_data(start_date="2024-02-01", end_date="2024-02-28")
+```
+
+**Comparing different versions of a dataset**
+
+The second workflow is particularly useful when you need to compare multiple
+snapshots or versions of the same dataset.
+
+```python
+from ionbus_parquet_cache import DatedParquetDataset
+
+# Load current version
+current = DatedParquetDataset.from_cache_dir(
+    cache_dir="/path/to/cache",
+    name="md.futures_daily"
+)
+df_current = current.read_data(start_date="2024-01-01")
+
+# Load old version for comparison
+old = DatedParquetDataset.from_cache_dir(
+    cache_dir="/path/to/archive",
+    name="md.futures_daily"
+)
+df_old = old.read_data(
+    snapshot="1H4DW00",  # specific old snapshot
+    start_date="2024-01-01"
+)
+
+# Compare the two
+print(f"Current rows: {len(df_current)}")
+print(f"Old rows: {len(df_old)}")
+diff = df_current.compare(df_old)
+```
+
 ### Filtering data
 
 Use the `filters` parameter to filter rows. Filters use tuple syntax: `(column, operator, value)`.
@@ -257,6 +330,28 @@ summary = dpd.summary()
 print(f"Date range: {summary['cache_start_date']} to {summary['cache_end_date']}")
 print(f"Files: {summary['file_count']}")
 ```
+
+### Cache invalidation
+
+When `refresh()` detects new data, it automatically clears the internal read cache
+to ensure subsequent reads use fresh data. You can also manually invalidate the cache:
+
+```python
+dpd = registry.get_dataset("my_dataset")
+
+# Manual cache invalidation (next read will reload from disk)
+dpd.invalidate_read_cache()
+
+# View dataset summary with fresh snapshots discovered
+# WARNING: This mutates cached DPD instances!
+df = registry.data_summary(refresh_and_possibly_change_loaded_caches=True)
+```
+
+**Important:** The `refresh_and_possibly_change_loaded_caches` parameter in
+`data_summary()` discovers new snapshots and reloads metadata, which changes
+the behavior of cached DPD instances. Only use this if you have no active
+references to DPD instances and understand that existing reads will now return
+different data.
 
 ### Reading from historical snapshots
 

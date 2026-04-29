@@ -2407,6 +2407,50 @@ Refreshes all DPDs and NPDs that have been accessed via the registry.
 Returns `True` if any dataset was refreshed, `False` if all were current.
 Useful for Jupyter notebooks kept open for days.
 
+**Cache Invalidation:**
+
+When `refresh()` detects a new snapshot, it invalidates the internal read
+cache to ensure subsequent reads use the new data. The `invalidate_read_cache()`
+method can be called directly to manually clear cached state:
+
+```python
+dpd = registry.get_dataset("my_dataset")
+# Force cache invalidation without reloading metadata
+dpd.invalidate_read_cache()
+```
+
+This clears:
+- The cached PyArrow dataset (`_dataset`)
+- The cached schema (`_schema`)
+- For DPDs: the cached snapshot metadata (`_metadata`)
+
+The next `read_data()` or `pyarrow_dataset()` call will reload from disk.
+
+**`data_summary(refresh_and_possibly_change_loaded_caches=True)`:**
+
+The `CacheRegistry.data_summary()` method can discover fresh snapshots and
+reload metadata for display purposes:
+
+```python
+# Get dataset summary without discovering new snapshots (default, safe)
+df = registry.data_summary()
+
+# Discover new snapshots and reload metadata (mutates cached DPDs)
+df = registry.data_summary(
+    refresh_and_possibly_change_loaded_caches=True
+)
+```
+
+When `refresh_and_possibly_change_loaded_caches=True`:
+- Discovers the latest snapshot on disk for each dataset
+- If a new snapshot exists, reloads the SnapshotMetadata
+- **Clears the read cache** via `invalidate_read_cache()`
+- Subsequent `read_data()` calls will return data from the new snapshot
+
+**CRITICAL:** Only use `refresh_and_possibly_change_loaded_caches=True` if
+you have no active references to DPD instances. Any code holding a reference
+to a DPD will now read from a different snapshot than before.
+
 ---
 
 ## Updating Data

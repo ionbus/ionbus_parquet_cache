@@ -528,6 +528,11 @@ class DatedParquetDataset(ParquetDataset):
 
         return self._metadata.partition_values.get(column, [])
 
+    def invalidate_read_cache(self) -> None:
+        """Invalidate all cached read state (dataset, schema, and metadata)."""
+        super().invalidate_read_cache()
+        self._metadata = None
+
     def refresh(self) -> bool:
         """
         Invalidate cached dataset and load the latest snapshot.
@@ -539,7 +544,7 @@ class DatedParquetDataset(ParquetDataset):
         """
         result = super().refresh()
         if result:
-            self._metadata = None
+            self.invalidate_read_cache()
         return result
 
     def summary(self) -> dict[str, Any]:

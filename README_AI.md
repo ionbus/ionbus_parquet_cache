@@ -48,7 +48,7 @@ if you are building data pipelines or need to manage versioned, partitioned parq
 
 ### reading data
 
-Preferred pattern:
+basic example using CacheRegistry:
 
 ```python
 from ionbus_parquet_cache import CacheRegistry
@@ -59,9 +59,75 @@ dpd = registry.get_dataset("md.futures_daily")
 df = dpd.read_data(start_date="2024-01-01", end_date="2024-01-31")
 ```
 
-For normal reads, prefer CacheRegistry.instance() and get_dataset(). direct dataset classes are public and useful for creation or tests, but CacheRegistry keeps cache registration and refresh state centralized.
+both CacheRegistry and direct dataset instances are public APIs. see "two workflows" below for when to use each.
 
 for GCS caches, provide `gs://bucket/prefix` as the cache path. gcsfs must be installed.
+
+### two workflows: registry vs direct cache
+
+**workflow 1: CacheRegistry**
+
+use registry when you want centralized cache state management and automatic refresh handling across one or more caches:
+
+```python
+from ionbus_parquet_cache import CacheRegistry
+
+registry = CacheRegistry.instance(cache="/path/to/cache")
+
+# read multiple times, registry manages state
+df1 = registry.read_data("md.futures_daily", start_date="2024-01-01")
+df2 = registry.read_data("md.futures_daily", start_date="2024-02-01")
+df3 = registry.read_data("other_dataset")
+
+# refresh all datasets at once
+if registry.refresh_all():
+    print("New snapshots loaded")
+```
+
+**workflow 2: grab a dataset instance directly**
+
+create a DPD or NPD instance directly when you want to work with a specific cache instance or compare different versions of the same dataset:
+
+```python
+from ionbus_parquet_cache import DatedParquetDataset
+
+# create or load a specific cache instance
+cache = DatedParquetDataset.from_cache_dir(
+    cache_dir="/path/to/cache",
+    name="md.futures_daily"
+)
+
+# use repeatedly
+df_jan = cache.read_data(start_date="2024-01-01", end_date="2024-01-31")
+df_feb = cache.read_data(start_date="2024-02-01", end_date="2024-02-28")
+```
+
+**comparing different versions of a dataset**
+
+an advantage of workflow 2 is the ability to compare multiple snapshots or versions in the same process:
+
+```python
+# load current version
+current = DatedParquetDataset.from_cache_dir(
+    cache_dir="/prod/cache",
+    name="md.futures_daily"
+)
+df_current = current.read_data(start_date="2024-01-01")
+
+# load old version from archive
+old = DatedParquetDataset.from_cache_dir(
+    cache_dir="/archive/cache",
+    name="md.futures_daily"
+)
+df_old = old.read_data(
+    snapshot="1H4DW00",  # specific snapshot
+    start_date="2024-01-01"
+)
+
+# compare
+changes = df_current.compare(df_old)
+print(f"current: {len(df_current)}, old: {len(df_old)}")
+```
 
 ### creating/updating datasets
 
@@ -113,6 +179,43 @@ df = dpd.read_data(snapshot="1H4DW01", start_date=..., end_date=...)
 latest = registry.get_latest_snapshot("md.futures_daily")
 print(f"Latest snapshot: {latest}")
 ```
+
+### cache refresh and invalidation
+
+loaded DPD and NPD instances cache the PyArrow dataset and metadata in memory. when new snapshots appear, use `refresh()` to reload:
+
+```python
+# check and reload in one call
+if dpd.refresh():
+    print("new snapshot loaded")
+
+# or check first
+if dpd.is_update_available():
+    dpd.refresh()
+
+# refresh all datasets accessed via registry (useful in long-running notebooks)
+if registry.refresh_all():
+    print("some datasets were updated")
+```
+
+manual cache invalidation: call `invalidate_read_cache()` to clear the internal read state without reloading metadata.
+
+```python
+dpd.invalidate_read_cache()
+# next read will reload PyArrow dataset and schema from disk
+```
+
+**registry.data_summary()** can discover fresh snapshots:
+
+```python
+# safe: no mutations, uses cached metadata
+df = registry.data_summary()
+
+# discovers new snapshots and reloads metadata (MUTATES cached DPDs!)
+df = registry.data_summary(refresh_and_possibly_change_loaded_caches=True)
+```
+
+when `refresh_and_possibly_change_loaded_caches=True`, any code holding a reference to a DPD will see different snapshot data on the next read. only use if you have no active reads from the datasets being refreshed.
 
 ---
 
@@ -206,6 +309,8 @@ datasets:
 4. **Do NOT mix bucketed and non-bucketed updates** — once a dataset is built with `num_instrument_buckets: N`, it cannot be updated without that setting. changing it requires rebuilding from scratch.
 
 5. **Prefer CacheRegistry for normal reads** — direct dataset classes are useful for creation and tests, but long-running read code should use CacheRegistry.instance().get_dataset() so cache registration and refresh behavior stay centralized.
+
+6. **Do NOT call `data_summary(refresh_and_possibly_change_loaded_caches=True)` while code is actively reading from datasets** — this invalidates cached read state and subsequent reads from the same DPD instance will return data from a different snapshot.
 
 ---
 

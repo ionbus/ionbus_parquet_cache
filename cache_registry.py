@@ -610,12 +610,32 @@ class CacheRegistry:
             snapshot=snapshot,
         )
 
-    def data_summary(self) -> pd.DataFrame:
+    def data_summary(
+        self,
+        *,
+        refresh_and_possibly_change_loaded_caches: bool = False,
+    ) -> pd.DataFrame:
         """
         Get a summary of all datasets across all caches.
 
-        Metadata is reloaded for DPDs if the snapshot suffix has changed,
-        ensuring data freshness without unnecessary reloads.
+        Args:
+            refresh_and_possibly_change_loaded_caches: If False (default),
+                uses cached metadata without discovering new snapshots.
+                If True, discovers fresh snapshots and reloads metadata,
+                which MUTATES cached DPD instances in this registry.
+
+                CRITICAL: When set to True, this function:
+                - Discovers new snapshots on disk
+                - Reloads SnapshotMetadata for changed datasets
+                - Clears the internal read cache (_dataset, _schema,
+                  _metadata) for any reloaded DPD
+                - Causes subsequent reads to return data from the NEW
+                  snapshot, not the one that was originally loaded
+
+                Only use this if you have NO active references to DPD
+                instances from this registry, and you understand that
+                any code holding a reference will now read from a
+                different snapshot than before.
 
         Returns:
             DataFrame with columns:
@@ -640,15 +660,17 @@ class CacheRegistry:
                             parse_snapshot_suffix,
                         )
 
-                        suffix = dpd._discover_current_suffix()
                         meta = dpd._metadata
+                        suffix = meta.suffix if meta else None
 
-                        # Reload metadata if suffix changed (stale cache)
-                        if (
-                            meta is None
-                            or meta.suffix != suffix
-                        ):
-                            meta = dpd._load_metadata()
+                        # If refresh is enabled, discover fresh suffix and
+                        # reload metadata (with side effects on cached DPD)
+                        if refresh_and_possibly_change_loaded_caches:
+                            suffix = dpd._discover_current_suffix()
+                            if meta is None or meta.suffix != suffix:
+                                dpd.current_suffix = suffix
+                                dpd.invalidate_read_cache()
+                                meta = dpd._load_metadata()
 
                         if meta:
                             total_size = sum(
@@ -718,7 +740,15 @@ class CacheRegistry:
                             parse_snapshot_suffix,
                         )
 
-                        suffix = npd._discover_current_suffix()
+                        # Only discover fresh suffix if refresh is enabled
+                        if refresh_and_possibly_change_loaded_caches:
+                            suffix = npd._discover_current_suffix()
+                        else:
+                            # Use cached current_suffix if available
+                            suffix = npd.current_suffix
+                            if suffix is None:
+                                suffix = npd._discover_current_suffix()
+
                         if suffix:
                             snapshot_ts = parse_snapshot_suffix(suffix)
                             snapshot_dt = dt.datetime.fromtimestamp(
