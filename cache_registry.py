@@ -661,7 +661,7 @@ class CacheRegistry:
                         )
 
                         meta = dpd._metadata
-                        suffix = meta.suffix if meta else None
+                        suffix = meta.suffix if meta else dpd.current_suffix
 
                         # If refresh is enabled, discover fresh suffix and
                         # reload metadata (with side effects on cached DPD)

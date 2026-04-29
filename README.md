@@ -181,20 +181,18 @@ df = registry.read_data(
 )
 ```
 
-### Two workflows: Registry vs Direct Cache
+### Two workflows with CacheRegistry
 
-**Workflow 1: Using CacheRegistry**
+**Workflow 1: Read via registry (convenience)**
 
-Use the registry when you want to read from one or more caches with centralized
-state management and automatic refresh handling.
+Use `registry.read_data()` for straightforward single reads:
 
 ```python
 from ionbus_parquet_cache import CacheRegistry
 
-# Create registry once (singleton)
 registry = CacheRegistry.instance(cache="/path/to/cache")
 
-# Read data multiple times
+# Read data, one call at a time
 df1 = registry.read_data("md.futures_daily", start_date="2024-01-01")
 df2 = registry.read_data("md.futures_daily", start_date="2024-02-01")
 df3 = registry.read_data("different_dataset")
@@ -204,46 +202,48 @@ if registry.refresh_all():
     print("New data available")
 ```
 
-**Workflow 2: Grabbing a cache directly**
+**Workflow 2: Grab a dataset instance for repeated use**
 
-Grab a dataset instance directly when you want to work with a specific cache
-or compare different versions of the same dataset.
+Get a dataset instance from the registry when you plan to use it repeatedly
+or compare different snapshots:
 
 ```python
-from ionbus_parquet_cache import DatedParquetDataset
+from ionbus_parquet_cache import CacheRegistry
 
-# Create a dataset instance (no registry singleton)
-cache = DatedParquetDataset.from_cache_dir(
-    cache_dir="/path/to/cache",
-    name="md.futures_daily"
-)
+registry = CacheRegistry.instance(cache="/path/to/cache")
 
-# Use the same instance repeatedly
-df_jan = cache.read_data(start_date="2024-01-01", end_date="2024-01-31")
-df_feb = cache.read_data(start_date="2024-02-01", end_date="2024-02-28")
+# Grab a dataset instance
+dpd = registry.get_dataset("md.futures_daily")
+
+# Use it repeatedly
+df_jan = dpd.read_data(start_date="2024-01-01", end_date="2024-01-31")
+df_feb = dpd.read_data(start_date="2024-02-01", end_date="2024-02-28")
+
+# Control refresh behavior for this instance
+if dpd.is_update_available():
+    dpd.refresh()
 ```
 
-**Comparing different versions of a dataset**
+**Comparing different snapshots or caches**
 
-The second workflow is particularly useful when you need to compare multiple
-snapshots or versions of the same dataset.
+Register multiple caches and read from each:
 
 ```python
-from ionbus_parquet_cache import DatedParquetDataset
+from ionbus_parquet_cache import CacheRegistry
 
-# Load current version
-current = DatedParquetDataset.from_cache_dir(
-    cache_dir="/path/to/cache",
-    name="md.futures_daily"
+# Register both caches in the singleton registry
+registry = CacheRegistry.instance(
+    prod="/prod/cache",
+    archive="/archive/cache"
 )
-df_current = current.read_data(start_date="2024-01-01")
 
-# Load old version for comparison
-old = DatedParquetDataset.from_cache_dir(
-    cache_dir="/path/to/archive",
-    name="md.futures_daily"
-)
-df_old = old.read_data(
+# Get current version from prod cache
+current_dpd = registry.get_dataset("md.futures_daily", cache_name="prod")
+df_current = current_dpd.read_data(start_date="2024-01-01")
+
+# Get old version from archive cache (can specify snapshot)
+archive_dpd = registry.get_dataset("md.futures_daily", cache_name="archive")
+df_old = archive_dpd.read_data(
     snapshot="1H4DW00",  # specific old snapshot
     start_date="2024-01-01"
 )
