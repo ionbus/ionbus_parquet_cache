@@ -615,8 +615,13 @@ class CacheRegistry:
         Get a summary of all datasets across all caches.
 
         Returns:
-            DataFrame with columns: cache, name, type, current_suffix, etc.
+            DataFrame with columns: cache, name, type, current_suffix,
+            start_date, end_date, file_count, total_size_mb,
+            partition_columns, instrument_buckets, days_since_update,
+            description.
         """
+        import datetime as dt
+
         rows = []
 
         for cache_name in self._cache_order:
@@ -628,15 +633,53 @@ class CacheRegistry:
                 if dpd:
                     try:
                         suffix = dpd._discover_current_suffix()
-                        rows.append(
-                            {
-                                "cache": cache_name,
-                                "name": dpd_name,
-                                "type": "DPD",
-                                "current_suffix": suffix,
-                            }
+                        meta = dpd._metadata
+                        if meta:
+                            total_size = sum(
+                                f.size_bytes for f in meta.files
+                            ) / (1024 * 1024)
+                            days_since = (
+                                dt.datetime.now(dt.timezone.utc)
+                                - meta.created_at.replace(tzinfo=dt.timezone.utc)
+                            ).total_seconds() / 86400
+                            partition_cols = meta.yaml_config.get(
+                                "partition_columns", []
+                            )
+                            bucketing = meta.yaml_config.get(
+                                "num_instrument_buckets"
+                            )
+                            rows.append(
+                                {
+                                    "cache": cache_name,
+                                    "name": dpd_name,
+                                    "type": "DPD",
+                                    "current_suffix": suffix,
+                                    "start_date": meta.cache_start_date,
+                                    "end_date": meta.cache_end_date,
+                                    "file_count": len(meta.files),
+                                    "total_size_mb": round(total_size, 2),
+                                    "partition_columns": partition_cols,
+                                    "instrument_buckets": bucketing,
+                                    "days_since_update": days_since,
+                                    "description": meta.yaml_config.get(
+                                        "description", ""
+                                    ),
+                                }
+                            )
+                        else:
+                            rows.append(
+                                {
+                                    "cache": cache_name,
+                                    "name": dpd_name,
+                                    "type": "DPD",
+                                    "current_suffix": suffix,
+                                }
+                            )
+                    except Exception as e:
+                        from ionbus_utils.logging_utils import logger
+                        logger.error(
+                            f"Failed to load metadata for {dpd_name}: {e}"
                         )
-                    except Exception:
                         rows.append(
                             {
                                 "cache": cache_name,
@@ -652,14 +695,42 @@ class CacheRegistry:
                 if npd:
                     try:
                         suffix = npd._discover_current_suffix()
-                        rows.append(
-                            {
-                                "cache": cache_name,
-                                "name": npd_name,
-                                "type": "NPD",
-                                "current_suffix": suffix,
-                            }
-                        )
+                        meta = npd._metadata
+                        if meta:
+                            total_size = sum(
+                                f.size_bytes for f in meta.files
+                            ) / (1024 * 1024)
+                            days_since = (
+                                dt.datetime.now(dt.timezone.utc)
+                                - meta.created_at.replace(tzinfo=dt.timezone.utc)
+                            ).total_seconds() / 86400
+                            bucketing = meta.yaml_config.get(
+                                "num_instrument_buckets"
+                            )
+                            rows.append(
+                                {
+                                    "cache": cache_name,
+                                    "name": npd_name,
+                                    "type": "NPD",
+                                    "current_suffix": suffix,
+                                    "file_count": len(meta.files),
+                                    "total_size_mb": round(total_size, 2),
+                                    "instrument_buckets": bucketing,
+                                    "days_since_update": days_since,
+                                    "description": meta.yaml_config.get(
+                                        "description", ""
+                                    ),
+                                }
+                            )
+                        else:
+                            rows.append(
+                                {
+                                    "cache": cache_name,
+                                    "name": npd_name,
+                                    "type": "NPD",
+                                    "current_suffix": suffix,
+                                }
+                            )
                     except Exception:
                         rows.append(
                             {
