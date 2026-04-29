@@ -614,11 +614,15 @@ class CacheRegistry:
         """
         Get a summary of all datasets across all caches.
 
+        Metadata is reloaded for DPDs if the snapshot suffix has changed,
+        ensuring data freshness without unnecessary reloads.
+
         Returns:
-            DataFrame with columns: cache, name, type, current_suffix,
-            start_date, end_date, file_count, total_size_mb,
-            partition_columns, instrument_buckets, days_since_update,
-            description.
+            DataFrame with columns:
+            - cache, name, type, current_suffix (all types)
+            - start_date, end_date, file_count, total_size_mb,
+              partition_columns, instrument_buckets, description (DPDs only)
+            - days_since_update (all types, calculated from suffix timestamp)
         """
         import datetime as dt
 
@@ -632,15 +636,31 @@ class CacheRegistry:
                 dpd = self._get_dpd(dpd_name, cache_name)
                 if dpd:
                     try:
+                        from ionbus_parquet_cache.snapshot import (
+                            parse_snapshot_suffix,
+                        )
+
                         suffix = dpd._discover_current_suffix()
                         meta = dpd._metadata
+
+                        # Reload metadata if suffix changed (stale cache)
+                        if (
+                            meta is None
+                            or meta.suffix != suffix
+                        ):
+                            meta = dpd._load_metadata()
+
                         if meta:
                             total_size = sum(
                                 f.size_bytes for f in meta.files
                             ) / (1024 * 1024)
+                            snapshot_ts = parse_snapshot_suffix(suffix)
+                            snapshot_dt = dt.datetime.fromtimestamp(
+                                snapshot_ts, tz=dt.timezone.utc
+                            )
                             days_since = (
                                 dt.datetime.now(dt.timezone.utc)
-                                - meta.created_at.replace(tzinfo=dt.timezone.utc)
+                                - snapshot_dt
                             ).total_seconds() / 86400
                             partition_cols = meta.yaml_config.get(
                                 "partition_columns", []
@@ -660,7 +680,7 @@ class CacheRegistry:
                                     "total_size_mb": round(total_size, 2),
                                     "partition_columns": partition_cols,
                                     "instrument_buckets": bucketing,
-                                    "days_since_update": days_since,
+                                    "days_since_update": round(days_since, 2),
                                     "description": meta.yaml_config.get(
                                         "description", ""
                                     ),
@@ -694,32 +714,27 @@ class CacheRegistry:
                 npd = self._get_npd(npd_name, cache_name)
                 if npd:
                     try:
+                        from ionbus_parquet_cache.snapshot import (
+                            parse_snapshot_suffix,
+                        )
+
                         suffix = npd._discover_current_suffix()
-                        meta = npd._metadata
-                        if meta:
-                            total_size = sum(
-                                f.size_bytes for f in meta.files
-                            ) / (1024 * 1024)
+                        if suffix:
+                            snapshot_ts = parse_snapshot_suffix(suffix)
+                            snapshot_dt = dt.datetime.fromtimestamp(
+                                snapshot_ts, tz=dt.timezone.utc
+                            )
                             days_since = (
                                 dt.datetime.now(dt.timezone.utc)
-                                - meta.created_at.replace(tzinfo=dt.timezone.utc)
+                                - snapshot_dt
                             ).total_seconds() / 86400
-                            bucketing = meta.yaml_config.get(
-                                "num_instrument_buckets"
-                            )
                             rows.append(
                                 {
                                     "cache": cache_name,
                                     "name": npd_name,
                                     "type": "NPD",
                                     "current_suffix": suffix,
-                                    "file_count": len(meta.files),
-                                    "total_size_mb": round(total_size, 2),
-                                    "instrument_buckets": bucketing,
-                                    "days_since_update": days_since,
-                                    "description": meta.yaml_config.get(
-                                        "description", ""
-                                    ),
+                                    "days_since_update": round(days_since, 2),
                                 }
                             )
                         else:
@@ -728,10 +743,14 @@ class CacheRegistry:
                                     "cache": cache_name,
                                     "name": npd_name,
                                     "type": "NPD",
-                                    "current_suffix": suffix,
+                                    "current_suffix": None,
                                 }
                             )
-                    except Exception:
+                    except Exception as e:
+                        from ionbus_utils.logging_utils import logger
+                        logger.error(
+                            f"Failed to discover NPD {npd_name}: {e}"
+                        )
                         rows.append(
                             {
                                 "cache": cache_name,
