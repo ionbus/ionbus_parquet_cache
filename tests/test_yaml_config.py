@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import datetime as dt
 from pathlib import Path
-from typing import Any
 
 import duckdb
 import pandas as pd
@@ -14,7 +12,6 @@ from ionbus_parquet_cache.data_cleaner import DataCleaner
 from ionbus_parquet_cache.data_source import DataSource
 from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
 from ionbus_parquet_cache.exceptions import ConfigurationError
-from ionbus_parquet_cache.partition import PartitionSpec
 from ionbus_parquet_cache.yaml_config import (
     DatasetConfig,
     apply_yaml_transforms,
@@ -108,9 +105,7 @@ class TestCleaner(DataCleaner):
 class TestLoadYamlFile:
     """Tests for load_yaml_file()."""
 
-    def test_load_basic_yaml(
-        self, temp_cache: Path, sample_yaml: Path
-    ) -> None:
+    def test_load_basic_yaml(self, temp_cache: Path, sample_yaml: Path) -> None:
         """Should load a basic YAML file."""
         configs = load_yaml_file(sample_yaml, temp_cache)
 
@@ -121,9 +116,7 @@ class TestLoadYamlFile:
         assert config.date_col == "Date"
         assert config.date_partition == "month"
 
-    def test_load_partition_columns(
-        self, temp_cache: Path, sample_yaml: Path
-    ) -> None:
+    def test_load_partition_columns(self, temp_cache: Path, sample_yaml: Path) -> None:
         """Should load partition and sort columns."""
         configs = load_yaml_file(sample_yaml, temp_cache)
 
@@ -131,9 +124,7 @@ class TestLoadYamlFile:
         assert config.partition_columns == ["symbol", "month"]
         assert config.sort_columns == ["symbol", "Date"]
 
-    def test_load_source_settings(
-        self, temp_cache: Path, sample_yaml: Path
-    ) -> None:
+    def test_load_source_settings(self, temp_cache: Path, sample_yaml: Path) -> None:
         """Should load data source settings."""
         configs = load_yaml_file(sample_yaml, temp_cache)
 
@@ -182,9 +173,7 @@ datasets:
 class TestLoadAllConfigs:
     """Tests for load_all_configs()."""
 
-    def test_load_all_from_yaml_dir(
-        self, temp_cache: Path, sample_yaml: Path
-    ) -> None:
+    def test_load_all_from_yaml_dir(self, temp_cache: Path, sample_yaml: Path) -> None:
         """Should load all configs from yaml/ directory."""
         configs = load_all_configs(temp_cache)
 
@@ -220,17 +209,13 @@ class TestLoadAllConfigs:
 class TestGetDatasetConfig:
     """Tests for get_dataset_config()."""
 
-    def test_get_existing_dataset(
-        self, temp_cache: Path, sample_yaml: Path
-    ) -> None:
+    def test_get_existing_dataset(self, temp_cache: Path, sample_yaml: Path) -> None:
         """Should return config for existing dataset."""
         config = get_dataset_config(temp_cache, "md.test_dataset")
 
         assert config.name == "md.test_dataset"
 
-    def test_missing_dataset_raises(
-        self, temp_cache: Path, sample_yaml: Path
-    ) -> None:
+    def test_missing_dataset_raises(self, temp_cache: Path, sample_yaml: Path) -> None:
         """Missing dataset should raise ConfigurationError."""
         with pytest.raises(ConfigurationError, match="not found"):
             get_dataset_config(temp_cache, "nonexistent")
@@ -291,9 +276,7 @@ datasets:
         assert cleaner_class is not None
         assert issubclass(cleaner_class, DataCleaner)
 
-    def test_create_cleaner(
-        self, temp_cache: Path, sample_cleaner_file: Path
-    ) -> None:
+    def test_create_cleaner(self, temp_cache: Path, sample_cleaner_file: Path) -> None:
         """Should create a DataCleaner instance."""
         yaml_content = """
 datasets:
@@ -315,9 +298,7 @@ datasets:
         assert isinstance(cleaner, DataCleaner)
         assert cleaner.min_price == 1.5
 
-    def test_no_cleaner_returns_none(
-        self, temp_cache: Path, sample_yaml: Path
-    ) -> None:
+    def test_no_cleaner_returns_none(self, temp_cache: Path, sample_yaml: Path) -> None:
         """Should return None when no cleaner configured."""
         config = get_dataset_config(temp_cache, "md.test_dataset")
 
@@ -389,11 +370,13 @@ class TestApplyYamlTransforms:
             columns_to_drop=["drop_me", "also_drop"],
         )
 
-        df = pd.DataFrame({
-            "keep": [1, 2, 3],
-            "drop_me": [4, 5, 6],
-            "also_drop": [7, 8, 9],
-        })
+        df = pd.DataFrame(
+            {
+                "keep": [1, 2, 3],
+                "drop_me": [4, 5, 6],
+                "also_drop": [7, 8, 9],
+            }
+        )
         rel = duckdb.from_df(df)
 
         result = apply_yaml_transforms(rel, config)
@@ -412,10 +395,12 @@ class TestApplyYamlTransforms:
             dropna_columns=["required_col"],
         )
 
-        df = pd.DataFrame({
-            "required_col": [1, None, 3, None],
-            "other": ["a", "b", "c", "d"],
-        })
+        df = pd.DataFrame(
+            {
+                "required_col": [1, None, 3, None],
+                "other": ["a", "b", "c", "d"],
+            }
+        )
         rel = duckdb.from_df(df)
 
         result = apply_yaml_transforms(rel, config)
@@ -434,10 +419,12 @@ class TestApplyYamlTransforms:
             dedup_keep="last",
         )
 
-        df = pd.DataFrame({
-            "key": ["a", "b", "a", "b"],
-            "value": [1, 2, 3, 4],
-        })
+        df = pd.DataFrame(
+            {
+                "key": ["a", "b", "a", "b"],
+                "value": [1, 2, 3, 4],
+            }
+        )
         rel = duckdb.from_df(df)
 
         result = apply_yaml_transforms(rel, config)
@@ -455,10 +442,12 @@ class TestApplyYamlTransforms:
             dedup_keep="first",
         )
 
-        df = pd.DataFrame({
-            "key": ["a", "b", "a", "b"],
-            "value": [1, 2, 3, 4],
-        })
+        df = pd.DataFrame(
+            {
+                "key": ["a", "b", "a", "b"],
+                "value": [1, 2, 3, 4],
+            }
+        )
         rel = duckdb.from_df(df)
 
         result = apply_yaml_transforms(rel, config)
@@ -495,11 +484,13 @@ class TestApplyYamlTransforms:
             dedup_columns=["key"],
         )
 
-        df = pd.DataFrame({
-            "key": ["a", "a", "b"],
-            "old_col": [1, None, 3],
-            "unwanted": [4, 5, 6],
-        })
+        df = pd.DataFrame(
+            {
+                "key": ["a", "a", "b"],
+                "old_col": [1, None, 3],
+                "unwanted": [4, 5, 6],
+            }
+        )
         rel = duckdb.from_df(df)
 
         result = apply_yaml_transforms(rel, config)
@@ -590,3 +581,65 @@ class TestInstalledModuleDataSource:
         with pytest.raises(ConfigurationError) as exc_info:
             config.load_source_class()
         assert "must inherit from DataSource" in str(exc_info.value)
+
+    def test_create_source_from_metadata_with_module(self, temp_cache: Path) -> None:
+        """Should load DataSource from metadata with module:// location."""
+        import datetime as dt
+
+        import pandas as pd
+        import pyarrow as pa
+
+        from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, FileMetadata
+
+        # Create a DPD and publish a snapshot with module:// metadata
+        dpd = DatedParquetDataset(
+            name="test.dataset",
+            cache_dir=temp_cache,
+            date_col="date",
+            partition_columns=[],
+        )
+
+        # Create minimal test data and write to parquet
+        test_data = pd.DataFrame(
+            {
+                "date": pd.date_range("2024-01-01", periods=5),
+                "value": range(5),
+            }
+        )
+        table = pa.Table.from_pandas(test_data)
+
+        # Create parquet file
+        parquet_dir = temp_cache / "data"
+        parquet_dir.mkdir()
+        parquet_path = parquet_dir / "test.parquet"
+        pa.parquet.write_table(table, parquet_path)
+
+        # Create metadata with module:// source_location
+        file_metadata = FileMetadata.from_path(
+            parquet_path, parquet_dir, partition_values={}
+        )
+
+        yaml_config_with_module = {
+            "source_location": "module://ionbus_parquet_cache.builtin_sources",
+            "source_class_name": "HiveParquetSource",
+            "source_init_args": {"path": str(parquet_dir)},
+        }
+
+        # Publish snapshot with module:// metadata
+        dpd._publish_snapshot(
+            files=[file_metadata],
+            schema=table.schema,
+            cache_start_date=dt.date(2024, 1, 1),
+            cache_end_date=dt.date(2024, 1, 5),
+            partition_values={},
+            yaml_config=yaml_config_with_module,
+        )
+
+        # Now test create_source_from_metadata - this exercises the actual
+        # code path in dated_dataset.py, not just the helper
+        source = dpd.create_source_from_metadata()
+
+        # Verify the source was instantiated correctly from module://
+        assert source.__class__.__name__ == "HiveParquetSource"
+        # Verify it's from the right module
+        assert source.__class__.__module__ == "ionbus_parquet_cache.builtin_sources"

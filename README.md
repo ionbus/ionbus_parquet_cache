@@ -826,7 +826,7 @@ datasets:
 | `instruments` | `list[str]` | `None` | List of instruments to filter on (uses `instrument_column`) |
 | `start_date_str` | `str` | `None` | Override start date (debugging only, format: `"YYYY-MM-DD"`) |
 | `end_date_str` | `str` | `None` | Override end date (debugging only, format: `"YYYY-MM-DD"`) |
-| `source_location` | `str` | `""` | Path to Python file with DataSource class (empty for built-ins) |
+| `source_location` | `str` | `""` | Location of DataSource class: empty for built-in sources, `code/file.py` for cache-local file, `module://pkg.mod` for installed package |
 | `source_class_name` | `str` | required | Name of the DataSource class |
 | `source_init_args` | `dict` | `{}` | Arguments passed to DataSource constructor |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove from the data |

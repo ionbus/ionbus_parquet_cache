@@ -15,12 +15,11 @@ from typing import Any
 
 import duckdb
 import yaml
-
 from ionbus_utils.general import load_class_from_file
 from ionbus_utils.logging_utils import logger
 
 from ionbus_parquet_cache.data_cleaner import DataCleaner
-from ionbus_parquet_cache.data_source import BucketedDataSource, DataSource
+from ionbus_parquet_cache.data_source import DataSource
 from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
 from ionbus_parquet_cache.exceptions import ConfigurationError
 
@@ -156,25 +155,10 @@ class DatasetConfig:
                 config_file=str(self.cache_dir / "yaml"),
             )
 
-        # Check for built-in sources first
-        if not self.source_location:
-            return _load_builtin_source(self.source_class_name)
-
-        # Check for installed module source
-        if self.source_location.startswith("module://"):
-            module_path = self.source_location[len("module://"):]
-            return _load_installed_module_source(
-                module_path,
-                self.source_class_name,
-                f"Dataset '{self.name}'",
-            )
-
-        # Load from file
-        source_path = _resolve_path(self.cache_dir, self.source_location)
-        return _load_class_from_file(
-            source_path,
+        return _resolve_source_class(
+            self.source_location,
             self.source_class_name,
-            DataSource,
+            self.cache_dir,
             f"Dataset '{self.name}'",
         )
 
@@ -219,9 +203,7 @@ class DatasetConfig:
             f"Dataset '{self.name}'",
         )
 
-    def create_cleaner(
-        self, dataset: "DatedParquetDataset"
-    ) -> "DataCleaner | None":
+    def create_cleaner(self, dataset: "DatedParquetDataset") -> "DataCleaner | None":
         """
         Create a configured DataCleaner instance if configured.
 
@@ -420,6 +402,55 @@ def _resolve_path(cache_dir: Path, location: str) -> Path:
     return cache_dir / location
 
 
+def _resolve_source_class(
+    source_location: str,
+    source_class_name: str,
+    cache_dir: Path,
+    context: str,
+) -> type["DataSource"]:
+    """
+    Resolve and load a DataSource class from source_location.
+
+    Resolution order:
+    1. If source_location is empty, load from built-in sources
+    2. If source_location starts with 'module://', load from installed package
+    3. Otherwise, load from file path (relative to cache root or absolute)
+
+    Args:
+        source_location: Empty string, "module://...", or file path.
+        source_class_name: Name of the DataSource class to load.
+        cache_dir: Root cache directory (for resolving relative paths).
+        context: Context string for error messages.
+
+    Returns:
+        The DataSource subclass.
+
+    Raises:
+        ConfigurationError: If the class cannot be loaded.
+    """
+    # Check for built-in sources first
+    if not source_location:
+        return _load_builtin_source(source_class_name)
+
+    # Check for installed module source
+    if source_location.startswith("module://"):
+        module_path = source_location[len("module://") :]
+        return _load_installed_module_source(
+            module_path,
+            source_class_name,
+            context,
+        )
+
+    # Load from file
+    source_path = _resolve_path(cache_dir, source_location)
+    return _load_class_from_file(
+        source_path,
+        source_class_name,
+        DataSource,
+        context,
+    )
+
+
 def _load_installed_module_source(
     module_path: str,
     class_name: str,
@@ -455,15 +486,13 @@ def _load_installed_module_source(
     cls = getattr(module, class_name, None)
     if cls is None:
         raise ConfigurationError(
-            f"{context}: Class '{class_name}' not found in module "
-            f"'{module_path}'",
+            f"{context}: Class '{class_name}' not found in module " f"'{module_path}'",
         )
 
     # Validate: must be a class
     if not inspect.isclass(cls):
         raise ConfigurationError(
-            f"{context}: '{class_name}' in module '{module_path}' is not a "
-            f"class",
+            f"{context}: '{class_name}' in module '{module_path}' is not a " f"class",
         )
 
     # Validate: must inherit from DataSource or BucketedDataSource
@@ -492,6 +521,7 @@ def _load_builtin_source(class_name: str) -> type["DataSource"]:
     # Import built-in sources module
     try:
         from ionbus_parquet_cache import builtin_sources
+
         cls = getattr(builtin_sources, class_name, None)
         if cls is not None:
             return cls
@@ -569,14 +599,12 @@ def apply_yaml_transforms(
     # 1. Rename columns
     if config.columns_to_rename:
         renames = ", ".join(
-            f'"{old}" AS "{new}"'
-            for old, new in config.columns_to_rename.items()
+            f'"{old}" AS "{new}"' for old, new in config.columns_to_rename.items()
         )
         # Get columns that aren't being renamed
         current_cols = rel.columns
         other_cols = [
-            f'"{c}"' for c in current_cols
-            if c not in config.columns_to_rename
+            f'"{c}"' for c in current_cols if c not in config.columns_to_rename
         ]
         select_clause = ", ".join(other_cols + [renames]) if other_cols else renames
         rel = duckdb.sql(f"SELECT {select_clause} FROM rel")
@@ -590,9 +618,7 @@ def apply_yaml_transforms(
 
     # 3. Drop rows with nulls
     if config.dropna_columns:
-        conditions = " AND ".join(
-            f'"{c}" IS NOT NULL' for c in config.dropna_columns
-        )
+        conditions = " AND ".join(f'"{c}" IS NOT NULL' for c in config.dropna_columns)
         rel = duckdb.sql(f"SELECT * FROM rel WHERE {conditions}")
 
     # 4. Deduplicate
