@@ -158,7 +158,9 @@ Failure behavior:
 The cache is a directory containing:
 - A `yaml/` subdirectory with YAML files describing `DatedParquetDataset`s
   (one or more DPDs per file)
-- A `code/` subdirectory with DataSource implementations (Python files)
+- A `code/` subdirectory with cache-local `DataSource` implementations
+  (custom Python files); built-in sources and installed package sources are
+  referenced separately (see [Data Source Interface](#data-source-interface))
 - A `non-dated/` subdirectory for `NonDatedParquetDataset` snapshots
 - One data subdirectory per `DatedParquetDataset`
 
@@ -474,7 +476,7 @@ by date (and optionally by additional columns).
 | `start_date_str` | `str \| None` | Earliest date to request from source (mostly for debugging) |
 | `end_date_str` | `str \| None` | Latest date to request from source (mostly for debugging) |
 | `repull_n_days` | `int` | How many trailing business days to re-fetch on each update (for corrections) |
-| `instrument_column` | `str \| None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Must also be a partition column. |
+| `instrument_column` | `str \| None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Can be used for filtering at read time and does not need to be a partition column. |
 | `instruments` | `list[str] \| None` | Instruments to include in updates. If `None`, fetches all instruments. |
 
 **DPD-specific methods** (in addition to base class methods):
@@ -923,7 +925,9 @@ datasets:
 ```
 
 - `instrument_column` identifies which column contains instrument identifiers.
-  It can be a partition column (for partitioned filtering) or a regular data column (for read-time filtering).
+  For read-time filtering, it can be any data column. For update-time filtering
+  via the `instruments` YAML field, the update path must support it (typically
+  requires a partition or bucket column for efficient updates).
 - `instruments` limits normal updates to the listed instruments. If omitted
   or `None`, all instruments are fetched.
 - The `--instruments` CLI flag overrides the YAML `instruments` list for
@@ -1242,10 +1246,11 @@ the date partition column. For example, with `date_partition: year` and
 a `FutureRoot` partition column: `{"FutureRoot": "ES", "year": "Y2024"}`.
 With `date_partition: month`: `{"FutureRoot": "ES", "month": "M2024-01"}`.
 
-When `instrument_column` is set in the YAML, the instrument value is included
-in `partition_values` (e.g., `{"FutureRoot": "ES", ...}`). The `--instruments`
-CLI flag requires `instrument_column` to be set and that column must be a
-partition column; otherwise `--instruments` raises an error.
+When `instrument_column` is set in the YAML and is also a partition column,
+the instrument value is included in `partition_values` (e.g.,
+`{"FutureRoot": "ES", ...}`). If `instrument_column` is not a partition column,
+it is not included in `partition_values`. The `--instruments` CLI flag requires
+`instrument_column` to be set.
 
 **`temp_file_path` field:** This field is **not** set by the DataSource.
 After calling `get_partitions()`, the DPD assigns `temp_file_path` to each
@@ -1864,38 +1869,22 @@ datasets:
       endpoint: "https://api.example.com"
 ```
 
-**Credentials and secrets:**
-
-If a `DataSource` needs API keys, database passwords, or other secrets, fetch
-them from environment variables rather than storing them in YAML or
-`source_init_args`. Environment variables are more portable, don't get
-persisted in metadata files, and integrate cleanly with standard deployment
-practices (e.g., `.env` files, container secrets, CI/CD platforms).
-
-```python
-# my_library/data_sources.py
-import os
-from ionbus_parquet_cache import DataSource
-
-class ExternalDataSource(DataSource):
-    def __init__(self, dataset, endpoint: str):
-        super().__init__(dataset)
-        self.endpoint = endpoint
-        # Fetch secrets from environment, not from config
-        self.api_key = os.environ.get("EXTERNAL_API_KEY")
-        if not self.api_key:
-            raise ValueError("EXTERNAL_API_KEY not set")
-```
-
 **How it works:**
 
 1. The library author packages a `DataSource` subclass in their package
-   (e.g., `my_library.data_sources.ExternalAPISource`)
+   (e.g., `my_library.data_sources.ExternalDataSource`)
 2. Users install the package: `pip install my_library`
 3. In the YAML config, set `source_location: module://my_library.data_sources`
-   and `source_class_name: ExternalAPISource`
+   and `source_class_name: ExternalDataSource`
 4. At load time, the system uses `importlib.import_module()` to dynamically
    import the module and retrieve the class
+
+**Credentials and secrets:**
+
+If a `DataSource` needs credentials (API keys, database passwords, etc.),
+fetch them from environment variables. This is more portable and doesn't
+expose secrets in YAML or metadata files. The `DataSource` should fail loudly
+(raise an error) if a required credential is missing.
 
 **Class requirements:**
 
@@ -1922,7 +1911,7 @@ missing, wrong base class, etc.).
 ```
 my_library/
   __init__.py
-  data_sources.py    # contains ExternalAPISource class
+  data_sources.py    # contains ExternalDataSource class
   setup.py
 ```
 
@@ -1935,8 +1924,6 @@ class ExternalDataSource(DataSource):
     def __init__(self, dataset, endpoint: str):
         super().__init__(dataset)
         self.endpoint = endpoint
-        # Fetch secrets from environment
-        self.api_key = os.environ.get("EXTERNAL_API_KEY")
     
     def available_dates(self) -> tuple:
         # ... implementation ...
@@ -3112,8 +3099,9 @@ configuration that was in effect when it was created.
 
 **Note:** The metadata contains the configuration for reference, but may
 not be sufficient to re-run the update if the Python source files
-(`source_location`, `cleaning_class_location`) are not available. It
-serves as an audit trail showing exactly how the data was processed.
+(`source_location`, `cleaning_class_location`) or installed packages/modules
+are not available. It serves as an audit trail showing exactly how the data
+was processed.
 
 **Snapshot selection:**
 
