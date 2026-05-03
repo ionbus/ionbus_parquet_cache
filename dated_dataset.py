@@ -8,22 +8,24 @@ Metadata is stored in `_meta_data/` as pickled snapshot files.
 from __future__ import annotations
 
 import datetime as dt
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pandas as pd
+import polars as pl
 import pyarrow as pa
 import pyarrow.dataset as pds
 import pyarrow.fs as pafs
-from pydantic import PrivateAttr, field_validator
-
 from ionbus_utils.date_utils import to_date
 from ionbus_utils.file_utils import get_file_hash
 from ionbus_utils.logging_utils import logger
+from pydantic import PrivateAttr, field_validator
 
-from ionbus_parquet_cache.parquet_dataset_base import ParquetDataset
+from ionbus_parquet_cache.bucketing import (
+    INSTRUMENT_BUCKET_COL,
+    instrument_bucket,
+)
 from ionbus_parquet_cache.data_cleaner import DataCleaner
 from ionbus_parquet_cache.data_source import DataSource
 from ionbus_parquet_cache.exceptions import (
@@ -32,6 +34,7 @@ from ionbus_parquet_cache.exceptions import (
     UpdateLockedError,
     ValidationError,
 )
+from ionbus_parquet_cache.parquet_dataset_base import ParquetDataset
 from ionbus_parquet_cache.partition import (
     DATE_PARTITION_GRANULARITIES,
     date_partition_column_name,
@@ -46,10 +49,6 @@ from ionbus_parquet_cache.update_pipeline import (
     build_update_plan,
     compute_update_window,
     execute_update,
-)
-from ionbus_parquet_cache.bucketing import (
-    INSTRUMENT_BUCKET_COL,
-    instrument_bucket,
 )
 
 
@@ -115,7 +114,6 @@ class SnapshotMetadata:
     def from_pickle(cls, path: Path) -> "SnapshotMetadata":
         """Load from pickle file."""
         return pd.read_pickle(path)
-
 
 
 class DatedParquetDataset(ParquetDataset):
@@ -184,9 +182,7 @@ class DatedParquetDataset(ParquetDataset):
             self.sort_columns = [self.date_col]
 
         # Auto-append date partition column if not in partition_columns
-        date_part_col = date_partition_column_name(
-            self.date_partition, self.date_col
-        )
+        date_part_col = date_partition_column_name(self.date_partition, self.date_col)
         if date_part_col not in self.partition_columns:
             self.partition_columns = self.partition_columns + [date_part_col]
 
@@ -216,7 +212,9 @@ class DatedParquetDataset(ParquetDataset):
                 )
             # Inject __instrument_bucket__ before date partition col
             other_cols = [c for c in self.partition_columns if c != date_part_col]
-            self.partition_columns = [INSTRUMENT_BUCKET_COL] + other_cols + [date_part_col]
+            self.partition_columns = (
+                [INSTRUMENT_BUCKET_COL] + other_cols + [date_part_col]
+            )
             # Default sort: instrument_column then date_col (if still at default)
             if self.sort_columns == [self.date_col]:
                 self.sort_columns = [self.instrument_column, self.date_col]
@@ -267,6 +265,7 @@ class DatedParquetDataset(ParquetDataset):
     def _discover_current_suffix_gcs(self) -> str | None:
         """Discover the current suffix by listing GCS metadata blobs."""
         from ionbus_parquet_cache.gcs_utils import gcs_ls
+
         suffixes = []
         for blob_url in gcs_ls(str(self.meta_dir)):
             name = blob_url.rstrip("/").split("/")[-1]
@@ -300,6 +299,7 @@ class DatedParquetDataset(ParquetDataset):
         if self.is_gcs:
             meta_url = f"{self.meta_dir}/{self.name}_{self.current_suffix}.pkl.gz"
             from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_open
+
             if not gcs_exists(meta_url):
                 raise SnapshotNotFoundError(
                     f"Metadata file not found: {meta_url}",
@@ -377,6 +377,7 @@ class DatedParquetDataset(ParquetDataset):
         if self.is_gcs:
             meta_url = f"{self.meta_dir}/{self.name}_{suffix}.pkl.gz"
             from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_open
+
             if not gcs_exists(meta_url):
                 raise SnapshotNotFoundError(
                     f"Snapshot '{suffix}' not found for DPD '{self.name}'",
@@ -423,6 +424,7 @@ class DatedParquetDataset(ParquetDataset):
                 gcs_pa_filesystem,
                 gcs_strip_prefix,
             )
+
             gcs_fs = gcs_pa_filesystem()
             existing_files = list(metadata.files)
         else:
@@ -807,12 +809,14 @@ class DatedParquetDataset(ParquetDataset):
         }
 
         # Return None if no transforms are set
-        if not any([
-            transforms["columns_to_rename"],
-            transforms["columns_to_drop"],
-            transforms["dropna_columns"],
-            transforms["dedup_columns"],
-        ]):
+        if not any(
+            [
+                transforms["columns_to_rename"],
+                transforms["columns_to_drop"],
+                transforms["dropna_columns"],
+                transforms["dedup_columns"],
+            ]
+        ):
             return None
 
         return transforms
@@ -830,8 +834,10 @@ class DatedParquetDataset(ParquetDataset):
         Uses platform-appropriate mechanism: signal 0 on POSIX, OpenProcess on Windows.
         """
         import sys
+
         if sys.platform == "win32":
             import ctypes
+
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
                 PROCESS_QUERY_LIMITED_INFORMATION, False, pid
@@ -842,6 +848,7 @@ class DatedParquetDataset(ParquetDataset):
             return False
         else:
             import os as _os
+
             try:
                 _os.kill(pid, 0)
                 return True
@@ -926,7 +933,6 @@ class DatedParquetDataset(ParquetDataset):
             FileNotFoundError: If no lock file exists.
         """
         import json
-        import os
 
         lock_path = self._lock_path
         if not lock_path.exists():
@@ -940,6 +946,7 @@ class DatedParquetDataset(ParquetDataset):
                 pid = info.get("pid")
                 host = info.get("hostname", "")
                 import socket
+
                 if host == socket.gethostname() and pid is not None:
                     alive = self._pid_is_running(pid)
                     if alive is True or alive is None:
@@ -1044,9 +1051,7 @@ class DatedParquetDataset(ParquetDataset):
             raise ValidationError("end_date not allowed with backfill=True")
 
         if restate and (start_date is None or end_date is None):
-            raise ValidationError(
-                "restate requires both start_date and end_date"
-            )
+            raise ValidationError("restate requires both start_date and end_date")
 
         # For backfill, auto-set end_date to cache_start - 1 day
         if backfill:
@@ -1057,9 +1062,7 @@ class DatedParquetDataset(ParquetDataset):
                     pass  # No existing cache, backfill is normal update
 
             if self._metadata and self._metadata.cache_start_date:
-                backfill_end = (
-                    self._metadata.cache_start_date - dt.timedelta(days=1)
-                )
+                backfill_end = self._metadata.cache_start_date - dt.timedelta(days=1)
                 end_date = backfill_end
 
                 # Validate backfill constraint: start must be before cache_start
@@ -1117,6 +1120,7 @@ class DatedParquetDataset(ParquetDataset):
         # Validate bucketed sources use the correct base class
         if self.num_instrument_buckets is not None:
             from ionbus_parquet_cache.data_source import BucketedDataSource
+
             if not isinstance(source, BucketedDataSource):
                 raise ValidationError(
                     f"Dataset '{self.name}' has "
@@ -1157,6 +1161,7 @@ class DatedParquetDataset(ParquetDataset):
         finally:
             # Clean up temp dir
             import shutil
+
             if temp_dir.exists():
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1174,10 +1179,11 @@ class DatedParquetDataset(ParquetDataset):
         """
         Read data into a pandas DataFrame, with optional instrument filter.
 
-        When ``instruments`` is provided and bucketing is active
-        (``instrument_column`` and ``num_instrument_buckets`` are set),
-        the call is pushed down to the correct ``__instrument_bucket__``
-        partition(s) before row-level filtering.
+        When ``instruments`` is provided, ``instrument_column`` must be set.
+        For non-bucketed datasets, the call applies a row-level filter on
+        that column. For bucketed datasets, it also pushes down to the
+        correct ``__instrument_bucket__`` partition(s) before row-level
+        filtering.
 
         Args:
             start_date: Optional start date for filtering.
@@ -1186,11 +1192,11 @@ class DatedParquetDataset(ParquetDataset):
             columns: Optional list of columns to return.
             snapshot: Optional snapshot suffix.
             instruments: One or more instrument values to filter on.
-                Requires ``instrument_column`` and ``num_instrument_buckets``
-                to be set.
+                Requires ``instrument_column`` to be set.
 
         Raises:
-            ValueError: If ``instruments`` is given but bucketing is not active.
+            ValueError: If ``instruments`` is given but
+                ``instrument_column`` is not set.
         """
         combined_filters = self._build_instrument_filters(instruments, filters)
         return super().read_data(
@@ -1233,43 +1239,46 @@ class DatedParquetDataset(ParquetDataset):
         Build combined filters incorporating instrument bucket and row filters.
 
         Returns the original ``existing_filters`` unchanged if ``instruments``
-        is None.  Raises ``ValueError`` if ``instruments`` is given but
-        bucketing is not configured.
+        is None. Raises ``ValueError`` if ``instruments`` is given but
+        ``instrument_column`` is not configured.
         """
         import pyarrow.dataset as pds
 
         if instruments is None:
             return existing_filters
 
-        if self.instrument_column is None or self.num_instrument_buckets is None:
+        if self.instrument_column is None:
             raise ValueError(
-                "instruments filter requires instrument_column and "
-                "num_instrument_buckets to be set on this dataset"
+                "instruments filter requires instrument_column to be set "
+                "on this dataset"
             )
 
-        # Normalise to a set — handle single scalar (str, int, etc.) or iterable
+        # Normalise to a set. Handle a single scalar or an iterable.
         if isinstance(instruments, (str, int, float)):
             instruments_set = {instruments}
         else:
             instruments_set = set(instruments)
 
-        # Compute which buckets contain these instruments
-        bucket_strs = {
-            instrument_bucket(t, self.num_instrument_buckets)
-            for t in instruments_set
-        }
+        instrument_values = sorted(instruments_set)
+        bucket_values: list[str] | None = None
 
-        new_filters: list[tuple] = [
-            (INSTRUMENT_BUCKET_COL, "in", sorted(bucket_strs)),
-            (self.instrument_column, "in", sorted(instruments_set)),
-        ]
+        new_filters: list[tuple] = []
+        if self.num_instrument_buckets is not None:
+            # Compute which buckets contain these instruments.
+            bucket_values = sorted(
+                instrument_bucket(t, self.num_instrument_buckets)
+                for t in instruments_set
+            )
+            new_filters.append((INSTRUMENT_BUCKET_COL, "in", bucket_values))
+        new_filters.append((self.instrument_column, "in", instrument_values))
 
         if existing_filters is None:
             return new_filters
         if isinstance(existing_filters, pds.Expression):
-            # Combine as Expression: bucket filter AND row filter AND existing
-            bucket_expr = pds.field(INSTRUMENT_BUCKET_COL).isin(sorted(bucket_strs))
-            row_expr = pds.field(self.instrument_column).isin(sorted(instruments_set))
-            return bucket_expr & row_expr & existing_filters
+            row_expr = pds.field(self.instrument_column).isin(instrument_values)
+            if bucket_values is not None:
+                bucket_expr = pds.field(INSTRUMENT_BUCKET_COL).isin(bucket_values)
+                return bucket_expr & row_expr & existing_filters
+            return row_expr & existing_filters
         # Assume it's a list of tuples
         return new_filters + list(existing_filters)

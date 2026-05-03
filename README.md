@@ -649,8 +649,9 @@ class MySource(DataSource):
 
 ### Post-update bookkeeping
 
-Override `on_update_complete(suffix)` to run any bookkeeping after all partitions
-have been written and the snapshot is published. `self.start_date`,
+Override `on_update_complete(suffix, previous_suffix)` to run any bookkeeping after all partitions
+have been written and the snapshot is published. `suffix` is the new snapshot key, and 
+`previous_suffix` is the prior snapshot (or None on first update). `self.start_date`,
 `self.end_date`, and `self.instruments` are still set from `prepare()` at this
 point, so you have full context about what was just run.
 
@@ -952,8 +953,8 @@ The base class:
 
 ### Reading with an instrument filter
 
-When bucketing is active, use the `instruments` parameter on `read_data()` or
-`read_data_pl()` to push down a filter to the correct bucket partitions:
+When `instrument_column` is configured, use the `instruments` parameter on
+`read_data()` or `read_data_pl()` to filter by instrument:
 
 ```python
 # Single ticker
@@ -973,9 +974,14 @@ df = dpd.read_data(
 df_pl = dpd.read_data_pl(instruments="TSLA")
 ```
 
-The `instruments` filter:
-1. Computes which bucket(s) contain the requested tickers (partition pruning)
-2. Applies an exact row-level filter on `instrument_column` within those buckets
+The `instruments` filter always applies an exact row-level filter on
+`instrument_column`. The column does not need to be part of
+`partition_columns` for read-time filtering; it can be a normal physical
+column in the Parquet payload.
+
+When bucketing is active, the filter also computes which bucket(s) contain
+the requested tickers and prunes to those `__instrument_bucket__` partitions
+before applying the exact row-level filter.
 
 Without the `instruments` filter, `read_data()` returns all tickers as normal.
 
