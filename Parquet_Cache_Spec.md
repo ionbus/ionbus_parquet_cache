@@ -1929,15 +1929,15 @@ class ExternalDataSource(DataSource):
     def __init__(self, dataset, endpoint: str):
         super().__init__(dataset)
         self.endpoint = endpoint
-    
+
     def available_dates(self) -> tuple:
         # ... implementation ...
         pass
-    
+
     def get_partitions(self) -> list:
         # ... implementation ...
         pass
-    
+
     def get_data(self, partition_spec):
         # ... implementation ...
         pass
