@@ -528,3 +528,65 @@ class TestTransformDefaults:
         assert config.dropna_columns == []
         assert config.dedup_columns == []
         assert config.dedup_keep == "last"
+
+
+class TestInstalledModuleDataSource:
+    """Tests for loading DataSource from installed packages via module://."""
+
+    def test_load_from_module_builtin(self, temp_cache: Path) -> None:
+        """Should load a DataSource from ionbus_parquet_cache builtin."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            source_location="",
+            source_class_name="HiveParquetSource",
+        )
+        cls = config.load_source_class()
+        assert cls.__name__ == "HiveParquetSource"
+
+    def test_load_from_module_installed(self, temp_cache: Path) -> None:
+        """Should load a DataSource from an installed module path."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            source_location="module://ionbus_parquet_cache.builtin_sources",
+            source_class_name="HiveParquetSource",
+        )
+        cls = config.load_source_class()
+        assert cls.__name__ == "HiveParquetSource"
+
+    def test_module_source_not_found(self, temp_cache: Path) -> None:
+        """Should raise ConfigurationError if module cannot be imported."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            source_location="module://nonexistent_package.data_sources",
+            source_class_name="SomeSource",
+        )
+        with pytest.raises(ConfigurationError) as exc_info:
+            config.load_source_class()
+        assert "Could not import module" in str(exc_info.value)
+
+    def test_module_class_not_found(self, temp_cache: Path) -> None:
+        """Should raise ConfigurationError if class not in module."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            source_location="module://ionbus_parquet_cache.builtin_sources",
+            source_class_name="NonExistentClass",
+        )
+        with pytest.raises(ConfigurationError) as exc_info:
+            config.load_source_class()
+        assert "not found in module" in str(exc_info.value)
+
+    def test_module_class_wrong_base(self, temp_cache: Path) -> None:
+        """Should raise ConfigurationError if class doesn't inherit DataSource."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            source_location="module://pathlib",
+            source_class_name="Path",
+        )
+        with pytest.raises(ConfigurationError) as exc_info:
+            config.load_source_class()
+        assert "must inherit from DataSource" in str(exc_info.value)

@@ -7,6 +7,8 @@ Supports dynamic loading of DataSource and DataCleaner classes.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,7 @@ from ionbus_utils.general import load_class_from_file
 from ionbus_utils.logging_utils import logger
 
 from ionbus_parquet_cache.data_cleaner import DataCleaner
-from ionbus_parquet_cache.data_source import DataSource
+from ionbus_parquet_cache.data_source import BucketedDataSource, DataSource
 from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
 from ionbus_parquet_cache.exceptions import ConfigurationError
 
@@ -137,6 +139,11 @@ class DatasetConfig:
         """
         Dynamically load the DataSource class.
 
+        Resolution order:
+        1. If source_location is empty, load from built-in sources
+        2. If source_location starts with 'module://', load from installed package
+        3. Otherwise, load from file path (relative to cache root or absolute)
+
         Returns:
             The DataSource subclass.
 
@@ -152,6 +159,15 @@ class DatasetConfig:
         # Check for built-in sources first
         if not self.source_location:
             return _load_builtin_source(self.source_class_name)
+
+        # Check for installed module source
+        if self.source_location.startswith("module://"):
+            module_path = self.source_location[len("module://"):]
+            return _load_installed_module_source(
+                module_path,
+                self.source_class_name,
+                f"Dataset '{self.name}'",
+            )
 
         # Load from file
         source_path = _resolve_path(self.cache_dir, self.source_location)
@@ -402,6 +418,62 @@ def _resolve_path(cache_dir: Path, location: str) -> Path:
     if path.is_absolute():
         return path
     return cache_dir / location
+
+
+def _load_installed_module_source(
+    module_path: str,
+    class_name: str,
+    context: str,
+) -> type["DataSource"]:
+    """
+    Load a DataSource class from an installed Python package.
+
+    Args:
+        module_path: Importable module path (e.g., 'my_library.data_sources').
+        class_name: Name of the DataSource class in that module.
+        context: Context string for error messages.
+
+    Returns:
+        The DataSource subclass.
+
+    Raises:
+        ConfigurationError: If the module cannot be imported, the class is
+            not found, is nested, or does not inherit from DataSource.
+    """
+    try:
+        module = importlib.import_module(module_path)
+    except ModuleNotFoundError as e:
+        raise ConfigurationError(
+            f"{context}: Could not import module '{module_path}': {e}",
+        ) from e
+    except Exception as e:
+        raise ConfigurationError(
+            f"{context}: Failed to import module '{module_path}': {e}",
+        ) from e
+
+    # Get the class from the module
+    cls = getattr(module, class_name, None)
+    if cls is None:
+        raise ConfigurationError(
+            f"{context}: Class '{class_name}' not found in module "
+            f"'{module_path}'",
+        )
+
+    # Validate: must be a class
+    if not inspect.isclass(cls):
+        raise ConfigurationError(
+            f"{context}: '{class_name}' in module '{module_path}' is not a "
+            f"class",
+        )
+
+    # Validate: must inherit from DataSource or BucketedDataSource
+    if not issubclass(cls, DataSource):
+        raise ConfigurationError(
+            f"{context}: Class '{class_name}' must inherit from DataSource "
+            f"or BucketedDataSource",
+        )
+
+    return cls
 
 
 def _load_builtin_source(class_name: str) -> type["DataSource"]:
