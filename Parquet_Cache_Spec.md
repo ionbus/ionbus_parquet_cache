@@ -170,7 +170,7 @@ The cache is a directory containing:
         futures.yaml               <- can define multiple DPDs
         equities.yaml
     code/
-        futures_source.py          <- DataSource implementations
+        futures_source.py          <- cache-local DataSource implementations
         equity_source.py
         cleaners.py                <- DataCleaner implementations
     non-dated/                     <- NonDatedParquetDataset snapshots
@@ -263,9 +263,13 @@ Example setup with shared code:
         ...
 ```
 
-The `source_location` field in YAML can be:
-- **Relative to cache root:** `code/futures_source.py` (recommended)
-- **Absolute path:** `/path/to/code/futures_source.py`
+The `source_location` field in YAML supports three modes:
+- **Built-in source (blank/empty):** Uses a built-in `DataSource` from
+  `ionbus_parquet_cache` (e.g., `HiveParquetSource`, `DPDSource`)
+- **Installed package source:** `module://my_library.data_sources` (loads from
+  an installed Python package)
+- **Cache-local source (file path):** Relative to cache root
+  (e.g., `code/futures_source.py`, recommended) or absolute path
 
 See [YAML fields](#yaml-fields) for details.
 
@@ -1250,7 +1254,9 @@ When `instrument_column` is set in the YAML and is also a partition column,
 the instrument value is included in `partition_values` (e.g.,
 `{"FutureRoot": "ES", ...}`). If `instrument_column` is not a partition column,
 it is not included in `partition_values`. The `--instruments` CLI flag requires
-`instrument_column` to be set.
+`instrument_column` to be set. For non-bucketed datasets, the instrument column
+must also be a partition column to support efficient updates. For bucketed
+datasets, bucketed partial updates are not currently supported.
 
 **`temp_file_path` field:** This field is **not** set by the DataSource.
 After calling `get_partitions()`, the DPD assigns `temp_file_path` to each
@@ -1917,8 +1923,7 @@ my_library/
 
 ```python
 # my_library/data_sources.py
-import os
-from ionbus_parquet_cache import DataSource, PartitionSpec
+from ionbus_parquet_cache import DataSource
 
 class ExternalDataSource(DataSource):
     def __init__(self, dataset, endpoint: str):
@@ -1926,10 +1931,6 @@ class ExternalDataSource(DataSource):
         self.endpoint = endpoint
     
     def available_dates(self) -> tuple:
-        # ... implementation ...
-        pass
-    
-    def prepare(self, start_date, end_date, instruments=None) -> None:
         # ... implementation ...
         pass
     
