@@ -20,6 +20,7 @@
     * [`DataSource` abstract class](#datasource-abstract-class)
     * [Implementing a `DataSource`](#implementing-a-datasource)
     * [Built-in Data Sources](#built-in-data-sources)
+    * [Installed Module Data Sources](#installed-module-data-sources)
 - [Data Cleaner Interface](#data-cleaner-interface)
     * [`DataCleaner` abstract class](#datacleaner-abstract-class)
     * [Implementing a `DataCleaner`](#implementing-a-datacleaner)
@@ -894,9 +895,9 @@ class FuturesDataCleaner(DataCleaner):
 | `end_date_str` | `str` | `None` | **Debugging/testing only.** Optional override for latest date (ISO format). If set, the DPD guarantees that `get_data()` will never be called with an end date later than this value. Rarely used in production YAML files. |
 | `repull_n_days` | `int` | `0` | Number of trailing business days to re-fetch each update |
 | `row_group_size` | `int \| None` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values allow row-group-level predicate pushdown within a file at the cost of more metadata overhead. Only relevant when files are large enough to contain multiple row groups. |
-| `instrument_column` | `str` | `None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Must also be a partition column. |
+| `instrument_column` | `str` | `None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Can be used for filtering at read time and does not need to be a partition column. |
 | `instruments` | `list[str]` | `None` | Instruments to include in updates. If `None`, fetches all instruments. Can be expanded over time using backfill (see below). |
-| `source_location` | `str` | `""` | Path to the Python file containing the `DataSource` subclass. Can be relative to the cache root directory (e.g., `code/futures_source.py`) or an absolute path. If empty/blank, uses a built-in data source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)). |
+| `source_location` | `str` | `""` | Location of the `DataSource` subclass. Resolution order: (1) if empty/blank, uses a built-in source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)); (2) if starts with `module://`, loads from an installed Python package (e.g., `module://my_library.data_sources`) — must use the importable module path, not the distribution name (see [Installed Module Data Sources](#installed-module-data-sources)); (3) otherwise treated as a filesystem path relative to cache root or absolute. If the module cannot be imported, the class is missing, or the class does not inherit from `DataSource`, dataset creation/update fails with a configuration error. |
 | `source_class_name` | `str` | required | Name of the `DataSource` subclass. When `source_location` is empty, this must be a built-in class name (e.g., `HiveParquetSource`, `DPDSource`). |
 | `source_init_args` | `dict` | `{}` | Arguments passed to the `DataSource` constructor as `**kwargs` |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove after fetching data |
@@ -918,11 +919,11 @@ datasets:
   md.futures_daily:
     instrument_column: FutureRoot    # column containing instrument IDs
     instruments: [ES, NQ, YM, RTY]   # only fetch these instruments
-    partition_columns: [FutureRoot, year]  # instrument_column must be a partition column
+    partition_columns: [FutureRoot, year]
 ```
 
 - `instrument_column` identifies which column contains instrument identifiers.
-  This column **must** also be listed in `partition_columns`.
+  It can be a partition column (for partitioned filtering) or a regular data column (for read-time filtering).
 - `instruments` limits normal updates to the listed instruments. If omitted
   or `None`, all instruments are fetched.
 - The `--instruments` CLI flag overrides the YAML `instruments` list for
@@ -1841,6 +1842,124 @@ datasets:
   - Creating filtered views of larger datasets
   - Applying different cleaning logic to existing data
   - Building aggregated datasets from detail data
+
+### Installed Module Data Sources
+
+Data sources can be packaged in external Python libraries and referenced
+via the `module://` prefix in `source_location`. This allows teams to
+distribute pre-built data source implementations as installable packages.
+
+**YAML configuration with installed module:**
+
+```yaml
+datasets:
+  md.external_data:
+    description: "Data from an installed library"
+    date_col: Date
+    date_partition: year
+    partition_columns: [Symbol, year]
+    source_location: module://my_library.data_sources
+    source_class_name: ExternalDataSource
+    source_init_args:
+      endpoint: "https://api.example.com"
+```
+
+**Credentials and secrets:**
+
+If a `DataSource` needs API keys, database passwords, or other secrets, fetch
+them from environment variables rather than storing them in YAML or
+`source_init_args`. Environment variables are more portable, don't get
+persisted in metadata files, and integrate cleanly with standard deployment
+practices (e.g., `.env` files, container secrets, CI/CD platforms).
+
+```python
+# my_library/data_sources.py
+import os
+from ionbus_parquet_cache import DataSource
+
+class ExternalDataSource(DataSource):
+    def __init__(self, dataset, endpoint: str):
+        super().__init__(dataset)
+        self.endpoint = endpoint
+        # Fetch secrets from environment, not from config
+        self.api_key = os.environ.get("EXTERNAL_API_KEY")
+        if not self.api_key:
+            raise ValueError("EXTERNAL_API_KEY not set")
+```
+
+**How it works:**
+
+1. The library author packages a `DataSource` subclass in their package
+   (e.g., `my_library.data_sources.ExternalAPISource`)
+2. Users install the package: `pip install my_library`
+3. In the YAML config, set `source_location: module://my_library.data_sources`
+   and `source_class_name: ExternalAPISource`
+4. At load time, the system uses `importlib.import_module()` to dynamically
+   import the module and retrieve the class
+
+**Class requirements:**
+
+The loaded class must:
+- Be a top-level class in the module (not nested inside another class or function)
+- Inherit from `DataSource` (or `BucketedDataSource` for bucketed datasets)
+- Be instantiable with the arguments from `source_init_args` (passed as `**kwargs`)
+
+If any of these conditions fail, dataset creation or update will raise a
+configuration error with details about what is wrong (module not found, class
+missing, wrong base class, etc.).
+
+**Module path resolution:**
+
+- The `module://` prefix signals that the following string is a Python
+  module path (e.g., `my_library.data_sources`)
+- The module can be in the installed site-packages, a local editable
+  install, or any location on `sys.path`
+- Always use the importable module name, not the distribution name
+  (e.g., install `my-library` from PyPI but import `my_library.data_sources`)
+
+**Example library structure:**
+
+```
+my_library/
+  __init__.py
+  data_sources.py    # contains ExternalAPISource class
+  setup.py
+```
+
+```python
+# my_library/data_sources.py
+import os
+from ionbus_parquet_cache import DataSource, PartitionSpec
+
+class ExternalDataSource(DataSource):
+    def __init__(self, dataset, endpoint: str):
+        super().__init__(dataset)
+        self.endpoint = endpoint
+        # Fetch secrets from environment
+        self.api_key = os.environ.get("EXTERNAL_API_KEY")
+    
+    def available_dates(self) -> tuple:
+        # ... implementation ...
+        pass
+    
+    def prepare(self, start_date, end_date, instruments=None) -> None:
+        # ... implementation ...
+        pass
+    
+    def get_partitions(self) -> list:
+        # ... implementation ...
+        pass
+    
+    def get_data(self, partition_spec):
+        # ... implementation ...
+        pass
+```
+
+**Scope note:**
+
+The `module://` prefix currently applies only to `source_location` for
+`DataSource` classes. The mechanism could be extended to
+`cleaning_class_location` in the future if needed.
 
 ---
 
