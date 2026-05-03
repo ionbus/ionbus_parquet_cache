@@ -649,8 +649,9 @@ class MySource(DataSource):
 
 ### Post-update bookkeeping
 
-Override `on_update_complete(suffix)` to run any bookkeeping after all partitions
-have been written and the snapshot is published. `self.start_date`,
+Override `on_update_complete(suffix, previous_suffix)` to run any bookkeeping after all partitions
+have been written and the snapshot is published. `suffix` is the new snapshot key, and 
+`previous_suffix` is the prior snapshot (or None on first update). `self.start_date`,
 `self.end_date`, and `self.instruments` are still set from `prepare()` at this
 point, so you have full context about what was just run.
 

@@ -1132,7 +1132,7 @@ that partition are processed. See
 
 - `prepare()` - Set up for fetching (default calls `set_date_instruments()`)
 - `get_partitions()` - Return list of partitions to update (default uses class attributes)
-- `on_update_complete(suffix)` - Post-update bookkeeping hook (default is a no-op)
+- `on_update_complete(suffix, previous_suffix)` - Post-update bookkeeping hook (default is a no-op). `previous_suffix` is None on first update.
 
 **Method details:**
 
