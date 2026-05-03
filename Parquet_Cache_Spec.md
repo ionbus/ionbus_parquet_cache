@@ -20,6 +20,7 @@
     * [`DataSource` abstract class](#datasource-abstract-class)
     * [Implementing a `DataSource`](#implementing-a-datasource)
     * [Built-in Data Sources](#built-in-data-sources)
+    * [Installed Module Data Sources](#installed-module-data-sources)
 - [Data Cleaner Interface](#data-cleaner-interface)
     * [`DataCleaner` abstract class](#datacleaner-abstract-class)
     * [Implementing a `DataCleaner`](#implementing-a-datacleaner)
@@ -157,7 +158,9 @@ Failure behavior:
 The cache is a directory containing:
 - A `yaml/` subdirectory with YAML files describing `DatedParquetDataset`s
   (one or more DPDs per file)
-- A `code/` subdirectory with DataSource implementations (Python files)
+- A `code/` subdirectory with cache-local `DataSource` implementations
+  (custom Python files); built-in sources and installed package sources are
+  referenced separately (see [Data Source Interface](#data-source-interface))
 - A `non-dated/` subdirectory for `NonDatedParquetDataset` snapshots
 - One data subdirectory per `DatedParquetDataset`
 
@@ -167,7 +170,7 @@ The cache is a directory containing:
         futures.yaml               <- can define multiple DPDs
         equities.yaml
     code/
-        futures_source.py          <- DataSource implementations
+        futures_source.py          <- cache-local DataSource implementations
         equity_source.py
         cleaners.py                <- DataCleaner implementations
     non-dated/                     <- NonDatedParquetDataset snapshots
@@ -260,9 +263,13 @@ Example setup with shared code:
         ...
 ```
 
-The `source_location` field in YAML can be:
-- **Relative to cache root:** `code/futures_source.py` (recommended)
-- **Absolute path:** `/path/to/code/futures_source.py`
+The `source_location` field in YAML supports three modes:
+- **Built-in source (blank/empty):** Uses a built-in `DataSource` from
+  `ionbus_parquet_cache` (e.g., `HiveParquetSource`, `DPDSource`)
+- **Installed package source:** `module://my_library.data_sources` (loads from
+  an installed Python package)
+- **Cache-local source (file path):** Relative to cache root
+  (e.g., `code/futures_source.py`, recommended) or absolute path
 
 See [YAML fields](#yaml-fields) for details.
 
@@ -473,7 +480,7 @@ by date (and optionally by additional columns).
 | `start_date_str` | `str \| None` | Earliest date to request from source (mostly for debugging) |
 | `end_date_str` | `str \| None` | Latest date to request from source (mostly for debugging) |
 | `repull_n_days` | `int` | How many trailing business days to re-fetch on each update (for corrections) |
-| `instrument_column` | `str \| None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Must also be a partition column. |
+| `instrument_column` | `str \| None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Can be used for filtering at read time and does not need to be a partition column. |
 | `instruments` | `list[str] \| None` | Instruments to include in updates. If `None`, fetches all instruments. |
 
 **DPD-specific methods** (in addition to base class methods):
@@ -894,9 +901,9 @@ class FuturesDataCleaner(DataCleaner):
 | `end_date_str` | `str` | `None` | **Debugging/testing only.** Optional override for latest date (ISO format). If set, the DPD guarantees that `get_data()` will never be called with an end date later than this value. Rarely used in production YAML files. |
 | `repull_n_days` | `int` | `0` | Number of trailing business days to re-fetch each update |
 | `row_group_size` | `int \| None` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values allow row-group-level predicate pushdown within a file at the cost of more metadata overhead. Only relevant when files are large enough to contain multiple row groups. |
-| `instrument_column` | `str` | `None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Must also be a partition column. |
+| `instrument_column` | `str` | `None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Can be used for filtering at read time and does not need to be a partition column. |
 | `instruments` | `list[str]` | `None` | Instruments to include in updates. If `None`, fetches all instruments. Can be expanded over time using backfill (see below). |
-| `source_location` | `str` | `""` | Path to the Python file containing the `DataSource` subclass. Can be relative to the cache root directory (e.g., `code/futures_source.py`) or an absolute path. If empty/blank, uses a built-in data source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)). |
+| `source_location` | `str` | `""` | Location of the `DataSource` subclass. Resolution order: (1) if empty/blank, uses a built-in source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)); (2) if starts with `module://`, loads from an installed Python package (e.g., `module://my_library.data_sources`) — must use the importable module path, not the distribution name (see [Installed Module Data Sources](#installed-module-data-sources)); (3) otherwise treated as a filesystem path relative to cache root or absolute. If the module cannot be imported, the class is missing, or the class does not inherit from `DataSource`, dataset creation/update fails with a configuration error. |
 | `source_class_name` | `str` | required | Name of the `DataSource` subclass. When `source_location` is empty, this must be a built-in class name (e.g., `HiveParquetSource`, `DPDSource`). |
 | `source_init_args` | `dict` | `{}` | Arguments passed to the `DataSource` constructor as `**kwargs` |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove after fetching data |
@@ -918,11 +925,13 @@ datasets:
   md.futures_daily:
     instrument_column: FutureRoot    # column containing instrument IDs
     instruments: [ES, NQ, YM, RTY]   # only fetch these instruments
-    partition_columns: [FutureRoot, year]  # instrument_column must be a partition column
+    partition_columns: [FutureRoot, year]
 ```
 
 - `instrument_column` identifies which column contains instrument identifiers.
-  This column **must** also be listed in `partition_columns`.
+  For read-time filtering, it can be any data column. For update-time filtering
+  via the `instruments` YAML field, the update path must support it (typically
+  requires a partition or bucket column for efficient updates).
 - `instruments` limits normal updates to the listed instruments. If omitted
   or `None`, all instruments are fetched.
 - The `--instruments` CLI flag overrides the YAML `instruments` list for
@@ -1241,10 +1250,13 @@ the date partition column. For example, with `date_partition: year` and
 a `FutureRoot` partition column: `{"FutureRoot": "ES", "year": "Y2024"}`.
 With `date_partition: month`: `{"FutureRoot": "ES", "month": "M2024-01"}`.
 
-When `instrument_column` is set in the YAML, the instrument value is included
-in `partition_values` (e.g., `{"FutureRoot": "ES", ...}`). The `--instruments`
-CLI flag requires `instrument_column` to be set and that column must be a
-partition column; otherwise `--instruments` raises an error.
+When `instrument_column` is set in the YAML and is also a partition column,
+the instrument value is included in `partition_values` (e.g.,
+`{"FutureRoot": "ES", ...}`). If `instrument_column` is not a partition column,
+it is not included in `partition_values`. The `--instruments` CLI flag requires
+`instrument_column` to be set. For non-bucketed datasets, the instrument column
+must also be a partition column to support efficient updates. For bucketed
+datasets, bucketed partial updates are not currently supported.
 
 **`temp_file_path` field:** This field is **not** set by the DataSource.
 After calling `get_partitions()`, the DPD assigns `temp_file_path` to each
@@ -1841,6 +1853,101 @@ datasets:
   - Creating filtered views of larger datasets
   - Applying different cleaning logic to existing data
   - Building aggregated datasets from detail data
+
+### Installed Module Data Sources
+
+Data sources can be packaged in external Python libraries and referenced
+via the `module://` prefix in `source_location`. This allows teams to
+distribute pre-built data source implementations as installable packages.
+
+**YAML configuration with installed module:**
+
+```yaml
+datasets:
+  md.external_data:
+    description: "Data from an installed library"
+    date_col: Date
+    date_partition: year
+    partition_columns: [Symbol, year]
+    source_location: module://my_library.data_sources
+    source_class_name: ExternalDataSource
+    source_init_args:
+      endpoint: "https://api.example.com"
+```
+
+**How it works:**
+
+1. The library author packages a `DataSource` subclass in their package
+   (e.g., `my_library.data_sources.ExternalDataSource`)
+2. Users install the package: `pip install my_library`
+3. In the YAML config, set `source_location: module://my_library.data_sources`
+   and `source_class_name: ExternalDataSource`
+4. At load time, the system uses `importlib.import_module()` to dynamically
+   import the module and retrieve the class
+
+**Credentials and secrets:**
+
+If a `DataSource` needs credentials (API keys, database passwords, etc.),
+fetch them from environment variables. This is more portable and doesn't
+expose secrets in YAML or metadata files. The `DataSource` should fail loudly
+(raise an error) if a required credential is missing.
+
+**Class requirements:**
+
+The loaded class must:
+- Be a top-level class in the module (not nested inside another class or function)
+- Inherit from `DataSource` (or `BucketedDataSource` for bucketed datasets)
+- Be instantiable with the arguments from `source_init_args` (passed as `**kwargs`)
+
+If any of these conditions fail, dataset creation or update will raise a
+configuration error with details about what is wrong (module not found, class
+missing, wrong base class, etc.).
+
+**Module path resolution:**
+
+- The `module://` prefix signals that the following string is a Python
+  module path (e.g., `my_library.data_sources`)
+- The module can be in the installed site-packages, a local editable
+  install, or any location on `sys.path`
+- Always use the importable module name, not the distribution name
+  (e.g., install `my-library` from PyPI but import `my_library.data_sources`)
+
+**Example library structure:**
+
+```
+my_library/
+  __init__.py
+  data_sources.py    # contains ExternalDataSource class
+  setup.py
+```
+
+```python
+# my_library/data_sources.py
+from ionbus_parquet_cache import DataSource
+
+class ExternalDataSource(DataSource):
+    def __init__(self, dataset, endpoint: str):
+        super().__init__(dataset)
+        self.endpoint = endpoint
+
+    def available_dates(self) -> tuple:
+        # ... implementation ...
+        pass
+
+    def get_partitions(self) -> list:
+        # ... implementation ...
+        pass
+
+    def get_data(self, partition_spec):
+        # ... implementation ...
+        pass
+```
+
+**Scope note:**
+
+The `module://` prefix currently applies only to `source_location` for
+`DataSource` classes. The mechanism could be extended to
+`cleaning_class_location` in the future if needed.
 
 ---
 
@@ -2993,8 +3100,9 @@ configuration that was in effect when it was created.
 
 **Note:** The metadata contains the configuration for reference, but may
 not be sufficient to re-run the update if the Python source files
-(`source_location`, `cleaning_class_location`) are not available. It
-serves as an audit trail showing exactly how the data was processed.
+(`source_location`, `cleaning_class_location`) or installed packages/modules
+are not available. It serves as an audit trail showing exactly how the data
+was processed.
 
 **Snapshot selection:**
 

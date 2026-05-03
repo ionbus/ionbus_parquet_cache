@@ -713,6 +713,38 @@ Parameters:
 - `dpd_cache_path`: Path to the source cache directory. Defaults to the target dataset's cache directory. Only required when the source DPD is in a different cache.
 - `dpd_cache_name`: Cache name as used in `CacheRegistry.instance(local=..., team=..., firm=...)`. Only works in programmatic use where the cache was already registered. Not available in CLI tools.
 
+### Packaging DataSources in installed modules
+
+You can package custom DataSources in Python libraries and reference them via the `module://` prefix. This is useful for sharing sources across multiple caches.
+
+```yaml
+# In your YAML config
+source_location: module://my_library.data_sources
+source_class_name: MyDataSource
+source_init_args:
+  endpoint: "https://api.example.com"
+```
+
+To do this:
+
+1. Create a Python package with your DataSource class:
+   ```
+   my_library/
+     __init__.py
+     data_sources.py    # Contains MyDataSource class
+   ```
+
+2. Install the package:
+   ```bash
+   pip install my_library
+   ```
+
+3. Use the `module://` prefix in your YAML config to reference the class by its importable path.
+
+The `source_location` must use the importable module path (e.g., `module://my_library.data_sources`), not the distribution name on PyPI (which might use hyphens, like `my-library`).
+
+If your DataSource needs credentials (API keys, database passwords), fetch them from environment variables. This is more portable than storing them in YAML.
+
 ## YAML Configuration
 
 Datasets are defined in YAML files under `cache/yaml/`. This separates configuration from code.
@@ -794,7 +826,7 @@ datasets:
 | `instruments` | `list[str]` | `None` | List of instruments to filter on (uses `instrument_column`) |
 | `start_date_str` | `str` | `None` | Override start date (debugging only, format: `"YYYY-MM-DD"`) |
 | `end_date_str` | `str` | `None` | Override end date (debugging only, format: `"YYYY-MM-DD"`) |
-| `source_location` | `str` | `""` | Path to Python file with DataSource class (empty for built-ins) |
+| `source_location` | `str` | `""` | Location of DataSource class: empty for built-in sources, `code/file.py` for cache-local file, `module://pkg.mod` for installed package |
 | `source_class_name` | `str` | required | Name of the DataSource class |
 | `source_init_args` | `dict` | `{}` | Arguments passed to DataSource constructor |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove from the data |

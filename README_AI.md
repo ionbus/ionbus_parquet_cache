@@ -256,6 +256,37 @@ df = dpd.read_data(...)  # downloads snapshot metadata and reads parquet files
 
 requires `pip install gcsfs`.
 
+### packaging datasources in installed packages
+
+to share a DataSource across multiple caches or teams, package it in a Python library and reference it via the `module://` prefix:
+
+```yaml
+source_location: module://my_library.data_sources
+source_class_name: MyDataSource
+source_init_args:
+  endpoint: https://api.example.com
+```
+
+requirements:
+- class must inherit from `DataSource` (or `BucketedDataSource`)
+- import path must match the installed package's importable module path (e.g., `module://pkg.subpkg.module`, not the distribution name `pkg-subpkg`)
+- class must be obtainable via `getattr(module, class_name)` (top-level or re-exported)
+
+if your DataSource needs credentials (API keys, passwords), fetch them from environment variables, not from `source_init_args`. this keeps secrets out of YAML and metadata files:
+
+```python
+import os
+from ionbus_parquet_cache import DataSource
+
+class MyDataSource(DataSource):
+    def __init__(self, dataset, endpoint: str):
+        super().__init__(dataset)
+        self.endpoint = endpoint
+        self.api_key = os.environ.get("MY_API_KEY")
+        if not self.api_key:
+            raise ValueError("MY_API_KEY not set")
+```
+
 ---
 
 ## configuration reference
@@ -266,7 +297,10 @@ requires `pip install gcsfs`.
 datasets:
   my_dataset:
     # required
-    source_class: path.to.MyDataSource  # must inherit from DataSource
+    source_location: ""  # blank=built-in, "code/file.py"=local file, "module://pkg.mod"=installed package
+    source_class_name: MyDataSource  # must inherit from DataSource
+    source_init_args:  # kwargs passed to __init__
+      api_endpoint: https://api.example.com
 
     # date partitioning (for DPD)
     date_col: date_column_name

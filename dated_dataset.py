@@ -709,7 +709,7 @@ class DatedParquetDataset(ParquetDataset):
                 yaml_config is missing source configuration.
         """
         from ionbus_parquet_cache.exceptions import ConfigurationError
-        from ionbus_parquet_cache.yaml_config import _load_builtin_source
+        from ionbus_parquet_cache.yaml_config import _resolve_source_class
 
         if self._metadata is None:
             self._metadata = self._load_metadata()
@@ -724,21 +724,13 @@ class DatedParquetDataset(ParquetDataset):
                 f"Dataset '{self.name}' metadata has no source_class_name"
             )
 
-        # Load source class
-        if not source_location:
-            # Built-in source
-            source_class = _load_builtin_source(source_class_name)
-        else:
-            # Custom source - need to load from file
-            from ionbus_parquet_cache.yaml_config import _load_class_from_file
-
-            source_path = self.cache_dir / source_location
-            source_class = _load_class_from_file(
-                source_path,
-                source_class_name,
-                DataSource,
-                f"Dataset '{self.name}'",
-            )
+        # Load source class using unified resolution
+        source_class = _resolve_source_class(
+            source_location,
+            source_class_name,
+            self.cache_dir,
+            f"Dataset '{self.name}'",
+        )
 
         return source_class(self, **source_init_args)
 
