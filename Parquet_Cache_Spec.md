@@ -4065,10 +4065,10 @@ instruments: str | list[str] | set[str] | None = None
 
 When `instruments` is provided:
 
-1. If `instrument_column` and `num_instrument_buckets` are not set → `ValueError`
-2. Compute bucket strings for the requested instruments
-3. Build two filters:
-   - `(INSTRUMENT_BUCKET_COL, "in", sorted_bucket_strs)` — partition pruning
-   - `(instrument_column, "in", sorted_instruments)` — row-level filter
+1. If `instrument_column` is not set → `ValueError`
+2. Build a row-level filter:
+   - `(instrument_column, "in", sorted_instruments)`
+3. If `num_instrument_buckets` is set, also compute bucket strings and add:
+   - `(INSTRUMENT_BUCKET_COL, "in", sorted_bucket_strs)`
 4. Merge with any user-supplied `filters`
 5. Delegate to `super().read_data()` (or `read_data_pl()`) with combined filters
