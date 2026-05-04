@@ -51,6 +51,8 @@ from ionbus_parquet_cache.update_pipeline import (
     execute_update,
 )
 
+SNAPSHOT_METADATA_PICKLE_PROTOCOL = 4
+
 
 @dataclass
 class FileMetadata:
@@ -108,7 +110,11 @@ class SnapshotMetadata:
 
     def to_pickle(self, path: Path) -> None:
         """Save to pickle file."""
-        pd.to_pickle(self, path)  # type: ignore
+        pd.to_pickle(
+            self,
+            path,
+            protocol=SNAPSHOT_METADATA_PICKLE_PROTOCOL,
+        )  # type: ignore
 
     @classmethod
     def from_pickle(cls, path: Path) -> "SnapshotMetadata":

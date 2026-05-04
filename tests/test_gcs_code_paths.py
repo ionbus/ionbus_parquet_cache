@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import gzip
 import io
 import pickle
-from pathlib import Path
 from unittest import mock
 
-import pandas as pd
 import pyarrow as pa
 import pytest
 
 from ionbus_parquet_cache.cache_registry import CacheRegistry
-from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
+from ionbus_parquet_cache.dated_dataset import (
+    SNAPSHOT_METADATA_PICKLE_PROTOCOL,
+    SnapshotMetadata,
+)
 from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
 
 
@@ -199,7 +199,10 @@ class TestCacheRegistryGCSMetadataLoading:
         )
 
         # Pickle and gzip the metadata as it would be stored
-        pickled = pickle.dumps(mock_metadata)
+        pickled = pickle.dumps(
+            mock_metadata,
+            protocol=SNAPSHOT_METADATA_PICKLE_PROTOCOL,
+        )
         gzip_buffer = io.BytesIO()
         with gzip.GzipFile(fileobj=gzip_buffer, mode="wb") as gz:
             gz.write(pickled)
@@ -255,7 +258,10 @@ class TestCacheRegistryGCSMetadataLoading:
             },
         )
 
-        pickled = pickle.dumps(mock_metadata)
+        pickled = pickle.dumps(
+            mock_metadata,
+            protocol=SNAPSHOT_METADATA_PICKLE_PROTOCOL,
+        )
         gzip_buffer = io.BytesIO()
         with gzip.GzipFile(fileobj=gzip_buffer, mode="wb") as gz:
             gz.write(pickled)
@@ -359,7 +365,10 @@ class TestCacheRegistryGCSMetadataLoading:
             },
         )
 
-        pickled = pickle.dumps(mock_metadata)
+        pickled = pickle.dumps(
+            mock_metadata,
+            protocol=SNAPSHOT_METADATA_PICKLE_PROTOCOL,
+        )
         gzip_buffer = io.BytesIO()
         with gzip.GzipFile(fileobj=gzip_buffer, mode="wb") as gz:
             gz.write(pickled)
