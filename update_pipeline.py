@@ -22,8 +22,8 @@ import duckdb
 import pandas as pd
 import polars as pl
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
-
 from ionbus_utils.logging_utils import logger
 
 from ionbus_parquet_cache.exceptions import (
@@ -176,16 +176,12 @@ def build_update_plan(
     for spec in specs:
         key = spec.partition_key
         if key not in groups:
-            groups[key] = WriteGroup(
-                partition_values=dict(spec.partition_values)
-            )
+            groups[key] = WriteGroup(partition_values=dict(spec.partition_values))
         groups[key].specs.append(spec)
 
     # Assign temp file paths and final paths
     # Get the date partition column name for navigation directory logic
-    date_part_col = date_partition_column_name(
-        dataset.date_partition, dataset.date_col
-    )
+    date_part_col = date_partition_column_name(dataset.date_partition, dataset.date_col)
 
     for key, group in groups.items():
         # Build partition path components with navigation directories
@@ -317,9 +313,7 @@ def validate_schema(
             existing_field = existing_schema.field(schema_field.name)
             if not schema_field.type.equals(existing_field.type):
                 # Check if it's a compatible promotion
-                if not _types_compatible(
-                    existing_field.type, schema_field.type
-                ):
+                if not _types_compatible(existing_field.type, schema_field.type):
                     raise SchemaMismatchError(
                         f"Column '{schema_field.name}' type changed from "
                         f"{existing_field.type} to {schema_field.type}",
@@ -363,6 +357,124 @@ def _types_compatible(old_type: pa.DataType, new_type: pa.DataType) -> bool:
     return False
 
 
+def _sort_table(table: pa.Table, sort_cols: list[str]) -> pa.Table:
+    """Sort an Arrow table by the subset of sort columns it contains."""
+    existing_sort_cols = [c for c in sort_cols if c in table.column_names]
+    if not existing_sort_cols or len(table) == 0:
+        return table
+    sort_keys = [(col, "ascending") for col in existing_sort_cols]
+    return table.sort_by(sort_keys)
+
+
+def _temporal_value_to_date(value: Any) -> dt.date | None:
+    """Normalize an Arrow temporal scalar value to a plain date."""
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if hasattr(value, "date"):
+        return value.date()
+    raise ValidationError(f"Expected date-like value, got {type(value).__name__}")
+
+
+def _arrow_date_range(
+    table: pa.Table,
+    date_col: str,
+) -> tuple[dt.date | None, dt.date | None]:
+    """Return the non-null date range for a table date column."""
+    if date_col not in table.column_names or len(table) == 0:
+        return (None, None)
+
+    dates = table.column(date_col)
+    if pc.count(dates).as_py() == 0:
+        return (None, None)
+
+    return (
+        _temporal_value_to_date(pc.min(dates).as_py()),
+        _temporal_value_to_date(pc.max(dates).as_py()),
+    )
+
+
+def _arrow_temporal_scalar(
+    value: dt.date,
+    arrow_type: pa.DataType,
+) -> pa.Scalar:
+    """Build a date/timestamp scalar matching an Arrow date column type."""
+    if pa.types.is_date32(arrow_type) or pa.types.is_date64(arrow_type):
+        return pa.scalar(value, type=arrow_type)
+
+    if pa.types.is_timestamp(arrow_type):
+        timestamp_value = dt.datetime.combine(value, dt.time.min)
+        timezone_name = getattr(arrow_type, "tz", None)
+        if timezone_name is not None:
+            timestamp_value = timestamp_value.replace(
+                tzinfo=_timezone_for_arrow(timezone_name)
+            )
+        return pa.scalar(timestamp_value, type=arrow_type)
+
+    raise ValidationError(
+        f"Date column must be an Arrow date or timestamp type, got " f"{arrow_type}"
+    )
+
+
+def _timezone_for_arrow(timezone_name: str) -> dt.tzinfo:
+    """Return tzinfo for an Arrow timestamp timezone name."""
+    if timezone_name.upper() == "UTC":
+        return dt.timezone.utc
+
+    from zoneinfo import ZoneInfo
+
+    return ZoneInfo(timezone_name)
+
+
+def _filter_new_dates(
+    new_data: pa.Table,
+    existing_data: pa.Table,
+    date_col: str,
+) -> pa.Table:
+    """Keep rows from new_data whose date is not already in existing_data."""
+    if (
+        date_col not in new_data.column_names
+        or date_col not in existing_data.column_names
+    ):
+        return new_data
+
+    existing_dates = existing_data.column(date_col).combine_chunks()
+    is_existing_date = pc.is_in(
+        new_data.column(date_col),
+        value_set=existing_dates,
+    )
+    return new_data.filter(pc.invert(is_existing_date))
+
+
+def _filter_out_date_window(
+    existing_data: pa.Table,
+    date_col: str,
+    min_date: dt.date | None,
+    max_date: dt.date | None,
+) -> pa.Table:
+    """Keep existing rows outside the half-open date update window."""
+    if (
+        date_col not in existing_data.column_names
+        or min_date is None
+        or max_date is None
+    ):
+        return existing_data
+
+    date_type = existing_data.schema.field(date_col).type
+    dates = existing_data.column(date_col)
+    start = _arrow_temporal_scalar(min_date, date_type)
+    after_end = _arrow_temporal_scalar(
+        max_date + dt.timedelta(days=1),
+        date_type,
+    )
+    before_window = pc.less(dates, start)
+    after_window = pc.greater_equal(dates, after_end)
+    return existing_data.filter(pc.or_(before_window, after_window))
+
+
 def _apply_yaml_transforms(
     rel: "duckdb.DuckDBPyRelation",
     transforms: dict[str, Any] | None,
@@ -390,15 +502,11 @@ def _apply_yaml_transforms(
     columns_to_rename = transforms.get("columns_to_rename", {})
     if columns_to_rename:
         current_cols = rel.columns
-        other_cols = [
-            f'"{c}"' for c in current_cols if c not in columns_to_rename
-        ]
+        other_cols = [f'"{c}"' for c in current_cols if c not in columns_to_rename]
         renames = ", ".join(
             f'"{old}" AS "{new}"' for old, new in columns_to_rename.items()
         )
-        select_clause = (
-            ", ".join(other_cols + [renames]) if other_cols else renames
-        )
+        select_clause = ", ".join(other_cols + [renames]) if other_cols else renames
         rel = duckdb.sql(f"SELECT {select_clause} FROM rel")
 
     # 2. Drop columns
@@ -425,9 +533,7 @@ def _apply_yaml_transforms(
         key_cols = ", ".join(f'"{c}"' for c in dedup_columns)
 
         # Add row number to track input order
-        rel = duckdb.sql(
-            "SELECT *, ROW_NUMBER() OVER () AS _input_order FROM rel"
-        )
+        rel = duckdb.sql("SELECT *, ROW_NUMBER() OVER () AS _input_order FROM rel")
 
         if dedup_keep == "first":
             rel = duckdb.sql(
@@ -547,15 +653,14 @@ def execute_update(
 
             # Track date range
             if dataset.date_col in table.column_names:
-                dates = table.column(dataset.date_col).to_pandas()
-                if len(dates) > 0:
-                    chunk_min = dates.min()
-                    chunk_max = dates.max()
-                    if hasattr(chunk_min, "date"):
-                        chunk_min = chunk_min.date()
-                        chunk_max = chunk_max.date()
+                chunk_min, chunk_max = _arrow_date_range(
+                    table,
+                    dataset.date_col,
+                )
+                if chunk_min is not None:
                     if min_date is None or chunk_min < min_date:
                         min_date = chunk_min
+                if chunk_max is not None:
                     if max_date is None or chunk_max > max_date:
                         max_date = chunk_max
 
@@ -573,13 +678,7 @@ def execute_update(
             # Sort chunk by sort_columns before writing (enables efficient
             # merge)
             if dataset.sort_columns:
-                sort_cols = [
-                    c for c in dataset.sort_columns if c in table.column_names
-                ]
-                if sort_cols:
-                    df = table.to_pandas()
-                    df = df.sort_values(sort_cols)
-                    table = pa.Table.from_pandas(df, preserve_index=False)
+                table = _sort_table(table, dataset.sort_columns)
 
             # Write temp file
             assert spec.temp_file_path is not None
@@ -592,9 +691,7 @@ def execute_update(
             )
 
         if dry_run:
-            logger.debug(
-                f"Dry run complete for {dataset.name}, suffix={plan.suffix}"
-            )
+            logger.debug(f"Dry run complete for {dataset.name}, suffix={plan.suffix}")
             return plan.suffix
 
         logger.debug(f"Consolidating {len(plan.groups)} partition groups")
@@ -632,59 +729,37 @@ def execute_update(
 
             if existing_path and existing_path.exists():
                 existing_data = pq.read_table(existing_path)
+                existing_cols_to_drop = sorted(
+                    set(group.partition_values) & set(existing_data.column_names)
+                )
+                if existing_cols_to_drop:
+                    existing_data = existing_data.drop(existing_cols_to_drop)
 
                 if backfill:
                     # Backfill: keep ALL existing rows, add only new dates
-                    if dataset.date_col in new_data.column_names:
-                        existing_dates = set(
-                            existing_data.column(dataset.date_col).to_pylist()
-                        )
-                        # Filter new_data to only dates not in existing
-                        new_df = new_data.to_pandas()
-                        new_df = new_df[
-                            ~new_df[dataset.date_col].isin(existing_dates)
-                        ]
-                        new_data = pa.Table.from_pandas(
-                            new_df, preserve_index=False
-                        )
+                    new_data = _filter_new_dates(
+                        new_data,
+                        existing_data,
+                        dataset.date_col,
+                    )
 
                     combined = pa.concat_tables([existing_data, new_data])
                 else:
                     # Normal/Restate: remove rows in update window from existing
-                    if (
-                        dataset.date_col in existing_data.column_names
-                        and min_date
-                    ):
-                        assert max_date is not None
-                        existing_df = existing_data.to_pandas()
-                        # Keep rows outside the update window
-                        mask = (
-                            existing_df[dataset.date_col]
-                            < pd.Timestamp(min_date)
-                        ) | (
-                            existing_df[dataset.date_col]
-                            > pd.Timestamp(max_date)
-                        )
-                        existing_df = existing_df[mask]
-                        existing_data = pa.Table.from_pandas(
-                            existing_df, preserve_index=False
-                        )
+                    existing_data = _filter_out_date_window(
+                        existing_data,
+                        dataset.date_col,
+                        min_date,
+                        max_date,
+                    )
 
                     combined = pa.concat_tables([existing_data, new_data])
             else:
                 combined = new_data
 
             # Sort by sort_columns
-            if dataset.sort_columns and len(combined) > 0:
-                sort_cols = [
-                    c
-                    for c in dataset.sort_columns
-                    if c in combined.column_names
-                ]
-                if sort_cols:
-                    df = combined.to_pandas()
-                    df = df.sort_values(sort_cols)
-                    combined = pa.Table.from_pandas(df, preserve_index=False)
+            if dataset.sort_columns:
+                combined = _sort_table(combined, dataset.sort_columns)
 
             # Strip partition columns before final write (they are virtual)
             cols_to_strip = set(group.partition_values.keys())
@@ -728,22 +803,15 @@ def execute_update(
 
             # Extend date range to include previous snapshot dates
             if dataset._metadata.cache_start_date:
-                if (
-                    min_date is None
-                    or dataset._metadata.cache_start_date < min_date
-                ):
+                if min_date is None or dataset._metadata.cache_start_date < min_date:
                     min_date = dataset._metadata.cache_start_date
             if dataset._metadata.cache_end_date:
-                if (
-                    max_date is None
-                    or dataset._metadata.cache_end_date > max_date
-                ):
+                if max_date is None or dataset._metadata.cache_end_date > max_date:
                     max_date = dataset._metadata.cache_end_date
 
         # Build partition values dict for metadata
         pv_dict = {
-            col: sorted(list(vals))
-            for col, vals in partition_values_seen.items()
+            col: sorted(list(vals)) for col, vals in partition_values_seen.items()
         }
 
         logger.debug(
