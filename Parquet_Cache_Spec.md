@@ -3672,6 +3672,121 @@ If you do not specify `--datasets`, the old dataset name is automatically
 used as the filter. Only one rename mapping can be specified per command.
 The source dataset name must match the dataset being synced.
 
+**Sync functions (optional supplemental operations):**
+
+Sync functions allow you to perform additional operations during cache sync
+(e.g., syncing provenance metadata, updating external catalogs, or replicating
+supplemental data). A sync function receives the snapshot ID, source location,
+and destination location, and can perform any operations needed to keep
+auxiliary data in sync with the snapshot.
+
+**Function signature:**
+
+A sync function must accept three parameters and may throw exceptions:
+
+```python
+def my_sync_function(
+    snapshot_id: str,        # Current snapshot ID being synced
+    source_location: str,    # Source cache path (e.g., /local/cache or gs://bucket/cache)
+    dest_location: str       # Destination cache path
+) -> None:
+    """Sync supplemental data for the snapshot."""
+    # Update provenance, replicate metadata, etc.
+    # If an error occurs, raise an exception to fail the sync operation
+```
+
+If the sync function raises an exception, the entire sync operation fails.
+
+**Configuration in YAML:**
+
+Add optional sync function settings to a dataset:
+
+```yaml
+datasets:
+  md.futures_daily:
+    source_location: module://my_library.sources
+    source_class_name: FuturesDataSource
+    sync_function_location: ""                          # or code/sync_functions.py or module://pkg.sync
+    sync_function_name: sync_provenance                 # function name or class name
+    sync_function_init_args:                            # optional kwargs passed to __init__ if class-based
+      catalog_endpoint: "https://catalog.example.com"
+```
+
+**Sourcing sync functions:**
+
+Sync functions can come from three locations (same as DataSource):
+
+1. **Built-in** (empty `sync_function_location`) — use a built-in function if available
+2. **Cache-local** (`code/sync_functions.py`) — Python file in the cache's `code/` directory
+3. **Installed package** (`module://my_library.sync`) — function/class from an installed Python package
+
+**Examples:**
+
+Local sync function (in `code/sync_functions.py`):
+
+```python
+def sync_provenance(snapshot_id: str, source_location: str, dest_location: str) -> None:
+    """Copy provenance metadata from source to destination."""
+    import json
+    from pathlib import Path
+
+    source_prov = Path(source_location) / "provenance" / f"{snapshot_id}.json"
+    dest_prov = Path(dest_location) / "provenance"
+
+    if source_prov.exists():
+        dest_prov.mkdir(parents=True, exist_ok=True)
+        with open(source_prov) as f:
+            data = json.load(f)
+        # Update location references if destination is remote (GCS)
+        if dest_location.startswith("gs://"):
+            data["location"] = dest_location
+        with open(dest_prov / f"{snapshot_id}.json", "w") as f:
+            json.dump(data, f)
+```
+
+Installed package sync function:
+
+```yaml
+datasets:
+  md.futures_daily:
+    source_class_name: FuturesDataSource
+    sync_function_location: module://my_library.sync_utils
+    sync_function_name: SyncProvenance
+    sync_function_init_args:
+      catalog_url: "https://internal.catalog.io"
+```
+
+In `my_library/sync_utils.py`:
+
+```python
+class SyncProvenance:
+    """Syncs provenance data to an external catalog."""
+
+    def __init__(self, dataset, catalog_url: str):
+        self.dataset = dataset
+        self.catalog_url = catalog_url
+
+    def __call__(self, snapshot_id: str, source_location: str, dest_location: str) -> None:
+        # Fetch provenance from source, update location, POST to catalog
+        import requests
+        prov = self._fetch_provenance(source_location, snapshot_id)
+        prov["dest_location"] = dest_location
+        resp = requests.post(f"{self.catalog_url}/snapshots", json=prov)
+        resp.raise_for_status()  # Raise on HTTP error
+
+    def _fetch_provenance(self, location: str, snapshot_id: str) -> dict:
+        # Implementation
+        pass
+```
+
+**When sync function errors occur:**
+
+If a sync function raises an exception during `sync-cache push` or `sync-cache pull`,
+the entire sync operation fails immediately. The partial sync state is left as-is
+(files copied so far remain at the destination). This is a safety measure: if
+auxiliary metadata cannot be synced correctly, the snapshot should not be
+considered complete at the destination.
+
 **S3 paths (future release):**
 
 S3 support will be implemented in a future release. When available, S3

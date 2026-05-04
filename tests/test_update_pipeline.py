@@ -5,30 +5,30 @@ from __future__ import annotations
 import datetime as dt
 import time
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
+import polars as pl
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from ionbus_parquet_cache.data_source import DataSource
 from ionbus_parquet_cache.data_cleaner import DataCleaner
+from ionbus_parquet_cache.data_source import DataSource
 from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
 from ionbus_parquet_cache.exceptions import (
-    DataSourceError,
     SchemaMismatchError,
     ValidationError,
 )
 from ionbus_parquet_cache.partition import PartitionSpec
-import pyarrow.parquet as pq
 from ionbus_parquet_cache.update_pipeline import (
+    UpdatePlan,
+    WriteGroup,
+    _arrow_date_range,
     build_update_plan,
     compute_update_window,
     convert_to_arrow,
     execute_update,
     validate_schema,
-    WriteGroup,
-    UpdatePlan,
 )
 
 
@@ -41,11 +41,13 @@ class MockDataSource(DataSource):
     def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
         """Return test data for the partition."""
         dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
-        return pd.DataFrame({
-            "Date": dates,
-            "value": range(len(dates)),
-            "price": [100.0 + i * 0.1 for i in range(len(dates))],
-        })
+        return pd.DataFrame(
+            {
+                "Date": dates,
+                "value": range(len(dates)),
+                "price": [100.0 + i * 0.1 for i in range(len(dates))],
+            }
+        )
 
 
 class InstrumentMockSource(DataSource):
@@ -60,11 +62,35 @@ class InstrumentMockSource(DataSource):
         """Return test data for the partition."""
         dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
         instrument = partition_spec.partition_values.get("FutureRoot", "UNKNOWN")
-        return pd.DataFrame({
-            "Date": dates,
-            "FutureRoot": instrument,
-            "price": [100.0 + i * 0.1 for i in range(len(dates))],
-        })
+        return pd.DataFrame(
+            {
+                "Date": dates,
+                "FutureRoot": instrument,
+                "price": [100.0 + i * 0.1 for i in range(len(dates))],
+            }
+        )
+
+
+def _current_snapshot_parquet_files(
+    dpd: DatedParquetDataset,
+) -> list[Path]:
+    """Return parquet files listed by the current DPD snapshot metadata."""
+    metadata = dpd._load_metadata()
+    return [dpd.dataset_dir / file_meta.path for file_meta in metadata.files]
+
+
+def _assert_current_snapshot_column_type(
+    dpd: DatedParquetDataset,
+    column: str,
+    expected_type: pa.DataType,
+) -> None:
+    """Assert metadata and physical parquet schemas agree for a column."""
+    metadata = dpd._load_metadata()
+    assert metadata.schema.field(column).type == expected_type
+
+    for parquet_file in _current_snapshot_parquet_files(dpd):
+        parquet_schema = pq.read_schema(parquet_file)
+        assert parquet_schema.field(column).type == expected_type
 
 
 @pytest.fixture
@@ -113,9 +139,7 @@ class TestComputeUpdateWindow:
         assert start == dt.date(2024, 1, 1)
         assert end == dt.date(2024, 12, 31)
 
-    def test_explicit_dates_override(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_explicit_dates_override(self, simple_dpd: DatedParquetDataset) -> None:
         """Explicit dates should override automatic computation."""
         source = MockDataSource(simple_dpd)
 
@@ -204,7 +228,7 @@ class TestBuildUpdatePlan:
             )
         ]
 
-        plan = build_update_plan(simple_dpd, specs, tmp_path)
+        build_update_plan(simple_dpd, specs, tmp_path)
 
         assert specs[0].temp_file_path is not None
         assert specs[0].temp_file_path.endswith(".parquet")
@@ -312,6 +336,51 @@ class TestConvertToArrow:
         assert list(table.column("a").to_pylist()) == [3, 4, 5]
 
 
+class TestArrowDateRange:
+    """Tests for Arrow-native date range tracking helpers."""
+
+    def test_ignores_nulls_and_normalizes_to_dates(self) -> None:
+        """Date range tracking should ignore nulls and return plain dates."""
+        table = pa.table(
+            {
+                "Date": pa.array(
+                    [None, dt.date(2024, 1, 3), dt.date(2024, 1, 1)],
+                    type=pa.date32(),
+                )
+            }
+        )
+
+        assert _arrow_date_range(table, "Date") == (
+            dt.date(2024, 1, 1),
+            dt.date(2024, 1, 3),
+        )
+
+    def test_all_null_dates_return_none_range(self) -> None:
+        """All-null date columns should not update snapshot date bounds."""
+        table = pa.table({"Date": pa.array([None, None], type=pa.date32())})
+
+        assert _arrow_date_range(table, "Date") == (None, None)
+
+    def test_timestamps_normalize_to_dates(self) -> None:
+        """Timestamp min/max values should be tracked as dates."""
+        table = pa.table(
+            {
+                "Date": pa.array(
+                    [
+                        dt.datetime(2024, 1, 5, 15, 30),
+                        dt.datetime(2024, 1, 2, 9, 45),
+                    ],
+                    type=pa.timestamp("ns"),
+                )
+            }
+        )
+
+        assert _arrow_date_range(table, "Date") == (
+            dt.date(2024, 1, 2),
+            dt.date(2024, 1, 5),
+        )
+
+
 class TestValidateSchema:
     """Tests for validate_schema()."""
 
@@ -360,11 +429,13 @@ class TestValidateSchema:
 
     def test_schema_merge_preserves_old_columns(self) -> None:
         """Schema merge should preserve columns from existing schema."""
-        existing = pa.schema([
-            ("a", pa.int64()),
-            ("b", pa.string()),
-            ("c", pa.float64()),
-        ])
+        existing = pa.schema(
+            [
+                ("a", pa.int64()),
+                ("b", pa.string()),
+                ("c", pa.float64()),
+            ]
+        )
         # New schema omits column 'c'
         new_schema = pa.schema([("a", pa.int64()), ("b", pa.string())])
 
@@ -378,14 +449,18 @@ class TestValidateSchema:
 
     def test_schema_merge_order_new_first(self) -> None:
         """Merged schema should have new columns first, then old-only columns."""
-        existing = pa.schema([
-            ("a", pa.int64()),
-            ("old_only", pa.string()),
-        ])
-        new_schema = pa.schema([
-            ("a", pa.int64()),
-            ("new_only", pa.float64()),
-        ])
+        existing = pa.schema(
+            [
+                ("a", pa.int64()),
+                ("old_only", pa.string()),
+            ]
+        )
+        new_schema = pa.schema(
+            [
+                ("a", pa.int64()),
+                ("new_only", pa.float64()),
+            ]
+        )
 
         result = validate_schema(new_schema, existing, "test")
 
@@ -394,14 +469,18 @@ class TestValidateSchema:
 
     def test_schema_merge_with_type_promotion(self) -> None:
         """Schema merge should use promoted type for overlapping columns."""
-        existing = pa.schema([
-            ("a", pa.int32()),
-            ("old_col", pa.string()),
-        ])
-        new_schema = pa.schema([
-            ("a", pa.int64()),  # Promoted type
-            ("new_col", pa.float64()),
-        ])
+        existing = pa.schema(
+            [
+                ("a", pa.int32()),
+                ("old_col", pa.string()),
+            ]
+        )
+        new_schema = pa.schema(
+            [
+                ("a", pa.int64()),  # Promoted type
+                ("new_col", pa.float64()),
+            ]
+        )
 
         result = validate_schema(new_schema, existing, "test")
 
@@ -450,7 +529,7 @@ class TestExecuteUpdate:
         temp_dir.mkdir()
 
         plan = build_update_plan(simple_dpd, specs, temp_dir)
-        suffix = execute_update(simple_dpd, source, plan)
+        execute_update(simple_dpd, source, plan)
 
         # Check parquet files exist
         parquet_files = list(simple_dpd.dataset_dir.rglob("*.parquet"))
@@ -479,9 +558,7 @@ class TestExecuteUpdate:
 class TestDPDUpdate:
     """Integration tests for DatedParquetDataset.update()."""
 
-    def test_update_creates_snapshot(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_update_creates_snapshot(self, simple_dpd: DatedParquetDataset) -> None:
         """Update should create a new snapshot."""
         source = MockDataSource(simple_dpd)
 
@@ -516,12 +593,11 @@ class TestDPDUpdate:
         assert suffix is not None
 
         # No metadata should exist
-        assert not simple_dpd.meta_dir.exists() or \
-               not list(simple_dpd.meta_dir.glob("*.pkl.gz"))
+        assert not simple_dpd.meta_dir.exists() or not list(
+            simple_dpd.meta_dir.glob("*.pkl.gz")
+        )
 
-    def test_update_with_cleaner(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_update_with_cleaner(self, simple_dpd: DatedParquetDataset) -> None:
         """Update should apply cleaner to data."""
 
         class FilterCleaner(DataCleaner):
@@ -550,9 +626,7 @@ class TestDPDUpdate:
         )
         assert (df["value"] >= 10).all()
 
-    def test_update_with_instruments(
-        self, instrument_dpd: DatedParquetDataset
-    ) -> None:
+    def test_update_with_instruments(self, instrument_dpd: DatedParquetDataset) -> None:
         """Update with instruments filter should limit partitions."""
         source = InstrumentMockSource(instrument_dpd)
 
@@ -573,9 +647,7 @@ class TestDPDUpdate:
         )
         assert set(df["FutureRoot"].unique()) == {"ES"}
 
-    def test_update_no_data_returns_none(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_update_no_data_returns_none(self, simple_dpd: DatedParquetDataset) -> None:
         """Update with impossible date range returns None."""
         source = MockDataSource(simple_dpd)
 
@@ -646,9 +718,7 @@ class TestBackfillRestateValidation:
                 backfill=True,
             )
 
-    def test_restate_requires_both_dates(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_restate_requires_both_dates(self, simple_dpd: DatedParquetDataset) -> None:
         """Should raise when restate=True without both dates."""
         source = MockDataSource(simple_dpd)
 
@@ -659,9 +729,7 @@ class TestBackfillRestateValidation:
                 restate=True,
             )
 
-    def test_backfill_auto_sets_end_date(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_backfill_auto_sets_end_date(self, simple_dpd: DatedParquetDataset) -> None:
         """Backfill should auto-set end_date to cache_start - 1."""
         source = MockDataSource(simple_dpd)
 
@@ -701,9 +769,7 @@ class TestBackfillRestateValidation:
 class TestYamlTransformsInPipeline:
     """Tests for YAML transforms in update pipeline."""
 
-    def test_transforms_rename_columns(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_transforms_rename_columns(self, simple_dpd: DatedParquetDataset) -> None:
         """Should rename columns via transforms dict."""
         source = MockDataSource(simple_dpd)
 
@@ -729,9 +795,7 @@ class TestYamlTransformsInPipeline:
         assert "renamed_value" in df.columns
         assert "value" not in df.columns
 
-    def test_transforms_drop_columns(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_transforms_drop_columns(self, simple_dpd: DatedParquetDataset) -> None:
         """Should drop columns via transforms dict."""
         source = MockDataSource(simple_dpd)
 
@@ -819,9 +883,7 @@ class TestIncrementalUpdateWithExistingCache:
         assert start == dt.date(2024, 2, 1)  # Day after cache end
         assert end == dt.date(2024, 12, 31)  # Source end
 
-    def test_repull_n_days_uses_business_days(
-        self, temp_cache: Path
-    ) -> None:
+    def test_repull_n_days_uses_business_days(self, temp_cache: Path) -> None:
         """repull_n_days should go back N business days, not calendar days."""
         # Create DPD with repull_n_days
         dpd = DatedParquetDataset(
@@ -882,17 +944,15 @@ class TestSuffixConsistency:
         data_files = list(simple_dpd.dataset_dir.rglob("*.parquet"))
         assert len(data_files) > 0
         for data_file in data_files:
-            assert suffix in data_file.name, (
-                f"Data file {data_file.name} does not contain suffix {suffix}"
-            )
+            assert (
+                suffix in data_file.name
+            ), f"Data file {data_file.name} does not contain suffix {suffix}"
 
 
 class TestDedupTransforms:
     """Tests for dedup transforms in update pipeline."""
 
-    def test_dedup_keeps_first(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_dedup_keeps_first(self, simple_dpd: DatedParquetDataset) -> None:
         """Dedup with keep='first' should keep first occurrence."""
 
         class DuplicateSource(DataSource):
@@ -903,14 +963,16 @@ class TestDedupTransforms:
 
             def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
                 # Return data with duplicates - same Date, different values
-                return pd.DataFrame({
-                    "Date": [
-                        dt.date(2024, 1, 1),
-                        dt.date(2024, 1, 1),  # duplicate
-                        dt.date(2024, 1, 2),
-                    ],
-                    "value": [100, 200, 300],  # 200 is the duplicate
-                })
+                return pd.DataFrame(
+                    {
+                        "Date": [
+                            dt.date(2024, 1, 1),
+                            dt.date(2024, 1, 1),  # duplicate
+                            dt.date(2024, 1, 2),
+                        ],
+                        "value": [100, 200, 300],  # 200 is the duplicate
+                    }
+                )
 
         source = DuplicateSource(simple_dpd)
 
@@ -943,9 +1005,7 @@ class TestDedupTransforms:
         assert len(jan1_row) == 1
         assert jan1_row["value"].iloc[0] == 100
 
-    def test_dedup_keeps_last(
-        self, simple_dpd: DatedParquetDataset
-    ) -> None:
+    def test_dedup_keeps_last(self, simple_dpd: DatedParquetDataset) -> None:
         """Dedup with keep='last' should keep last occurrence."""
 
         class DuplicateSource(DataSource):
@@ -955,14 +1015,16 @@ class TestDedupTransforms:
                 return (dt.date(2024, 1, 1), dt.date(2024, 1, 31))
 
             def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
-                return pd.DataFrame({
-                    "Date": [
-                        dt.date(2024, 1, 1),
-                        dt.date(2024, 1, 1),  # duplicate
-                        dt.date(2024, 1, 2),
-                    ],
-                    "value": [100, 200, 300],
-                })
+                return pd.DataFrame(
+                    {
+                        "Date": [
+                            dt.date(2024, 1, 1),
+                            dt.date(2024, 1, 1),  # duplicate
+                            dt.date(2024, 1, 2),
+                        ],
+                        "value": [100, 200, 300],
+                    }
+                )
 
         source = DuplicateSource(simple_dpd)
 
@@ -1170,9 +1232,7 @@ class TestDateStrClamping:
 class TestPartitionColumnStripping:
     """Tests for partition column stripping before writing parquet files."""
 
-    def test_partition_columns_not_in_final_file(
-        self, temp_cache: Path
-    ) -> None:
+    def test_partition_columns_not_in_final_file(self, temp_cache: Path) -> None:
         """Partition columns should be stripped from the final parquet file."""
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -1192,15 +1252,19 @@ class TestPartitionColumnStripping:
 
             def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
                 """Return test data including partition column values."""
-                dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
+                dates = pd.date_range(
+                    partition_spec.start_date, partition_spec.end_date
+                )
                 instrument = partition_spec.partition_values.get("FutureRoot", "ES")
                 month = partition_spec.partition_values.get("month", "M2024-01")
-                return pd.DataFrame({
-                    "Date": dates,
-                    "FutureRoot": instrument,  # Partition column in data
-                    "month": month,  # Another partition column in data
-                    "price": [100.0 + i for i in range(len(dates))],
-                })
+                return pd.DataFrame(
+                    {
+                        "Date": dates,
+                        "FutureRoot": instrument,  # Partition column in data
+                        "month": month,  # Another partition column in data
+                        "price": [100.0 + i for i in range(len(dates))],
+                    }
+                )
 
         source = PartitionedSource(dpd)
 
@@ -1222,20 +1286,18 @@ class TestPartitionColumnStripping:
             column_names = schema.names
 
             # Partition columns should NOT be in the parquet file
-            assert "FutureRoot" not in column_names, (
-                f"FutureRoot should be stripped from {pq_file.name}"
-            )
-            assert "month" not in column_names, (
-                f"month should be stripped from {pq_file.name}"
-            )
+            assert (
+                "FutureRoot" not in column_names
+            ), f"FutureRoot should be stripped from {pq_file.name}"
+            assert (
+                "month" not in column_names
+            ), f"month should be stripped from {pq_file.name}"
 
             # Non-partition columns should still be present
             assert "Date" in column_names
             assert "price" in column_names
 
-    def test_data_read_correctly_after_stripping(
-        self, temp_cache: Path
-    ) -> None:
+    def test_data_read_correctly_after_stripping(self, temp_cache: Path) -> None:
         """Data should be readable correctly after partition columns are stripped."""
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -1254,13 +1316,20 @@ class TestPartitionColumnStripping:
                 return (dt.date(2024, 1, 1), dt.date(2024, 1, 31))
 
             def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
-                dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
+                dates = pd.date_range(
+                    partition_spec.start_date, partition_spec.end_date
+                )
                 category = partition_spec.partition_values.get("category", "A")
-                return pd.DataFrame({
-                    "Date": dates,
-                    "category": category,  # Partition column in data
-                    "value": [10.0 * (1 if category == "A" else 2) + i for i in range(len(dates))],
-                })
+                return pd.DataFrame(
+                    {
+                        "Date": dates,
+                        "category": category,  # Partition column in data
+                        "value": [
+                            10.0 * (1 if category == "A" else 2) + i
+                            for i in range(len(dates))
+                        ],
+                    }
+                )
 
         source = CategorySource(dpd)
 
@@ -1292,9 +1361,7 @@ class TestPartitionColumnStripping:
 class TestPerChunkSorting:
     """Tests for per-chunk sorting by sort_columns before writing temp files."""
 
-    def test_data_sorted_by_sort_columns(
-        self, temp_cache: Path
-    ) -> None:
+    def test_data_sorted_by_sort_columns(self, temp_cache: Path) -> None:
         """Data in each partition should be sorted by sort_columns."""
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -1312,16 +1379,18 @@ class TestPerChunkSorting:
 
             def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
                 # Return data intentionally out of order
-                return pd.DataFrame({
-                    "Date": [
-                        dt.date(2024, 1, 3),  # Out of order
-                        dt.date(2024, 1, 1),
-                        dt.date(2024, 1, 2),
-                        dt.date(2024, 1, 2),  # Same date, different symbol
-                    ],
-                    "symbol": ["AAPL", "MSFT", "GOOGL", "AAPL"],  # Out of order
-                    "price": [150.0, 350.0, 140.0, 145.0],
-                })
+                return pd.DataFrame(
+                    {
+                        "Date": [
+                            dt.date(2024, 1, 3),  # Out of order
+                            dt.date(2024, 1, 1),
+                            dt.date(2024, 1, 2),
+                            dt.date(2024, 1, 2),  # Same date, different symbol
+                        ],
+                        "symbol": ["AAPL", "MSFT", "GOOGL", "AAPL"],  # Out of order
+                        "price": [150.0, 350.0, 140.0, 145.0],
+                    }
+                )
 
         source = UnsortedSource(dpd)
 
@@ -1351,9 +1420,7 @@ class TestPerChunkSorting:
         # The data should already be in sorted order
         pd.testing.assert_frame_equal(df_actual, df_sorted)
 
-    def test_sort_columns_only_uses_existing_columns(
-        self, temp_cache: Path
-    ) -> None:
+    def test_sort_columns_only_uses_existing_columns(self, temp_cache: Path) -> None:
         """Sorting should only use columns that exist in the data."""
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -1368,14 +1435,16 @@ class TestPerChunkSorting:
                 return (dt.date(2024, 1, 1), dt.date(2024, 1, 5))
 
             def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
-                return pd.DataFrame({
-                    "Date": [
-                        dt.date(2024, 1, 3),
-                        dt.date(2024, 1, 1),
-                        dt.date(2024, 1, 2),
-                    ],
-                    "value": [30, 10, 20],
-                })
+                return pd.DataFrame(
+                    {
+                        "Date": [
+                            dt.date(2024, 1, 3),
+                            dt.date(2024, 1, 1),
+                            dt.date(2024, 1, 2),
+                        ],
+                        "value": [30, 10, 20],
+                    }
+                )
 
         source = SimpleSource(dpd)
 
@@ -1400,6 +1469,226 @@ class TestPerChunkSorting:
 
         # Dates should be in ascending order
         assert dates == sorted(dates)
+
+
+class TestArrowNativeWritePath:
+    """Regression tests for schema-preserving Arrow write-path operations."""
+
+    verifier_col = "data_exists_v1"
+
+    def test_nullable_uint8_survives_chunk_and_final_sort(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Arrow-native sorting should not widen nullable uint8 columns."""
+        dpd = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="nullable_sort_test",
+            date_col="Date",
+            date_partition="month",
+            sort_columns=["Date", "symbol"],
+        )
+
+        class NullableUInt8Source(DataSource):
+            def available_dates(self) -> tuple[dt.date, dt.date]:
+                return (dt.date(2024, 1, 1), dt.date(2024, 1, 3))
+
+            def get_data(self, partition_spec: PartitionSpec) -> pl.DataFrame:
+                return pl.DataFrame(
+                    {
+                        "Date": pl.Series(
+                            "Date",
+                            [
+                                dt.date(2024, 1, 3),
+                                dt.date(2024, 1, 1),
+                                dt.date(2024, 1, 2),
+                            ],
+                            dtype=pl.Date,
+                        ),
+                        "symbol": pl.Series(
+                            "symbol",
+                            ["MSFT", "AAPL", "GOOGL"],
+                            dtype=pl.String,
+                        ),
+                        TestArrowNativeWritePath.verifier_col: pl.Series(
+                            TestArrowNativeWritePath.verifier_col,
+                            [1, None, 0],
+                            dtype=pl.UInt8,
+                        ),
+                    }
+                )
+
+        suffix = dpd.update(
+            NullableUInt8Source(dpd),
+            start_date=dt.date(2024, 1, 1),
+            end_date=dt.date(2024, 1, 3),
+        )
+
+        assert suffix is not None
+        _assert_current_snapshot_column_type(
+            dpd,
+            self.verifier_col,
+            pa.uint8(),
+        )
+
+        table = pq.read_table(_current_snapshot_parquet_files(dpd)[0])
+        assert table.column("Date").to_pylist() == [
+            dt.date(2024, 1, 1),
+            dt.date(2024, 1, 2),
+            dt.date(2024, 1, 3),
+        ]
+
+    def test_nullable_uint8_survives_backfill_filter(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Backfill date filtering should preserve nullable uint8 columns."""
+        dpd = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="nullable_backfill_test",
+            date_col="Date",
+            date_partition="month",
+            sort_columns=["Date"],
+        )
+
+        class NullableUInt8RangeSource(DataSource):
+            def available_dates(self) -> tuple[dt.date, dt.date]:
+                return (dt.date(2024, 1, 1), dt.date(2024, 1, 31))
+
+            def get_data(self, partition_spec: PartitionSpec) -> pl.DataFrame:
+                num_days = (
+                    partition_spec.end_date - partition_spec.start_date
+                ).days + 1
+                dates = [
+                    partition_spec.start_date + dt.timedelta(days=i)
+                    for i in range(num_days)
+                ]
+                return pl.DataFrame(
+                    {
+                        "Date": pl.Series("Date", dates, dtype=pl.Date),
+                        TestArrowNativeWritePath.verifier_col: pl.Series(
+                            TestArrowNativeWritePath.verifier_col,
+                            [None if i % 2 else 1 for i in range(num_days)],
+                            dtype=pl.UInt8,
+                        ),
+                    }
+                )
+
+        source = NullableUInt8RangeSource(dpd)
+        initial_suffix = dpd.update(
+            source,
+            start_date=dt.date(2024, 1, 10),
+            end_date=dt.date(2024, 1, 12),
+        )
+        assert initial_suffix is not None
+
+        dpd.refresh()
+        time.sleep(1.1)
+        backfill_suffix = dpd.update(
+            source,
+            start_date=dt.date(2024, 1, 1),
+            backfill=True,
+        )
+
+        assert backfill_suffix is not None
+        _assert_current_snapshot_column_type(
+            dpd,
+            self.verifier_col,
+            pa.uint8(),
+        )
+
+        metadata = dpd._load_metadata()
+        assert metadata.cache_start_date == dt.date(2024, 1, 1)
+        assert metadata.cache_end_date == dt.date(2024, 1, 12)
+
+        table = pq.read_table(_current_snapshot_parquet_files(dpd)[0])
+        assert table.num_rows == 12
+
+    def test_nullable_uint8_survives_restate_timestamp_filter(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Restate filtering should preserve uint8 and use date bounds."""
+        dpd = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="nullable_restate_test",
+            date_col="Date",
+            date_partition="month",
+            sort_columns=["Date"],
+        )
+
+        class TimestampUInt8Source(DataSource):
+            def available_dates(self) -> tuple[dt.date, dt.date]:
+                return (dt.date(2024, 1, 1), dt.date(2024, 1, 31))
+
+            def get_data(self, partition_spec: PartitionSpec) -> pl.DataFrame:
+                num_days = (
+                    partition_spec.end_date - partition_spec.start_date
+                ).days + 1
+                if partition_spec.start_date == dt.date(
+                    2024, 1, 4
+                ) and partition_spec.end_date == dt.date(2024, 1, 4):
+                    timestamps = [dt.datetime(2024, 1, 4, 9, 0)]
+                    values = [400]
+                else:
+                    timestamps = [
+                        dt.datetime.combine(
+                            partition_spec.start_date + dt.timedelta(days=i),
+                            dt.time(15, 30),
+                        )
+                        for i in range(num_days)
+                    ]
+                    values = list(range(num_days))
+
+                return pl.DataFrame(
+                    {
+                        "Date": pl.Series(
+                            "Date",
+                            timestamps,
+                            dtype=pl.Datetime("ns"),
+                        ),
+                        TestArrowNativeWritePath.verifier_col: pl.Series(
+                            TestArrowNativeWritePath.verifier_col,
+                            [None if i % 2 else 1 for i in range(len(timestamps))],
+                            dtype=pl.UInt8,
+                        ),
+                        "value": values,
+                    }
+                )
+
+        source = TimestampUInt8Source(dpd)
+        initial_suffix = dpd.update(
+            source,
+            start_date=dt.date(2024, 1, 1),
+            end_date=dt.date(2024, 1, 5),
+        )
+        assert initial_suffix is not None
+
+        dpd.refresh()
+        time.sleep(1.1)
+        restate_suffix = dpd.update(
+            source,
+            start_date=dt.date(2024, 1, 4),
+            end_date=dt.date(2024, 1, 4),
+            restate=True,
+        )
+
+        assert restate_suffix is not None
+        _assert_current_snapshot_column_type(
+            dpd,
+            self.verifier_col,
+            pa.uint8(),
+        )
+
+        metadata = dpd._load_metadata()
+        assert metadata.cache_start_date == dt.date(2024, 1, 1)
+        assert metadata.cache_end_date == dt.date(2024, 1, 5)
+
+        table = pq.read_table(_current_snapshot_parquet_files(dpd)[0])
+        timestamps = table.column("Date").to_pylist()
+        assert len(timestamps) == 5
+        assert dt.datetime(2024, 1, 4, 9, 0) in timestamps
+        assert dt.datetime(2024, 1, 4, 15, 30) not in timestamps
 
 
 class TestNoneFromGetData:
@@ -1430,7 +1719,7 @@ class TestNoneFromGetData:
 
         source = AllNoneSource(simple_dpd)
 
-        suffix = simple_dpd.update(
+        simple_dpd.update(
             source,
             start_date=dt.date(2024, 1, 1),
             end_date=dt.date(2024, 1, 31),
@@ -1440,7 +1729,11 @@ class TestNoneFromGetData:
         # (suffix may be None if no partitions produced data, depending on
         # whether _publish_snapshot is reached — either outcome is acceptable
         # as long as no exception is raised)
-        parquet_files = list(simple_dpd.dataset_dir.rglob("*.parquet")) if simple_dpd.dataset_dir.exists() else []
+        parquet_files = (
+            list(simple_dpd.dataset_dir.rglob("*.parquet"))
+            if simple_dpd.dataset_dir.exists()
+            else []
+        )
         assert parquet_files == []
 
     def test_none_from_some_specs_writes_non_none_partitions(
@@ -1470,11 +1763,13 @@ class TestNoneFromGetData:
                 dates = pd.date_range(
                     partition_spec.start_date, partition_spec.end_date
                 )
-                return pd.DataFrame({
-                    "Date": dates,
-                    "symbol": symbol,
-                    "price": [100.0 + i for i in range(len(dates))],
-                })
+                return pd.DataFrame(
+                    {
+                        "Date": dates,
+                        "symbol": symbol,
+                        "price": [100.0 + i for i in range(len(dates))],
+                    }
+                )
 
         source = PartialNoneSource(dpd)
 
@@ -1517,9 +1812,7 @@ class TestNoneFromGetData:
         # Must not raise — previously raised ValidationError("Cannot convert NoneType")
         execute_update(simple_dpd, source, plan)
 
-    def test_none_mixed_with_data_in_chunked_group(
-        self, temp_cache: Path
-    ) -> None:
+    def test_none_mixed_with_data_in_chunked_group(self, temp_cache: Path) -> None:
         """
         When a group has multiple chunks and some return None, the non-None
         chunks are still consolidated into the final file correctly.
@@ -1548,10 +1841,12 @@ class TestNoneFromGetData:
                 dates = pd.date_range(
                     partition_spec.start_date, partition_spec.end_date
                 )
-                return pd.DataFrame({
-                    "Date": dates,
-                    "value": range(len(dates)),
-                })
+                return pd.DataFrame(
+                    {
+                        "Date": dates,
+                        "value": range(len(dates)),
+                    }
+                )
 
         source = AlternatingSource(dpd)
 
