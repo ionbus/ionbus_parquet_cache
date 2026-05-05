@@ -4038,9 +4038,9 @@ Sync functions can come from three locations (same as DataSource):
 2. **Cache-local** (`code/sync_functions.py`) - Python file in the cache's `code/` directory
 3. **Installed package** (`module://my_library.sync`) - function/class from an installed Python package
 
-For the first implementation, sync function configuration is read only from the
-local source cache in a local-to-remote push. Pull and remote-to-remote
-post-sync functions are not supported yet.
+Sync-function sourcing follows the supported execution modes described above.
+In those modes, YAML and cache-local hooks are loaded from the local source
+cache, and `module://` hooks are loaded from the local Python environment.
 
 The loader must validate the resolved object:
 
