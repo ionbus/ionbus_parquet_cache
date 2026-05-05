@@ -328,6 +328,7 @@ df = registry.read_data("md.futures_daily", cache_name="official")
 | `to_table(name, filters=None, ...)` | Read data, returning a PyArrow `Table` |
 | `pyarrow_dataset(name, start_date=None, end_date=None, filters=None, cache_name=None, snapshot=None)` | Get PyArrow dataset from first matching cache |
 | `get_latest_snapshot(name, cache_name=None)` | Return the latest snapshot suffix string for a dataset |
+| `cache_history(name, cache_name=None, snapshot=None)` | Return snapshot lineage history, walking backward from the current or specified snapshot |
 | `data_summary()` | DataFrame summarizing all datasets across all caches |
 | `discover_dpds(cache_path)` | Discover DPDs in a cache by scanning for `_meta_data` directories |
 | `discover_npds(cache_path)` | Discover NPDs by scanning the `non-dated` directory |
@@ -516,6 +517,8 @@ by date (and optionally by additional columns).
   from the stored metadata. Returns a dict with keys `columns_to_rename`,
   `columns_to_drop`, `dropna_columns`, `dedup_columns`, `dedup_keep`, or
   `None` if no transforms are configured.
+- `cache_history(snapshot=None)` -- returns snapshot lineage history,
+  walking backward from the current snapshot or the specified snapshot.
 
 Each `DatedParquetDataset` is defined by a YAML file in the `yaml` subdirectory of the cache root.
 See [YAML Configuration](#yaml-configuration) for the full format.
@@ -2622,6 +2625,9 @@ Updating a `DatedParquetDataset` requires a `DataSource` subclass.
     - Write `_meta_data/{name}_{suffix}.pkl.gz` containing the updated
       file list, partition values, and checksums for every file in the
       dataset (not just files written this run).
+    - Include lineage metadata describing the base snapshot, operation,
+      added date ranges, rewritten date ranges, and instrument scope for
+      this update.
 11. Invalidate the cached PyArrow dataset so the next read constructs
     a fresh one from the new snapshot.
 12. Best-effort cleanup of orphan temp files.
@@ -3059,6 +3065,7 @@ time it was written.
     "cache_start_date": dt.date,  # earliest date in the cache
     "cache_end_date": dt.date,    # latest date in the cache
     "partition_values": dict,     # {column: [distinct values]} for all partition columns
+    "lineage": SnapshotLineage | None,  # how this snapshot was produced
     "files": [
         {
             "path": str,          # relative path from dataset root
@@ -3079,6 +3086,90 @@ constraints (see below).
 The `size_bytes` field makes it easy to calculate disk savings when
 cleaning up old snapshots: sum the sizes of files that only appear in
 older snapshots and not in the current one.
+
+**Snapshot lineage metadata:**
+
+Each new DPD snapshot should record how it was produced. This is stored on the
+snapshot itself, not in a separate mutable history log.
+
+The lineage deliberately does not include `created_at`. The snapshot suffix is
+the chronological identifier.
+
+```python
+@dataclass
+class DateRange:
+    start_date: dt.date
+    end_date: dt.date
+
+
+@dataclass
+class SnapshotLineage:
+    # None means this snapshot did not use another snapshot as its base.
+    base_snapshot: str | None
+
+    # "initial", "update", "backfill", "restate", "rebuild", or "unknown".
+    operation: str
+
+    # What the caller asked for after automatic date-window resolution.
+    # This is optional audit context; actual ranges below are authoritative.
+    requested_date_range: DateRange | None
+
+    # Dates newly added to the cache by this snapshot.
+    added_date_ranges: list[DateRange]
+
+    # Dates whose previous rows were intentionally replaced by this snapshot.
+    rewritten_date_ranges: list[DateRange]
+
+    # Instrument scope of the write, if any.
+    instrument_column: str | None
+    instrument_scope: str  # "all", "subset", or "unknown"
+    instruments: list[str] | None
+```
+
+`base_snapshot` is the previous snapshot suffix when the new snapshot is
+derived from an existing cache. It is `None` for a new cache, a full rebuild
+that intentionally ignores previous metadata, or any other snapshot that is
+not based on earlier cache state.
+
+`added_date_ranges` and `rewritten_date_ranges` must remain separate:
+
+- First snapshot for a new cache:
+  - `base_snapshot=None`
+  - `operation="initial"`
+  - `added_date_ranges` contains the written date range
+  - `rewritten_date_ranges=[]`
+- Normal daily update:
+  - `base_snapshot=<previous suffix>`
+  - `operation="update"`
+  - `added_date_ranges` contains the new date range
+  - `rewritten_date_ranges=[]`
+- Normal update with `repull_n_days`:
+  - `added_date_ranges` contains any dates after the previous cache end
+  - `rewritten_date_ranges` contains the trailing correction window that was
+    re-fetched and replaced
+- Backfill:
+  - `operation="backfill"`
+  - `added_date_ranges` contains the backfilled range
+  - `rewritten_date_ranges=[]`
+- Restate:
+  - `operation="restate"`
+  - `rewritten_date_ranges` contains the restated date range
+  - `added_date_ranges` is normally empty, unless the restate also expands
+    coverage beyond the previous snapshot
+
+The date ranges should represent the best-known actual written scope. In
+practice this usually matches the resolved requested date window. If a source
+returns no data for part of the requested window, the actual ranges may be
+narrower than `requested_date_range`.
+
+Instrument scope is independent of operation. A normal update, backfill, or
+restate may write all instruments or only a subset:
+
+- `instrument_scope="all"` when no instrument filter limited the write.
+- `instrument_scope="subset"` when `instruments` was explicitly provided.
+  Store the sorted instrument list in `instruments`.
+- `instrument_scope="unknown"` for legacy snapshots or cases where the scope
+  cannot be determined.
 
 **YAML configuration in metadata:**
 
@@ -3116,6 +3207,51 @@ was processed.
 - Older snapshots are kept on disk (never deleted automatically),
   allowing readers to pin to a specific snapshot by loading an
   earlier pickle file explicitly.
+
+**Cache history API:**
+
+The cache should expose a history function for DPDs:
+
+```python
+dpd.cache_history(snapshot: str | None = None) -> CacheHistory
+
+registry.cache_history(
+    name: str,
+    cache_name: str | None = None,
+    snapshot: str | None = None,
+) -> CacheHistory
+```
+
+If `snapshot` is omitted, history starts at the current snapshot. If provided,
+history starts at that specific snapshot. The function then walks backward by
+following each snapshot's `lineage.base_snapshot`.
+
+The returned history should include, in newest-to-oldest order:
+
+- snapshot suffix,
+- operation,
+- base snapshot,
+- requested date range,
+- added date ranges,
+- rewritten date ranges,
+- instrument scope,
+- instrument column and instrument list when applicable,
+- a status for each entry.
+
+If a snapshot says it was based on another snapshot that cannot be found, the
+history result should include a broken-link entry instead of failing silently.
+For example:
+
+```text
+Snapshot 1XYZ999 says it was based on 1ABC123, but 1ABC123 was not found.
+```
+
+If a snapshot has no lineage metadata, the history result should include a
+status entry instead of failing silently. For example:
+
+```text
+Snapshot 1XYZ999 has no lineage metadata.
+```
 
 **Partition column values are NOT stored in the parquet files.** They
 are stored in the snapshot pickle metadata and injected as virtual
@@ -3647,6 +3783,10 @@ for details.
 --daemon                        # Run continuously instead of once
 --update-interval N             # Seconds between sync checks (default: 60)
 --rename OLD:NEW                # Copy dataset with a different name at destination
+--run-sync-functions            # Run configured post-sync functions after copying
+--run-sync-only                 # Run configured sync functions without copying
+--sync-function LOCATION:NAME   # Run this sync function for selected snapshots
+--sync-function-init-args JSON  # Optional JSON kwargs for CLI sync function class
 --workers N                     # Parallel upload/download workers (default: 8)
 ```
 
@@ -3672,30 +3812,166 @@ If you do not specify `--datasets`, the old dataset name is automatically
 used as the filter. Only one rename mapping can be specified per command.
 The source dataset name must match the dataset being synced.
 
-**Sync functions (optional supplemental operations):**
+**Sync functions (optional post-sync operations):**
 
-Sync functions allow you to perform additional operations during cache sync
-(e.g., syncing provenance metadata, updating external catalogs, or replicating
-supplemental data). A sync function receives the snapshot ID, source location,
-and destination location, and can perform any operations needed to keep
-auxiliary data in sync with the snapshot.
+Sync functions allow a dataset to declare optional supplemental work that can
+run after cache files have been synced (e.g., syncing provenance metadata,
+updating external catalogs, or replicating auxiliary data).
+
+Defining a sync function in YAML does **not** make it run automatically. The
+normal `sync-cache push` and `sync-cache pull` commands copy cache files only.
+Configured sync functions run only when the user explicitly requests them with
+`--run-sync-functions`, or when retrying them with `--run-sync-only`.
+
+**Expected use cases:**
+
+- Fast file replication: copy cache files between local locations or between
+  cache storage locations without updating any external systems. This is the
+  default `sync-cache` behavior and should stay fast and side-effect free.
+- Publishing a cache update: push files from a local cache to remote storage,
+  then update an asset registry, provenance catalog, or other external system
+  with metadata that differs from the cache's internal snapshot metadata. This
+  requires `--run-sync-functions` or `--sync-function`.
+- Repairing post-sync side effects: if file copying succeeded but an asset
+  registry or catalog update failed, rerun only the external update with
+  `--run-sync-only`.
+
+**Execution modes:**
+
+```bash
+# Copy selected cache files, then run configured post-sync functions
+sync-cache push /path/to/cache /path/to/destination --run-sync-functions
+
+# Copy selected cache files, then run a command-line sync function
+sync-cache push /path/to/cache /path/to/destination \
+    --sync-function module://my_library.sync_utils:sync_provenance
+
+# Retry configured post-sync functions without copying files
+sync-cache push /path/to/cache /path/to/destination --run-sync-only
+
+# Retry a command-line sync function without copying files
+sync-cache push /path/to/cache /path/to/destination \
+    --run-sync-only \
+    --sync-function module://my_library.sync_utils:sync_provenance
+```
+
+For the first implementation, sync functions are supported only for
+local-source push operations to a remote destination:
+
+```bash
+sync-cache push /local/cache gs://bucket/cache --run-sync-functions
+```
+
+If `--run-sync-functions`, `--run-sync-only`, or `--sync-function` is used with
+pull, local-to-local sync, or remote-to-remote sync, the command should fail
+with a clear error. This keeps config loading simple: YAML and cache-local code
+are loaded from the local source cache, and `module://` hooks are loaded from
+the local Python environment.
+
+`--run-sync-functions` runs configured sync functions only after all selected
+cache files have been copied successfully. It does not interleave copying and
+post-sync hooks.
+
+`--run-sync-only` performs no file copying and runs only the configured sync
+functions for the selected datasets and snapshots. It is intended for retrying
+external side effects after a previous sync copied files but a post-sync
+function failed. Before calling a sync function, the command should verify that
+the selected destination snapshot exists:
+
+- For DPDs, the destination metadata pickle and data files referenced by that
+  snapshot should exist.
+- For NPDs, the destination snapshot file or snapshot directory should exist.
+
+`--dry-run` is mutually exclusive with both `--run-sync-functions` and
+`--run-sync-only`. `--dry-run` is also mutually exclusive with
+`--sync-function`, because passing a command-line sync function requests an
+external side effect. Sync functions may perform external side effects, so
+dry-run mode must fail fast instead of pretending to simulate them.
+
+**Post-sync ordering and execution:**
+
+Post-sync execution has two phases:
+
+1. Copy all selected cache files.
+2. If all file copies succeeded, run selected sync functions.
+
+Sync functions run serially in deterministic dataset/snapshot order, not in
+the file-copy worker pool. If any sync function fails, remaining sync functions
+are not run and `sync-cache` exits nonzero. Files already copied are not rolled
+back. Use `--run-sync-only` to retry the post-sync phase after fixing the
+underlying problem.
+
+**Command-line sync function override:**
+
+Instead of configuring a sync function in YAML, a caller may provide one at
+sync time:
+
+```bash
+sync-cache push /path/to/cache /path/to/destination \
+    --datasets md.futures_daily \
+    --sync-function module://my_library.sync_utils:SyncProvenance \
+    --sync-function-init-args '{"catalog_url": "https://internal.catalog.io"}'
+```
+
+`--sync-function LOCATION:NAME` identifies the callable to run for every
+selected dataset snapshot. The `LOCATION` part follows the same rules as
+`sync_function_location` in YAML:
+
+- empty/built-in location for built-in functions,
+- cache-local paths such as `code/sync_functions.py`,
+- installed packages such as `module://my_library.sync_utils`.
+
+The callable name after the final `:` is the function name or class name.
+If the callable is a class, `--sync-function-init-args` may provide JSON
+keyword arguments for its constructor. If it is a plain function,
+`--sync-function-init-args` should be omitted.
+
+When `--sync-function` is provided, it is used for all selected datasets and
+snapshots and per-dataset YAML `sync_function_*` settings are ignored for that
+command. This avoids mixed ordering between YAML-configured hooks and an
+operator-supplied one-off hook. To run the command-line hook for only one
+dataset, combine it with `--datasets NAME`.
+
+Providing `--sync-function` implies that sync functions should run after the
+file sync. It does not require `--run-sync-functions`. `--run-sync-only` may be
+combined with `--sync-function` to retry the one-off hook without copying
+files.
+
+**DPD and NPD support:**
+
+Sync functions apply cleanly to both dataset types:
+
+- For DPDs, `snapshot_id` is the DPD snapshot suffix from `_meta_data/`.
+- For NPDs, `snapshot_id` is the NPD snapshot suffix from the snapshot file or
+  directory name under `non-dated/`.
+
+The sync command should call the function once per selected dataset snapshot.
+That means the default current-snapshot sync calls at most one function per
+dataset, while `--snapshot ...` or `--all-snapshots` may call a function
+multiple times for the same dataset.
 
 **Function signature:**
 
-A sync function must accept three parameters and may throw exceptions:
+A sync function must accept the selected source and destination dataset names,
+the dataset type, the snapshot ID, and the source/destination cache locations:
 
 ```python
 def my_sync_function(
-    snapshot_id: str,        # Current snapshot ID being synced
-    source_location: str,    # Source cache path (e.g., /local/cache or gs://bucket/cache)
-    dest_location: str       # Destination cache path
+    source_dataset_name: str,  # Dataset name at the source cache
+    dest_dataset_name: str,    # Dataset name at the destination cache
+    dataset_type: str,         # "dpd" or "npd"
+    snapshot_id: str,          # Selected DPD or NPD snapshot suffix
+    source_location: str,      # Source cache root (/local/cache or gs://bucket/cache)
+    dest_location: str,        # Destination cache root
 ) -> None:
-    """Sync supplemental data for the snapshot."""
-    # Update provenance, replicate metadata, etc.
-    # If an error occurs, raise an exception to fail the sync operation
+    """Sync supplemental data for the selected dataset snapshot."""
+    # Update provenance, replicate metadata, notify catalogs, etc.
+    # Raise an exception to fail the sync operation.
 ```
 
-If the sync function raises an exception, the entire sync operation fails.
+When `--rename OLD:NEW` is used, `source_dataset_name` is `OLD` and
+`dest_dataset_name` is `NEW`. Hooks that only care about the destination name
+should use `dest_dataset_name`.
 
 **Configuration in YAML:**
 
@@ -3712,34 +3988,71 @@ datasets:
       catalog_endpoint: "https://catalog.example.com"
 ```
 
+For NPDs, the same fields may be attached to the NPD's YAML dataset entry.
+
+When sync functions are requested, datasets without a configured sync function
+are skipped and a warning is logged for each skipped dataset. This warning
+applies whether one dataset or many datasets were selected. Missing configured
+sync functions are not errors: if all selected datasets lack configured sync
+functions, the command exits successfully with warnings and a summary such as
+`0 sync functions run`.
+
+`sync_function_init_args` are for non-secret configuration only. Do not store
+API keys, passwords, tokens, or other secrets in YAML. Sync functions should
+fetch secrets from environment variables or another credential provider and
+raise a clear error if required credentials are missing.
+
 **Sourcing sync functions:**
 
 Sync functions can come from three locations (same as DataSource):
 
-1. **Built-in** (empty `sync_function_location`) — use a built-in function if available
-2. **Cache-local** (`code/sync_functions.py`) — Python file in the cache's `code/` directory
-3. **Installed package** (`module://my_library.sync`) — function/class from an installed Python package
+1. **Built-in** (empty `sync_function_location`) - use a built-in function if available
+2. **Cache-local** (`code/sync_functions.py`) - Python file in the cache's `code/` directory
+3. **Installed package** (`module://my_library.sync`) - function/class from an installed Python package
+
+For the first implementation, sync function configuration is read only from the
+local source cache in a local-to-remote push. Pull and remote-to-remote
+post-sync functions are not supported yet.
+
+The loader must validate the resolved object:
+
+- If the location or name cannot be loaded, raise `ConfigurationError`.
+- If a class cannot be instantiated with `sync_function_init_args` or
+  `--sync-function-init-args`, raise `ConfigurationError`.
+- If the final object is not callable, raise `ConfigurationError`.
 
 **Examples:**
 
 Local sync function (in `code/sync_functions.py`):
 
 ```python
-def sync_provenance(snapshot_id: str, source_location: str, dest_location: str) -> None:
+def sync_provenance(
+    source_dataset_name: str,
+    dest_dataset_name: str,
+    dataset_type: str,
+    snapshot_id: str,
+    source_location: str,
+    dest_location: str,
+) -> None:
     """Copy provenance metadata from source to destination."""
     import json
     from pathlib import Path
 
-    source_prov = Path(source_location) / "provenance" / f"{snapshot_id}.json"
-    dest_prov = Path(dest_location) / "provenance"
+    source_prov = (
+        Path(source_location)
+        / "provenance"
+        / source_dataset_name
+        / f"{snapshot_id}.json"
+    )
+    dest_prov = Path(dest_location) / "provenance" / dest_dataset_name
 
     if source_prov.exists():
         dest_prov.mkdir(parents=True, exist_ok=True)
         with open(source_prov) as f:
             data = json.load(f)
-        # Update location references if destination is remote (GCS)
-        if dest_location.startswith("gs://"):
-            data["location"] = dest_location
+        data["dataset_name"] = dest_dataset_name
+        data["dataset_type"] = dataset_type
+        data["snapshot_id"] = snapshot_id
         with open(dest_prov / f"{snapshot_id}.json", "w") as f:
             json.dump(data, f)
 ```
@@ -3762,30 +4075,51 @@ In `my_library/sync_utils.py`:
 class SyncProvenance:
     """Syncs provenance data to an external catalog."""
 
-    def __init__(self, dataset, catalog_url: str):
-        self.dataset = dataset
+    def __init__(self, catalog_url: str):
         self.catalog_url = catalog_url
 
-    def __call__(self, snapshot_id: str, source_location: str, dest_location: str) -> None:
+    def __call__(
+        self,
+        source_dataset_name: str,
+        dest_dataset_name: str,
+        dataset_type: str,
+        snapshot_id: str,
+        source_location: str,
+        dest_location: str,
+    ) -> None:
         # Fetch provenance from source, update location, POST to catalog
         import requests
-        prov = self._fetch_provenance(source_location, snapshot_id)
-        prov["dest_location"] = dest_location
-        resp = requests.post(f"{self.catalog_url}/snapshots", json=prov)
-        resp.raise_for_status()  # Raise on HTTP error
 
-    def _fetch_provenance(self, location: str, snapshot_id: str) -> dict:
+        prov = self._fetch_provenance(
+            source_location,
+            source_dataset_name,
+            snapshot_id,
+        )
+        prov["dest_dataset_name"] = dest_dataset_name
+        prov["dest_location"] = dest_location
+        prov["dataset_type"] = dataset_type
+        resp = requests.post(f"{self.catalog_url}/snapshots", json=prov)
+        resp.raise_for_status()
+
+    def _fetch_provenance(
+        self,
+        location: str,
+        dataset_name: str,
+        snapshot_id: str,
+    ) -> dict:
         # Implementation
         pass
 ```
 
 **When sync function errors occur:**
 
-If a sync function raises an exception during `sync-cache push` or `sync-cache pull`,
-the entire sync operation fails immediately. The partial sync state is left as-is
-(files copied so far remain at the destination). This is a safety measure: if
-auxiliary metadata cannot be synced correctly, the snapshot should not be
-considered complete at the destination.
+If a sync function raises after file copying, `sync-cache` exits nonzero. Files
+already copied are not rolled back. Callers should treat the destination
+snapshot as operationally incomplete for any external systems maintained by the
+sync function.
+
+Use `--run-sync-only` to retry the configured sync functions after the file
+sync has already succeeded.
 
 **S3 paths (future release):**
 
