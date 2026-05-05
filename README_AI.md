@@ -256,6 +256,33 @@ df = dpd.read_data(...)  # downloads snapshot metadata and reads parquet files
 
 requires `pip install gcsfs`.
 
+## credentials and secrets
+
+do not store credentials, api keys, passwords, tokens, or private key material
+in YAML files. YAML config is stored in snapshot metadata and may be copied
+when caches are synced.
+
+treat `source_init_args`, `cleaning_init_args`, and
+`sync_function_init_args` as non-secret configuration only: endpoints,
+timeouts, project names, table names, and other values safe to keep in
+metadata. DataSources, DataCleaners, and sync functions that need secrets
+should read them from environment variables or an external credential provider
+and fail clearly if a required value is missing.
+
+```python
+import os
+from ionbus_parquet_cache import DataSource
+
+
+class MyDataSource(DataSource):
+    def __init__(self, dataset, endpoint: str):
+        super().__init__(dataset)
+        self.endpoint = endpoint
+        self.api_key = os.environ.get("MY_API_KEY")
+        if not self.api_key:
+            raise ValueError("MY_API_KEY environment variable is not set")
+```
+
 ### packaging datasources in installed packages
 
 to share a DataSource across multiple caches or teams, package it in a Python library and reference it via the `module://` prefix:
@@ -271,21 +298,7 @@ requirements:
 - class must inherit from `DataSource` (or `BucketedDataSource`)
 - import path must match the installed package's importable module path (e.g., `module://pkg.subpkg.module`, not the distribution name `pkg-subpkg`)
 - class must be obtainable via `getattr(module, class_name)` (top-level or re-exported)
-
-if your DataSource needs credentials (API keys, passwords), fetch them from environment variables, not from `source_init_args`. this keeps secrets out of YAML and metadata files:
-
-```python
-import os
-from ionbus_parquet_cache import DataSource
-
-class MyDataSource(DataSource):
-    def __init__(self, dataset, endpoint: str):
-        super().__init__(dataset)
-        self.endpoint = endpoint
-        self.api_key = os.environ.get("MY_API_KEY")
-        if not self.api_key:
-            raise ValueError("MY_API_KEY not set")
-```
+- see [credentials and secrets](#credentials-and-secrets) for secret handling
 
 ---
 
@@ -334,7 +347,6 @@ datasets:
 - **num_instrument_buckets**: if set, enables bucketing. rows are distributed across `__instrument_bucket__=0/` ... `__instrument_bucket__=N/` based on `hash(instrument_column) % num_instrument_buckets`. breakingchanges with bucketing: bucketed datasets cannot be updated without full rebuild if you change `num_instrument_buckets`.
 - **sort_columns**: affects read performance. set to frequent filter columns.
 - **repull_n_days**: useful for datasets that correct historical data (e.g. option prices). e.g., `repull_n_days: 5` means "always fetch the last 5 business days, not just new dates".
-
 ---
 
 ## things not to do

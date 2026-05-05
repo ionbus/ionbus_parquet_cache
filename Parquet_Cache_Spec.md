@@ -16,6 +16,7 @@
     * [`DatedParquetDataset`](#datedparquetdataset)
     * [`NonDatedParquetDataset`](#nondatedparquetdataset)
 - [YAML Configuration](#yaml-configuration)
+- [Credentials and Secrets](#credentials-and-secrets)
 - [Data Source Interface](#data-source-interface)
     * [`DataSource` abstract class](#datasource-abstract-class)
     * [Implementing a `DataSource`](#implementing-a-datasource)
@@ -908,7 +909,7 @@ class FuturesDataCleaner(DataCleaner):
 | `instruments` | `list[str]` | `None` | Instruments to include in updates. If `None`, fetches all instruments. Can be expanded over time using backfill (see below). |
 | `source_location` | `str` | `""` | Location of the `DataSource` subclass. Resolution order: (1) if empty/blank, uses a built-in source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)); (2) if starts with `module://`, loads from an installed Python package (e.g., `module://my_library.data_sources`) — must use the importable module path, not the distribution name (see [Installed Module Data Sources](#installed-module-data-sources)); (3) otherwise treated as a filesystem path relative to cache root or absolute. If the module cannot be imported, the class is missing, or the class does not inherit from `DataSource`, dataset creation/update fails with a configuration error. |
 | `source_class_name` | `str` | required | Name of the `DataSource` subclass. When `source_location` is empty, this must be a built-in class name (e.g., `HiveParquetSource`, `DPDSource`). |
-| `source_init_args` | `dict` | `{}` | Arguments passed to the `DataSource` constructor as `**kwargs` |
+| `source_init_args` | `dict` | `{}` | Non-secret arguments passed to the `DataSource` constructor as `**kwargs` |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove after fetching data |
 | `columns_to_rename` | `dict[str, str]` | `{}` | Columns to rename: `{old_name: new_name}` |
 | `dropna_columns` | `list[str]` | `[]` | Drop rows where any of these columns are null |
@@ -916,7 +917,7 @@ class FuturesDataCleaner(DataCleaner):
 | `dedup_keep` | `str` | `"last"` | Which duplicate to keep: `"first"` or `"last"` |
 | `cleaning_class_location` | `str` | `None` | Path to Python file with `DataCleaner` subclass (relative to cache root or absolute) |
 | `cleaning_class_name` | `str` | `None` | Name of the `DataCleaner` subclass in `cleaning_class_location` |
-| `cleaning_init_args` | `dict` | `{}` | Arguments passed to the `DataCleaner` constructor as `**kwargs` |
+| `cleaning_init_args` | `dict` | `{}` | Non-secret arguments passed to the `DataCleaner` constructor as `**kwargs` |
 
 **Instrument filtering:**
 
@@ -959,6 +960,36 @@ To add new instruments to an existing dataset:
 
 This workflow lets you start with a subset of instruments and gradually
 expand as needed, without re-fetching existing data.
+
+---
+
+## Credentials and Secrets
+
+Do not store credentials, API keys, passwords, tokens, or private key material
+in YAML files. YAML configuration is stored in snapshot metadata and may be
+copied when caches are synced.
+
+Treat `source_init_args`, `cleaning_init_args`, and
+`sync_function_init_args` as non-secret configuration only: endpoint URLs,
+timeouts, project names, table names, and other values that are safe to keep in
+metadata. DataSources, DataCleaners, and sync functions that need secrets
+should read them from environment variables or an external credential provider
+and fail clearly if a required value is missing.
+
+```python
+import os
+
+from ionbus_parquet_cache import DataSource
+
+
+class MyDataSource(DataSource):
+    def __init__(self, dataset, endpoint: str):
+        super().__init__(dataset)
+        self.endpoint = endpoint
+        self.api_key = os.environ.get("MY_API_KEY")
+        if not self.api_key:
+            raise ValueError("MY_API_KEY environment variable is not set")
+```
 
 ---
 
@@ -1888,12 +1919,8 @@ datasets:
 4. At load time, the system uses `importlib.import_module()` to dynamically
    import the module and retrieve the class
 
-**Credentials and secrets:**
-
-If a `DataSource` needs credentials (API keys, database passwords, etc.),
-fetch them from environment variables. This is more portable and doesn't
-expose secrets in YAML or metadata files. The `DataSource` should fail loudly
-(raise an error) if a required credential is missing.
+For credentials and secret handling, see
+[Credentials and Secrets](#credentials-and-secrets).
 
 **Class requirements:**
 
@@ -3162,12 +3189,15 @@ practice this usually matches the resolved requested date window. If a source
 returns no data for part of the requested window, the actual ranges may be
 narrower than `requested_date_range`.
 
-Instrument scope is independent of operation. A normal update, backfill, or
-restate may write all instruments or only a subset:
+Instrument scope is independent of operation and records how the write was
+requested, not whether the requested set happens to equal the full universe. A
+normal update, backfill, or restate may write all instruments or a requested
+subset:
 
 - `instrument_scope="all"` when no instrument filter limited the write.
 - `instrument_scope="subset"` when `instruments` was explicitly provided.
-  Store the sorted instrument list in `instruments`.
+  Store the sorted instrument list in `instruments`. This remains `"subset"`
+  even if the caller explicitly listed every instrument in the dataset.
 - `instrument_scope="unknown"` for legacy snapshots or cases where the scope
   cannot be determined.
 
@@ -3997,10 +4027,8 @@ sync functions are not errors: if all selected datasets lack configured sync
 functions, the command exits successfully with warnings and a summary such as
 `0 sync functions run`.
 
-`sync_function_init_args` are for non-secret configuration only. Do not store
-API keys, passwords, tokens, or other secrets in YAML. Sync functions should
-fetch secrets from environment variables or another credential provider and
-raise a clear error if required credentials are missing.
+For credentials and secret handling in `sync_function_init_args`, see
+[Credentials and Secrets](#credentials-and-secrets).
 
 **Sourcing sync functions:**
 

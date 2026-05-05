@@ -33,6 +33,7 @@
    * [With chunking for large datasets](#with-chunking-for-large-datasets)
    * [Post-update bookkeeping](#post-update-bookkeeping)
    * [Built-in sources](#built-in-sources)
+- [Credentials and Secrets](#credentials-and-secrets)
 - [YAML Configuration](#yaml-configuration)
    * [Basic example](#basic-example)
    * [With data transformations](#with-data-transformations)
@@ -97,6 +98,7 @@ Maintainers: release instructions live in [RELEASING.md](RELEASING.md).
 - [Using Multiple Caches](#using-multiple-caches)
 - [Updating Data](#updating-data)
 - [Writing a DataSource](#writing-a-datasource)
+- [Credentials and Secrets](#credentials-and-secrets)
 - [YAML Configuration](#yaml-configuration)
 - [Data Cleaning](#data-cleaning)
 - [CLI Tools](#cli-tools)
@@ -743,7 +745,36 @@ To do this:
 
 The `source_location` must use the importable module path (e.g., `module://my_library.data_sources`), not the distribution name on PyPI (which might use hyphens, like `my-library`).
 
-If your DataSource needs credentials (API keys, database passwords), fetch them from environment variables. This is more portable than storing them in YAML.
+See [Credentials and Secrets](#credentials-and-secrets) for how to pass
+secrets safely to packaged DataSources.
+
+## Credentials and Secrets
+
+Do not store credentials, API keys, passwords, tokens, or private key material
+in YAML files. YAML configuration is saved into snapshot metadata and may be
+copied when caches are synced.
+
+Treat `source_init_args`, `cleaning_init_args`, and
+`sync_function_init_args` as non-secret configuration only: endpoint URLs,
+timeouts, project names, table names, and other values that are safe to keep in
+metadata. DataSources, DataCleaners, and sync functions that need secrets
+should read them from environment variables or an external credential provider
+and fail clearly if a required value is missing.
+
+```python
+import os
+
+from ionbus_parquet_cache import DataSource
+
+
+class MyDataSource(DataSource):
+    def __init__(self, dataset, endpoint: str):
+        super().__init__(dataset)
+        self.endpoint = endpoint
+        self.api_key = os.environ.get("MY_API_KEY")
+        if not self.api_key:
+            raise ValueError("MY_API_KEY environment variable is not set")
+```
 
 ## YAML Configuration
 
@@ -828,7 +859,7 @@ datasets:
 | `end_date_str` | `str` | `None` | Override end date (debugging only, format: `"YYYY-MM-DD"`) |
 | `source_location` | `str` | `""` | Location of DataSource class: empty for built-in sources, `code/file.py` for cache-local file, `module://pkg.mod` for installed package |
 | `source_class_name` | `str` | required | Name of the DataSource class |
-| `source_init_args` | `dict` | `{}` | Arguments passed to DataSource constructor |
+| `source_init_args` | `dict` | `{}` | Non-secret arguments passed to DataSource constructor |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove from the data |
 | `columns_to_rename` | `dict[str, str]` | `{}` | Mapping of old column names to new names |
 | `dropna_columns` | `list[str]` | `[]` | Drop rows where any of these columns are null |
@@ -836,7 +867,7 @@ datasets:
 | `dedup_keep` | `str` | `"last"` | Which duplicate to keep: `"first"` or `"last"` |
 | `cleaning_class_location` | `str` | `None` | Path to Python file with DataCleaner class |
 | `cleaning_class_name` | `str` | `None` | Name of the DataCleaner class |
-| `cleaning_init_args` | `dict` | `{}` | Arguments passed to DataCleaner constructor |
+| `cleaning_init_args` | `dict` | `{}` | Non-secret arguments passed to DataCleaner constructor |
 
 ## Data Cleaning
 
