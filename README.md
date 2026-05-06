@@ -56,6 +56,7 @@
    * [update-cache](#update-cache)
    * [cleanup-cache](#cleanup-cache)
    * [sync-cache](#sync-cache)
+   * [Sync Functions](#sync-functions)
 - [Common Patterns](#common-patterns)
    * [Detecting new data](#detecting-new-data)
       + [Refreshing a single dataset](#refreshing-a-single-dataset)
@@ -965,6 +966,9 @@ process graphs belong in snapshot provenance via `DataSource.get_provenance()`.
 | `source_location` | `str` | `""` | Location of DataSource class: empty for built-in sources, `code/file.py` for cache-local file, `module://pkg.mod` for installed package |
 | `source_class_name` | `str` | required | Name of the DataSource class |
 | `source_init_args` | `dict` | `{}` | Non-secret arguments passed to DataSource constructor |
+| `sync_function_location` | `str` | `None` | Optional post-sync function location: empty for built-in, `code/file.py` for cache-local file, or `module://pkg.mod` for installed package |
+| `sync_function_name` | `str` | `None` | Optional sync function or callable class name to run when explicitly requested by `sync-cache` |
+| `sync_function_init_args` | `dict` | `{}` | Non-secret kwargs used to instantiate class-based sync functions |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove from the data |
 | `columns_to_rename` | `dict[str, str]` | `{}` | Mapping of old column names to new names |
 | `dropna_columns` | `list[str]` | `[]` | Drop rows where any of these columns are null |
@@ -1364,6 +1368,20 @@ python -m ionbus_parquet_cache.sync_cache pull gs://my-bucket/cache /local \
 # Parallel upload/download (8 workers by default)
 python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache \
     --workers 16
+
+# Copy files, then run configured post-sync functions
+python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache \
+    --run-sync-functions
+
+# Copy files, then run a command-line sync function for selected snapshots
+python -m ionbus_parquet_cache.sync_cache push /local/cache /mounted/cache \
+    --datasets md.futures_daily \
+    --sync-function module://my_library.sync_utils:SyncProvenance \
+    --sync-function-init-args '{"catalog_url": "https://catalog.example.com"}'
+
+# Retry post-sync functions after files were already copied
+python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache \
+    --run-sync-only
 ```
 
 GCS sync uses size-based change detection. Requires `pip install gcsfs`.
@@ -1374,6 +1392,94 @@ expected naming convention for the selected snapshot:
 required for provenance sidecars. Only sidecars with that exact name and
 location are synced automatically; custom provenance files elsewhere in the
 cache tree are not part of the sync contract and must be managed separately.
+
+Post-sync functions are optional side-effect hooks for work that should happen
+after selected cache files are copied. See [Sync Functions](#sync-functions).
+
+### Sync Functions
+
+Use sync functions when publishing a cache needs supplemental work after the
+snapshot files are in place, such as recording sync events, updating an
+external catalog, publishing asset-registry rows, or syncing auxiliary metadata
+that is intentionally outside the cache snapshot.
+
+Sync functions require a local source cache because YAML configuration and
+cache-local hook code are loaded from the source cache. The destination may be
+a local filesystem path, another disk or mounted filesystem, or GCS. Pulls,
+remote-source pushes, and remote-to-remote syncs do not run sync functions.
+
+Execution guarantees:
+
+- Functions run after all selected cache files have copied successfully.
+- Functions run serially in deterministic dataset/snapshot order, not in the
+  file-copy worker pool.
+- `--dry-run` cannot be combined with sync functions because hooks may perform
+  external side effects.
+- `--run-sync-only` verifies that selected destination snapshot files already
+  exist before running hooks.
+- One function failure stops subsequent functions and makes `sync-cache` exit
+  nonzero.
+- Files already copied are not rolled back.
+- Use `--run-sync-only` to retry the post-sync phase after fixing a failed
+  function.
+
+YAML-configured sync functions use the same location rules as DataSources:
+
+```yaml
+datasets:
+  md.futures_daily:
+    sync_function_location: code/sync_functions.py
+    sync_function_name: sync_provenance
+    sync_function_init_args:
+      catalog_url: https://catalog.example.com
+```
+
+Function example:
+
+```python
+from pathlib import Path
+
+
+def log_sync_event(
+    source_dataset_name: str,
+    dest_dataset_name: str,
+    dataset_type: str,
+    snapshot_id: str,
+    source_location: str,
+    dest_location: str,
+) -> None:
+    log_path = Path(dest_location) / "_sync_events.log"
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(
+            f"{dataset_type} {source_dataset_name} -> "
+            f"{dest_dataset_name} {snapshot_id}\n"
+        )
+```
+
+Class-based hooks can use `sync_function_init_args`:
+
+```python
+class CatalogPublisher:
+    def __init__(self, catalog_url: str):
+        self.catalog_url = catalog_url
+
+    def __call__(
+        self,
+        source_dataset_name: str,
+        dest_dataset_name: str,
+        dataset_type: str,
+        snapshot_id: str,
+        source_location: str,
+        dest_location: str,
+    ) -> None:
+        publish_snapshot_to_catalog(
+            catalog_url=self.catalog_url,
+            dataset=dest_dataset_name,
+            dataset_type=dataset_type,
+            snapshot=snapshot_id,
+            location=dest_location,
+        )
+```
 
 ### rename-cache
 

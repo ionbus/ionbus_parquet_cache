@@ -25,7 +25,8 @@ pip install -e .
 - YAML configuration helpers for declarative dataset setup
 - Snapshot lineage, cache history, YAML annotations, and optional external
   provenance sidecars
-- CLI modules for dataset creation, updating, cleanup, and cache sync
+- CLI modules for dataset creation, updating, cleanup, cache sync, and
+  post-sync hooks
 
 Full [documentation on GitHub](https://github.com/ionbus/ionbus_parquet_cache).
 

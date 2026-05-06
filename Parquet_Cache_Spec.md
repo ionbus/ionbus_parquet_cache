@@ -925,6 +925,9 @@ class FuturesDataCleaner(DataCleaner):
 | `source_location` | `str` | `""` | Location of the `DataSource` subclass. Resolution order: (1) if empty/blank, uses a built-in source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)); (2) if starts with `module://`, loads from an installed Python package (e.g., `module://my_library.data_sources`) — must use the importable module path, not the distribution name (see [Installed Module Data Sources](#installed-module-data-sources)); (3) otherwise treated as a filesystem path relative to cache root or absolute. If the module cannot be imported, the class is missing, or the class does not inherit from `DataSource`, dataset creation/update fails with a configuration error. |
 | `source_class_name` | `str` | required | Name of the `DataSource` subclass. When `source_location` is empty, this must be a built-in class name (e.g., `HiveParquetSource`, `DPDSource`). |
 | `source_init_args` | `dict` | `{}` | Non-secret arguments passed to the `DataSource` constructor as `**kwargs` |
+| `sync_function_location` | `str \| None` | `None` | Optional post-sync function location. Uses the same location rules as DataSources: empty for built-in, cache-local path such as `code/sync_functions.py`, or installed package via `module://pkg.mod`. |
+| `sync_function_name` | `str \| None` | `None` | Optional function or callable class name to run when sync functions are explicitly requested by `sync-cache`. |
+| `sync_function_init_args` | `dict` | `{}` | Non-secret keyword arguments used to instantiate class-based sync functions. Plain functions must not use init args. |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove after fetching data |
 | `columns_to_rename` | `dict[str, str]` | `{}` | Columns to rename: `{old_name: new_name}` |
 | `dropna_columns` | `list[str]` | `[]` | Drop rows where any of these columns are null |
@@ -2112,9 +2115,9 @@ class ExternalDataSource(DataSource):
 
 **Scope note:**
 
-The `module://` prefix currently applies only to `source_location` for
-`DataSource` classes. The mechanism could be extended to
-`cleaning_class_location` in the future if needed.
+The `module://` prefix applies to `source_location` for `DataSource` classes
+and to `sync_function_location` for post-sync functions. The mechanism could
+be extended to `cleaning_class_location` in the future if needed.
 
 ---
 
@@ -3423,8 +3426,9 @@ subset:
 - `instrument_scope="subset"` when `instruments` was explicitly provided.
   Store the sorted instrument list in `instruments`. This remains `"subset"`
   even if the caller explicitly listed every instrument in the dataset.
-- `instrument_scope="unknown"` for legacy snapshots or cases where the scope
-  cannot be determined.
+- `instrument_scope="unknown"` when no `instrument_column` is defined, for
+  legacy snapshots without lineage, or for other cases where the scope cannot
+  be determined.
 
 **External snapshot provenance:**
 
@@ -4188,17 +4192,20 @@ sync-cache push /path/to/cache /path/to/destination \
 ```
 
 For the first implementation, sync functions are supported only for
-local-source push operations to a remote destination:
+local-source push operations:
 
 ```bash
+sync-cache push /local/cache /mounted/cache --run-sync-functions
 sync-cache push /local/cache gs://bucket/cache --run-sync-functions
 ```
 
 If `--run-sync-functions`, `--run-sync-only`, or `--sync-function` is used with
-pull, local-to-local sync, or remote-to-remote sync, the command should fail
-with a clear error. This keeps config loading simple: YAML and cache-local code
-are loaded from the local source cache, and `module://` hooks are loaded from
-the local Python environment.
+pull, a remote source cache, remote-to-remote sync, or any destination backend
+that `sync-cache` cannot verify, the command should fail with a clear error.
+Local filesystem destinations, including other disks or mounted filesystems,
+are supported. This keeps config loading simple: YAML and cache-local code are
+loaded from the local source cache, and `module://` hooks are loaded from the
+local Python environment.
 
 `--run-sync-functions` runs configured sync functions only after all selected
 cache files have been copied successfully. It does not interleave copying and
@@ -4213,6 +4220,9 @@ the selected destination snapshot exists:
 - For DPDs, the destination metadata pickle, data files referenced by that
   snapshot, and any convention-named provenance sidecar should exist.
 - For NPDs, the destination snapshot file or snapshot directory should exist.
+
+These checks apply to both local filesystem destinations and supported remote
+destinations such as GCS.
 
 `--dry-run` is mutually exclusive with both `--run-sync-functions` and
 `--run-sync-only`. `--dry-run` is also mutually exclusive with
@@ -4440,6 +4450,27 @@ class SyncProvenance:
         # Implementation
         pass
 ```
+
+**Common sync-function patterns:**
+
+- **Record sync events:** append one row per selected dataset snapshot to an
+  audit table or log, including `dataset_type`, `dest_dataset_name`,
+  `snapshot_id`, and `dest_location`. This is useful for operational tracking
+  without adding mutable state to snapshot metadata.
+- **Update a metadata catalog:** publish destination cache locations,
+  checksums, first/last dates, lineage summaries, or provenance references to
+  an external catalog after the files are safely in place.
+- **Sync auxiliary metadata:** copy or transform user-owned metadata that is
+  intentionally outside the cache snapshot contract. Cache-local provenance
+  sidecars follow their own convention and are copied automatically; arbitrary
+  auxiliary files should be handled explicitly by a sync function.
+- **Handle reruns idempotently:** sync functions should tolerate
+  `--run-sync-only` retries. A function can check whether the external record
+  already exists for `(dest_dataset_name, dataset_type, snapshot_id)` and skip,
+  update, or verify it rather than blindly appending duplicates.
+- **Skip when nothing external is needed:** a sync function may return without
+  side effects for datasets, snapshots, or rerun conditions that do not need an
+  external catalog update.
 
 **When sync function errors occur:**
 

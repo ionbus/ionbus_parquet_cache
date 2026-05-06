@@ -7,13 +7,16 @@ Entry point: sync-cache
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ionbus_utils.file_utils import format_size, get_file_hash
 from ionbus_utils.logging_utils import logger
@@ -24,7 +27,16 @@ from ionbus_parquet_cache.cleanup_cache import (
     _discover_npd_snapshots,
 )
 from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
+from ionbus_parquet_cache.exceptions import ConfigurationError, SyncError
 from ionbus_parquet_cache.snapshot import extract_suffix_from_filename
+from ionbus_parquet_cache.sync_function_runner import (
+    SyncFunctionConfig,
+    SyncFunctionTarget,
+    load_sync_function,
+    parse_sync_function_spec,
+    run_sync_function,
+)
+from ionbus_parquet_cache.yaml_config import load_all_configs
 
 
 def sync_cache_main(args: list[str] | None = None) -> int:
@@ -48,7 +60,7 @@ def sync_cache_main(args: list[str] | None = None) -> int:
     )
     push_parser.add_argument("source", help="Source cache directory (local)")
     push_parser.add_argument(
-        "destination", help="Destination path (local or s3://)"
+        "destination", help="Destination path (local or gs://)"
     )
     _add_sync_options(push_parser)
 
@@ -56,7 +68,7 @@ def sync_cache_main(args: list[str] | None = None) -> int:
     pull_parser = subparsers.add_parser(
         "pull", help="Pull from source to local cache"
     )
-    pull_parser.add_argument("source", help="Source path (local or s3://)")
+    pull_parser.add_argument("source", help="Source path (local or gs://)")
     pull_parser.add_argument(
         "destination", help="Destination cache directory (local)"
     )
@@ -102,6 +114,16 @@ def sync_cache_main(args: list[str] | None = None) -> int:
         )
         return 1
 
+    sync_function_config: SyncFunctionConfig | None = None
+    try:
+        sync_function_config = _parse_cli_sync_function_config(
+            parsed.sync_function,
+            parsed.sync_function_init_args,
+        )
+    except ConfigurationError as e:
+        logger.error(f"Error: {e}")
+        return 1
+
     # Parse rename option
     rename_map: dict[str, str] = {}
     if parsed.rename:
@@ -133,6 +155,24 @@ def sync_cache_main(args: list[str] | None = None) -> int:
     # Route GCS operations
     src_is_gcs = parsed.source.startswith("gs://")
     dst_is_gcs = parsed.destination.startswith("gs://")
+    sync_functions_requested = (
+        parsed.run_sync_functions
+        or parsed.run_sync_only
+        or sync_function_config is not None
+    )
+
+    if sync_functions_requested:
+        if parsed.dry_run:
+            logger.error(
+                "Error: --dry-run cannot be used with sync functions"
+            )
+            return 1
+        if parsed.command != "push":
+            logger.error("Error: sync functions are supported only for push")
+            return 1
+        if src_is_gcs:
+            logger.error("Error: sync functions require a local source cache")
+            return 1
 
     if src_is_gcs or dst_is_gcs:
         try:
@@ -150,6 +190,9 @@ def sync_cache_main(args: list[str] | None = None) -> int:
                     verbose=parsed.verbose,
                     workers=parsed.workers,
                     rename_map=rename_map,
+                    run_sync_functions=parsed.run_sync_functions,
+                    run_sync_only=parsed.run_sync_only,
+                    sync_function_config=sync_function_config,
                 )
             else:  # pull
                 return _run_sync_pull_gcs(
@@ -189,6 +232,9 @@ def sync_cache_main(args: list[str] | None = None) -> int:
                 verbose=parsed.verbose,
                 workers=parsed.workers,
                 rename_map=rename_map,
+                run_sync_functions=parsed.run_sync_functions,
+                run_sync_only=parsed.run_sync_only,
+                sync_function_config=sync_function_config,
             )
         else:  # pull
             return _run_sync_pull(
@@ -261,6 +307,26 @@ def _add_sync_options(parser: argparse.ArgumentParser) -> None:
         help="Show what would be synced without copying",
     )
     parser.add_argument(
+        "--run-sync-functions",
+        action="store_true",
+        help="Run configured post-sync functions after copying",
+    )
+    parser.add_argument(
+        "--run-sync-only",
+        action="store_true",
+        help="Run configured sync functions without copying",
+    )
+    parser.add_argument(
+        "--sync-function",
+        metavar="LOCATION:NAME",
+        help="Run this sync function for selected snapshots",
+    )
+    parser.add_argument(
+        "--sync-function-init-args",
+        metavar="JSON",
+        help="Optional JSON kwargs for CLI sync function class",
+    )
+    parser.add_argument(
         "--delete",
         action="store_true",
         help="Delete files at destination not in source",
@@ -281,7 +347,56 @@ def _add_sync_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _parse_cli_sync_function_config(
+    sync_function: str | None,
+    init_args_json: str | None,
+) -> SyncFunctionConfig | None:
+    """Parse command-line sync function configuration."""
+    if init_args_json and not sync_function:
+        raise ConfigurationError(
+            "--sync-function-init-args requires --sync-function"
+        )
+    if not sync_function:
+        return None
+
+    location, name = parse_sync_function_spec(sync_function)
+    init_args: dict[str, Any] = {}
+    if init_args_json:
+        try:
+            parsed = json.loads(init_args_json)
+        except json.JSONDecodeError as e:
+            raise ConfigurationError(
+                f"--sync-function-init-args must be valid JSON: {e}"
+            ) from e
+        if not isinstance(parsed, dict):
+            raise ConfigurationError(
+                "--sync-function-init-args must decode to a JSON object"
+            )
+        init_args = parsed
+
+    return SyncFunctionConfig(
+        location=location,
+        name=name,
+        init_args=init_args,
+        context="Command-line sync function",
+    )
+
+
 _ETA_MIN_FILES = 3  # start showing ETA after this many files copied
+
+
+@dataclass(frozen=True)
+class _SelectedLocalSnapshot:
+    """Local source snapshot selected by sync-cache filters."""
+
+    dataset_name: str
+    dataset_type: str
+    suffix: str
+    snapshot: dict[str, Any]
+
+    def dest_dataset_name(self, rename_map: dict[str, str]) -> str:
+        """Return destination dataset name after any sync rename."""
+        return rename_map.get(self.dataset_name, self.dataset_name)
 
 
 def _format_eta(elapsed: float, done: int, total: int) -> str:
@@ -394,6 +509,8 @@ def _is_expected_gcs_dpd_provenance_rel(
 ) -> bool:
     """Return True for the convention-named DPD provenance sidecar."""
     parts = _rel_parts(rel_path)
+    # Provenance sync is intentionally convention-based. Only the standard
+    # per-snapshot sidecar is copied; arbitrary files in _provenance/ are not.
     return (
         len(parts) == 3
         and parts[0] == dataset_name
@@ -494,6 +611,79 @@ def _select_local_snapshots(
     return [max(snapshots, key=lambda s: s["suffix"])]
 
 
+def _collect_selected_local_snapshots(
+    source_path: Path,
+    dataset_names: list[str] | None,
+    ignore_dataset_names: list[str] | None,
+    dpd_only: bool,
+    npd_only: bool,
+    all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
+) -> list[_SelectedLocalSnapshot]:
+    """Return local snapshots selected by sync-cache filters."""
+    selected: list[_SelectedLocalSnapshot] = []
+
+    if not npd_only:
+        dpd_snapshots = _discover_dpd_snapshots(source_path, dataset_names)
+        if ignore_dataset_names:
+            dpd_snapshots = {
+                k: v
+                for k, v in dpd_snapshots.items()
+                if k not in ignore_dataset_names
+            }
+        for name, snapshots in dpd_snapshots.items():
+            if not snapshots:
+                continue
+            for snap in _select_local_snapshots(
+                snapshots,
+                all_snapshots,
+                snapshot_suffixes,
+            ):
+                selected.append(
+                    _SelectedLocalSnapshot(
+                        dataset_name=name,
+                        dataset_type="dpd",
+                        suffix=snap["suffix"],
+                        snapshot=snap,
+                    )
+                )
+
+    if not dpd_only:
+        npd_snapshots = _discover_npd_snapshots(source_path, dataset_names)
+        if ignore_dataset_names:
+            npd_snapshots = {
+                k: v
+                for k, v in npd_snapshots.items()
+                if k not in ignore_dataset_names
+            }
+        for name, snapshots in npd_snapshots.items():
+            if not snapshots:
+                continue
+            for snap in _select_local_snapshots(
+                snapshots,
+                all_snapshots,
+                snapshot_suffixes,
+            ):
+                selected.append(
+                    _SelectedLocalSnapshot(
+                        dataset_name=name,
+                        dataset_type="npd",
+                        suffix=snap["suffix"],
+                        snapshot=snap,
+                    )
+                )
+
+    type_order = {"dpd": 0, "npd": 1}
+    return sorted(
+        selected,
+        key=lambda item: (
+            type_order[item.dataset_type],
+            item.dataset_name,
+            item.suffix,
+        ),
+    )
+
+
 def _local_dpd_snapshot_files(snap: dict) -> list[Path]:
     """Return local files that belong to a DPD snapshot."""
     files = [snap["meta_file"]] + list(snap.get("files", []))
@@ -501,6 +691,8 @@ def _local_dpd_snapshot_files(snap: dict) -> list[Path]:
     if metadata.provenance is None:
         return files
 
+    # Provenance sync is intentionally convention-based. Even if metadata
+    # points elsewhere, sync-cache only copies the standard snapshot sidecar.
     dataset_dir = snap["meta_file"].parent.parent
     provenance_path = (
         dataset_dir
@@ -526,6 +718,9 @@ def _run_sync_push(
     verbose: bool,
     workers: int = 8,
     rename_map: dict[str, str] | None = None,
+    run_sync_functions: bool = False,
+    run_sync_only: bool = False,
+    sync_function_config: SyncFunctionConfig | None = None,
 ) -> int:
     """Execute push sync operation."""
     source_path = Path(source)
@@ -535,6 +730,35 @@ def _run_sync_push(
     if not source_path.exists():
         logger.error(f"Error: Source not found: {source}")
         return 1
+
+    selected_snapshots = _collect_selected_local_snapshots(
+        source_path=source_path,
+        dataset_names=dataset_names,
+        ignore_dataset_names=ignore_dataset_names,
+        dpd_only=dpd_only,
+        npd_only=npd_only,
+        all_snapshots=all_snapshots,
+        snapshot_suffixes=snapshot_suffixes,
+    )
+    pairs = _local_sync_pairs_from_selected(
+        source_path,
+        selected_snapshots,
+        rename_map,
+    )
+    sync_function_targets = _sync_function_targets_from_selected(
+        selected_snapshots,
+        source,
+        destination,
+        rename_map,
+    )
+
+    if run_sync_only:
+        _verify_destination_for_sync_only(destination, pairs)
+        return _run_post_sync_if_requested(
+            source_path=source_path,
+            targets=sync_function_targets,
+            sync_function_config=sync_function_config,
+        )
 
     # Create destination if needed
     if not dry_run:
@@ -560,64 +784,10 @@ def _run_sync_push(
         else:
             files_skipped += 1
 
-    if not npd_only:
-        dpd_snapshots = _discover_dpd_snapshots(source_path, dataset_names)
-        # Filter out ignored datasets
-        if ignore_dataset_names:
-            dpd_snapshots = {
-                k: v
-                for k, v in dpd_snapshots.items()
-                if k not in ignore_dataset_names
-            }
-        for name, snapshots in dpd_snapshots.items():
-            if not snapshots:
-                continue
-            targets = _select_local_snapshots(
-                snapshots, all_snapshots, snapshot_suffixes
-            )
-            for snap in targets:
-                for snapshot_file in _local_dpd_snapshot_files(snap):
-                    rel = snapshot_file.relative_to(source_path)
-                    dest_rel = _apply_rename(rel, rename_map)
-                    _collect(
-                        snapshot_file,
-                        dest_path / dest_rel,
-                        rel,
-                        dest_rel,
-                    )
-
-    if not dpd_only:
-        npd_snapshots = _discover_npd_snapshots(source_path, dataset_names)
-        # Filter out ignored datasets
-        if ignore_dataset_names:
-            npd_snapshots = {
-                k: v
-                for k, v in npd_snapshots.items()
-                if k not in ignore_dataset_names
-            }
-        for name, snapshots in npd_snapshots.items():
-            if not snapshots:
-                continue
-            targets = _select_local_snapshots(
-                snapshots, all_snapshots, snapshot_suffixes
-            )
-            for snap in targets:
-                item = snap["path"]
-                rel = item.relative_to(source_path)
-                dest_rel = _apply_rename(rel, rename_map)
-                if item.is_file():
-                    _collect(item, dest_path / dest_rel, rel, dest_rel)
-                else:
-                    for f in item.rglob("*"):
-                        if f.is_file():
-                            f_rel = f.relative_to(source_path)
-                            f_dest_rel = _apply_rename(f_rel, rename_map)
-                            _collect(
-                                f,
-                                dest_path / f_dest_rel,
-                                f_rel,
-                                f_dest_rel,
-                            )
+    for src, dest_rel_str in pairs:
+        rel = src.relative_to(source_path)
+        dest_rel = Path(dest_rel_str)
+        _collect(src, dest_path / dest_rel, rel, dest_rel)
 
     # --- Phase 2: copy with progress ---
     total = len(to_copy)
@@ -686,6 +856,13 @@ def _run_sync_push(
             f"{skip_msg}{delete_msg}"
         )
 
+    if run_sync_functions or sync_function_config is not None:
+        _run_post_sync_if_requested(
+            source_path=source_path,
+            targets=sync_function_targets,
+            sync_function_config=sync_function_config,
+        )
+
     return 0
 
 
@@ -705,6 +882,9 @@ def _run_sync_pull(
     verbose: bool,
     workers: int = 8,
     rename_map: dict[str, str] | None = None,
+    run_sync_functions: bool = False,
+    run_sync_only: bool = False,
+    sync_function_config: SyncFunctionConfig | None = None,
 ) -> int:
     """Execute pull sync operation."""
     while True:
@@ -746,63 +926,234 @@ def _collect_local_sync_files(
     Collect (local_file, relative_path_str) pairs from a local source cache.
     The relative_path_str has rename_map applied and uses forward slashes.
     """
+    selected_snapshots = _collect_selected_local_snapshots(
+        source_path=source_path,
+        dataset_names=dataset_names,
+        ignore_dataset_names=ignore_dataset_names,
+        dpd_only=dpd_only,
+        npd_only=npd_only,
+        all_snapshots=all_snapshots,
+        snapshot_suffixes=snapshot_suffixes,
+    )
+    return _local_sync_pairs_from_selected(
+        source_path,
+        selected_snapshots,
+        rename_map,
+    )
+
+
+def _local_sync_pairs_from_selected(
+    source_path: Path,
+    selected_snapshots: list[_SelectedLocalSnapshot],
+    rename_map: dict[str, str],
+) -> list[tuple[Path, str]]:
+    """Return selected local sync files without rediscovering snapshots."""
     pairs: list[tuple[Path, str]] = []
-
-    if not npd_only:
-        dpd_snapshots = _discover_dpd_snapshots(source_path, dataset_names)
-        # Filter out ignored datasets
-        if ignore_dataset_names:
-            dpd_snapshots = {
-                k: v
-                for k, v in dpd_snapshots.items()
-                if k not in ignore_dataset_names
-            }
-        for name, snapshots in dpd_snapshots.items():
-            if not snapshots:
-                continue
-            targets = _select_local_snapshots(
-                snapshots, all_snapshots, snapshot_suffixes
-            )
-            for snap in targets:
-                for f in _local_dpd_snapshot_files(snap):
-                    rel = _apply_rename(
-                        f.relative_to(source_path), rename_map
-                    )
-                    pairs.append((f, str(rel).replace("\\", "/")))
-
-    if not dpd_only:
-        npd_snapshots = _discover_npd_snapshots(source_path, dataset_names)
-        # Filter out ignored datasets
-        if ignore_dataset_names:
-            npd_snapshots = {
-                k: v
-                for k, v in npd_snapshots.items()
-                if k not in ignore_dataset_names
-            }
-        for name, snapshots in npd_snapshots.items():
-            if not snapshots:
-                continue
-            targets = _select_local_snapshots(
-                snapshots, all_snapshots, snapshot_suffixes
-            )
-            for snap in targets:
-                item = snap["path"]
-                rel_base = _apply_rename(
+    for selected in selected_snapshots:
+        if selected.dataset_type == "dpd":
+            for f in _local_dpd_snapshot_files(selected.snapshot):
+                rel = _apply_rename(
+                    f.relative_to(source_path),
+                    rename_map,
+                )
+                pairs.append((f, str(rel).replace("\\", "/")))
+        else:
+            item = selected.snapshot["path"]
+            if item.is_file():
+                rel = _apply_rename(
                     item.relative_to(source_path),
                     rename_map,
                 )
-                if item.is_file():
-                    pairs.append((item, str(rel_base).replace("\\", "/")))
-                else:
-                    for f in item.rglob("*"):
-                        if f.is_file():
-                            rel = _apply_rename(
-                                f.relative_to(source_path),
-                                rename_map,
-                            )
-                            pairs.append((f, str(rel).replace("\\", "/")))
+                pairs.append((item, str(rel).replace("\\", "/")))
+            else:
+                for f in item.rglob("*"):
+                    if f.is_file():
+                        rel = _apply_rename(
+                            f.relative_to(source_path),
+                            rename_map,
+                        )
+                        pairs.append((f, str(rel).replace("\\", "/")))
 
     return pairs
+
+
+def _sync_function_targets_from_selected(
+    selected_snapshots: list[_SelectedLocalSnapshot],
+    source: str,
+    destination: str,
+    rename_map: dict[str, str],
+) -> list[SyncFunctionTarget]:
+    """Return sync-function targets without rediscovering snapshots."""
+    return [
+        SyncFunctionTarget(
+            source_dataset_name=selected.dataset_name,
+            dest_dataset_name=selected.dest_dataset_name(rename_map),
+            dataset_type=selected.dataset_type,
+            snapshot_id=selected.suffix,
+            source_location=source,
+            dest_location=destination,
+        )
+        for selected in selected_snapshots
+    ]
+
+
+def _run_selected_sync_functions(
+    source_path: Path,
+    targets: list[SyncFunctionTarget],
+    sync_function_config: SyncFunctionConfig | None,
+) -> int:
+    """Load and run sync functions for selected targets."""
+    if not targets:
+        logger.info("0 sync functions run")
+        return 0
+
+    functions_run = 0
+    if sync_function_config is not None:
+        sync_function = load_sync_function(sync_function_config, source_path)
+        for target in targets:
+            logger.info(
+                "Running sync function for "
+                f"{target.dataset_type} {target.source_dataset_name} "
+                f"{target.snapshot_id}"
+            )
+            # Exceptions propagate immediately: later sync functions do not
+            # run, and files copied before this phase are not rolled back.
+            run_sync_function(sync_function, target)
+            functions_run += 1
+        logger.info(f"{functions_run} sync functions run")
+        return functions_run
+
+    yaml_configs = load_all_configs(source_path)
+    loaded_functions: dict[str, Any] = {}
+    for target in targets:
+        dataset_config = yaml_configs.get(target.source_dataset_name)
+        if dataset_config is None or not dataset_config.sync_function_name:
+            logger.warning(
+                "No sync function configured for "
+                f"{target.dataset_type} {target.source_dataset_name}; "
+                "skipping"
+            )
+            continue
+
+        if target.source_dataset_name not in loaded_functions:
+            config = SyncFunctionConfig(
+                location=dataset_config.sync_function_location,
+                name=dataset_config.sync_function_name,
+                init_args=dataset_config.sync_function_init_args,
+                context=(
+                    f"Dataset '{target.source_dataset_name}' sync function"
+                ),
+            )
+            loaded_functions[target.source_dataset_name] = load_sync_function(
+                config,
+                source_path,
+            )
+
+        logger.info(
+            "Running sync function for "
+            f"{target.dataset_type} {target.source_dataset_name} "
+            f"{target.snapshot_id}"
+        )
+        # Exceptions propagate immediately: later sync functions do not run,
+        # and files copied before this phase are not rolled back.
+        run_sync_function(
+            loaded_functions[target.source_dataset_name],
+            target,
+        )
+        functions_run += 1
+
+    if functions_run == 0:
+        logger.warning(
+            "No datasets with configured sync functions found. Check that "
+            "sync_function_name is set in YAML for the target datasets."
+        )
+    logger.info(f"{functions_run} sync functions run")
+    return functions_run
+
+
+def _verify_local_destination_files(
+    destination: str,
+    pairs: list[tuple[Path, str]],
+) -> None:
+    """Verify selected snapshot files exist at a local destination."""
+    dest_path = Path(destination)
+    missing = [
+        rel for _source_file, rel in pairs if not (dest_path / rel).exists()
+    ]
+    if missing:
+        raise SyncError(
+            "Destination is missing selected snapshot files: "
+            + ", ".join(missing[:5])
+            + (" ..." if len(missing) > 5 else "")
+        )
+
+
+def _verify_gcs_destination_files(
+    destination: str,
+    pairs: list[tuple[Path, str]],
+) -> None:
+    """Verify selected snapshot files exist at a GCS destination."""
+    from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_join
+
+    missing = []
+    for _source_file, rel in pairs:
+        dest_url = gcs_join(destination, rel)
+        if not gcs_exists(dest_url):
+            missing.append(rel)
+    if missing:
+        raise SyncError(
+            "Destination is missing selected snapshot files: "
+            + ", ".join(missing[:5])
+            + (" ..." if len(missing) > 5 else "")
+        )
+
+
+def _run_post_sync_if_requested(
+    source_path: Path,
+    targets: list[SyncFunctionTarget],
+    sync_function_config: SyncFunctionConfig | None,
+) -> int:
+    """Run configured or command-line post-sync functions."""
+    _run_selected_sync_functions(
+        source_path,
+        targets,
+        sync_function_config,
+    )
+    return 0
+
+
+def _selected_local_sync_pairs(
+    source_path: Path,
+    dataset_names: list[str] | None,
+    ignore_dataset_names: list[str] | None,
+    dpd_only: bool,
+    npd_only: bool,
+    all_snapshots: bool,
+    snapshot_suffixes: list[str] | None,
+    rename_map: dict[str, str],
+) -> list[tuple[Path, str]]:
+    """Collect selected local sync files for copy or verification."""
+    return _collect_local_sync_files(
+        source_path=source_path,
+        dataset_names=dataset_names,
+        ignore_dataset_names=ignore_dataset_names,
+        dpd_only=dpd_only,
+        npd_only=npd_only,
+        all_snapshots=all_snapshots,
+        snapshot_suffixes=snapshot_suffixes,
+        rename_map=rename_map,
+    )
+
+
+def _verify_destination_for_sync_only(
+    destination: str,
+    pairs: list[tuple[Path, str]],
+) -> None:
+    """Verify destination snapshot files before --run-sync-only hooks."""
+    if destination.startswith("gs://"):
+        _verify_gcs_destination_files(destination, pairs)
+    else:
+        _verify_local_destination_files(destination, pairs)
 
 
 def _run_sync_push_gcs(
@@ -818,6 +1169,9 @@ def _run_sync_push_gcs(
     verbose: bool,
     workers: int = 8,
     rename_map: dict[str, str] | None = None,
+    run_sync_functions: bool = False,
+    run_sync_only: bool = False,
+    sync_function_config: SyncFunctionConfig | None = None,
 ) -> int:
     """Push a local cache to GCS, or sync between two GCS locations."""
     from ionbus_parquet_cache.gcs_utils import (
@@ -834,6 +1188,13 @@ def _run_sync_push_gcs(
     rename_map = rename_map or {}
     src_is_gcs = is_gcs_path(source)
     dst_is_gcs = is_gcs_path(destination)
+    sync_functions_requested = (
+        run_sync_functions
+        or run_sync_only
+        or sync_function_config is not None
+    )
+    if sync_functions_requested and src_is_gcs:
+        raise SyncError("sync functions require a local source cache")
 
     from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_size
 
@@ -879,16 +1240,33 @@ def _run_sync_push_gcs(
         if not source_path.exists():
             logger.error(f"Error: Source not found: {source}")
             return 1
-        pairs = _collect_local_sync_files(
+        selected_snapshots = _collect_selected_local_snapshots(
+            source_path=source_path,
+            dataset_names=dataset_names,
+            ignore_dataset_names=ignore_dataset_names,
+            dpd_only=dpd_only,
+            npd_only=npd_only,
+            all_snapshots=all_snapshots,
+            snapshot_suffixes=snapshot_suffixes,
+        )
+        pairs = _local_sync_pairs_from_selected(
             source_path,
-            dataset_names,
-            ignore_dataset_names,
-            dpd_only,
-            npd_only,
-            all_snapshots,
-            snapshot_suffixes,
+            selected_snapshots,
             rename_map,
         )
+        sync_function_targets = _sync_function_targets_from_selected(
+            selected_snapshots,
+            source,
+            destination,
+            rename_map,
+        )
+        if run_sync_only:
+            _verify_destination_for_sync_only(destination, pairs)
+            return _run_post_sync_if_requested(
+                source_path=source_path,
+                targets=sync_function_targets,
+                sync_function_config=sync_function_config,
+            )
         for local_file, rel_str in pairs:
             dest_url = gcs_join(destination, rel_str)
             if not should_upload(local_file, dest_url):
@@ -950,6 +1328,14 @@ def _run_sync_push_gcs(
         )
         logger.info(
             f"Synced {total} files ({format_size(bytes_synced)}){skip_msg}"
+        )
+
+    if sync_functions_requested:
+        source_path = Path(source)
+        _run_post_sync_if_requested(
+            source_path=source_path,
+            targets=sync_function_targets,
+            sync_function_config=sync_function_config,
         )
 
     return 0

@@ -142,6 +142,57 @@ class TestLoadYamlFile:
             "timeout": 30,
         }
 
+    def test_load_sync_function_settings(self, temp_cache: Path) -> None:
+        """Should load optional post-sync function settings."""
+        yaml_path = temp_cache / "yaml" / "sync_function.yaml"
+        yaml_path.write_text("""
+datasets:
+    md.test_dataset:
+        sync_function_location: code/sync_functions.py
+        sync_function_name: SyncProvenance
+        sync_function_init_args:
+            catalog_url: https://catalog.example.com
+        source_class_name: TestSource
+""")
+
+        configs = load_yaml_file(yaml_path, temp_cache)
+        config = configs["md.test_dataset"]
+
+        assert config.sync_function_location == "code/sync_functions.py"
+        assert config.sync_function_name == "SyncProvenance"
+        assert config.sync_function_init_args == {
+            "catalog_url": "https://catalog.example.com"
+        }
+        yaml_config = config.to_yaml_config()
+        assert yaml_config["sync_function_location"] == (
+            "code/sync_functions.py"
+        )
+        assert yaml_config["sync_function_name"] == "SyncProvenance"
+        assert yaml_config["sync_function_init_args"] == {
+            "catalog_url": "https://catalog.example.com"
+        }
+
+    def test_sync_function_init_args_must_be_mapping(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Post-sync function init args must be a YAML mapping."""
+        yaml_path = temp_cache / "yaml" / "bad_sync_function.yaml"
+        yaml_path.write_text("""
+datasets:
+    bad:
+        sync_function_location: code/sync_functions.py
+        sync_function_name: SyncProvenance
+        sync_function_init_args:
+            - nope
+        source_class_name: TestSource
+""")
+
+        with pytest.raises(
+            ConfigurationError, match="sync_function_init_args"
+        ):
+            load_yaml_file(yaml_path, temp_cache)
+
     def test_load_annotations(self, temp_cache: Path) -> None:
         """Annotations should be preserved when explicitly supplied."""
         yaml_path = temp_cache / "yaml" / "annotations.yaml"

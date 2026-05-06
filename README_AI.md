@@ -300,6 +300,25 @@ requirements:
 - class must be obtainable via `getattr(module, class_name)` (top-level or re-exported)
 - see [credentials and secrets](#credentials-and-secrets) for secret handling
 
+## post-sync operations
+
+sync functions are optional hooks for work that should happen after
+`sync-cache push` has copied selected snapshot files. use them for external
+side effects such as updating an asset registry, recording audit rows, syncing
+auxiliary metadata, notifying a catalog, or writing publication markers.
+
+sync functions require a local source cache. YAML and cache-local hook code are
+loaded from that source cache, so `pull`, GCS-source push, and remote-to-remote
+post-sync runs are intentionally unsupported. local-source push may target a
+local filesystem path, another disk or mounted filesystem, or GCS.
+
+execution guarantees:
+- hooks run after all selected files copy successfully
+- hooks run serially in deterministic dataset/snapshot order
+- one hook failure stops remaining hooks
+- copied files are not rolled back
+- use `--run-sync-only` to retry hooks after file copy has already succeeded
+
 ---
 
 ## configuration reference
@@ -314,6 +333,12 @@ datasets:
     source_class_name: MyDataSource  # must inherit from DataSource
     source_init_args:  # kwargs passed to __init__
       api_endpoint: https://api.example.com
+
+    # optional post-sync function (runs only when sync-cache requests it)
+    sync_function_location: code/sync_functions.py  # or module://pkg.mod
+    sync_function_name: SyncProvenance
+    sync_function_init_args:
+      catalog_url: https://catalog.example.com
 
     # date partitioning (for DPD)
     date_col: date_column_name
@@ -347,6 +372,7 @@ datasets:
 - **num_instrument_buckets**: if set, enables bucketing. rows are distributed across `__instrument_bucket__=0/` ... `__instrument_bucket__=N/` based on `hash(instrument_column) % num_instrument_buckets`. breakingchanges with bucketing: bucketed datasets cannot be updated without full rebuild if you change `num_instrument_buckets`.
 - **sort_columns**: affects read performance. set to frequent filter columns.
 - **repull_n_days**: useful for datasets that correct historical data (e.g. option prices). e.g., `repull_n_days: 5` means "always fetch the last 5 business days, not just new dates".
+- **sync_function_***: optional post-sync hooks for `sync-cache push` from a local source. they run only with `--run-sync-functions`, `--run-sync-only`, or a CLI `--sync-function` override. cache-local hooks load from the local source cache; remote-source post-sync is unsupported.
 ---
 
 ## things not to do
