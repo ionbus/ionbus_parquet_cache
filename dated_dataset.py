@@ -837,6 +837,7 @@ class DatedParquetDataset(ParquetDataset):
 
         history: list[CacheHistoryEntry] = []
         seen: set[str] = set()
+        first_snapshot_id: str | None = None
         while suffix is not None:
             if suffix in seen:
                 history.append(
@@ -844,7 +845,7 @@ class DatedParquetDataset(ParquetDataset):
                         snapshot=suffix,
                         operation="unknown",
                         base_snapshot=None,
-                        first_snapshot_id=None,
+                        first_snapshot_id=first_snapshot_id,
                         requested_date_range=None,
                         added_date_ranges=[],
                         rewritten_date_ranges=[],
@@ -866,7 +867,7 @@ class DatedParquetDataset(ParquetDataset):
                         snapshot=suffix,
                         operation="unknown",
                         base_snapshot=None,
-                        first_snapshot_id=None,
+                        first_snapshot_id=first_snapshot_id,
                         requested_date_range=None,
                         added_date_ranges=[],
                         rewritten_date_ranges=[],
@@ -881,6 +882,8 @@ class DatedParquetDataset(ParquetDataset):
 
             entry = CacheHistoryEntry.from_metadata(metadata)
             history.append(entry)
+            if metadata.lineage is not None:
+                first_snapshot_id = metadata.lineage.first_snapshot_id
             if (
                 metadata.lineage is None
                 or metadata.lineage.base_snapshot is None

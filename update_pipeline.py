@@ -566,8 +566,9 @@ def _build_snapshot_lineage(
         base_snapshot = previous_metadata.suffix
         previous_lineage = getattr(previous_metadata, "lineage", None)
         first_snapshot_id = (
-            getattr(previous_lineage, "first_snapshot_id", None)
-            or previous_metadata.suffix
+            previous_lineage.first_snapshot_id
+            if previous_lineage is not None
+            else None
         )
         previous_end = previous_metadata.cache_end_date
 
@@ -579,7 +580,7 @@ def _build_snapshot_lineage(
     )
 
     if dataset.instrument_column is None:
-        instrument_scope = "none"
+        instrument_scope = "unknown"
         instrument_values = None
     elif instruments is None:
         instrument_scope = "all"

@@ -23,6 +23,8 @@ pip install -e .
 - `NonDatedParquetDataset` for full-refresh reference datasets
 - `DataSource` and `DataCleaner` extension points
 - YAML configuration helpers for declarative dataset setup
+- Snapshot lineage, cache history, YAML annotations, and optional external
+  provenance sidecars
 - CLI modules for dataset creation, updating, cleanup, and cache sync
 
 Full [documentation on GitHub](https://github.com/ionbus/ionbus_parquet_cache).

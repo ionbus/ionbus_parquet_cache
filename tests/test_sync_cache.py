@@ -19,6 +19,7 @@ from ionbus_parquet_cache.dated_dataset import (
     DatedParquetDataset,
     FileMetadata,
 )
+from ionbus_parquet_cache.snapshot_history import SnapshotProvenanceRef
 
 GCS_CACHE = "gs://bucket/cache"
 
@@ -284,6 +285,48 @@ class TestSyncPush:
             )
         )
         assert len(sidecars) == 1
+
+    def test_push_ignores_nonstandard_provenance_sidecar_name(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """Sync only guarantees the expected provenance sidecar name."""
+        dpd = DatedParquetDataset(
+            cache_dir=source_with_dpd,
+            name="test_dataset",
+            date_col="Date",
+            date_partition="month",
+        )
+        metadata = dpd._load_metadata()
+        custom_sidecar = (
+            dpd.dataset_dir / "_provenance" / "custom_provenance.pkl.gz"
+        )
+        custom_sidecar.parent.mkdir(parents=True, exist_ok=True)
+        custom_sidecar.write_bytes(b"custom")
+        metadata.provenance = SnapshotProvenanceRef(
+            path="_provenance/custom_provenance.pkl.gz",
+            checksum="not_checked_by_sync",
+            size_bytes=custom_sidecar.stat().st_size,
+        )
+        meta_path = dpd.meta_dir / f"test_dataset_{metadata.suffix}.pkl.gz"
+        metadata.to_pickle(meta_path)
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+            ]
+        )
+
+        assert result == 0
+        assert not (
+            dest_cache
+            / "test_dataset"
+            / "_provenance"
+            / "custom_provenance.pkl.gz"
+        ).exists()
 
     def test_push_dry_run_no_copy(
         self, source_with_dpd: Path, dest_cache: Path
@@ -562,6 +605,7 @@ class TestGcsBlobSelection:
             "dpd/_meta_data/dpd_1BBBBB0.pkl.gz",
             "dpd/month=M2024-01/data_1BBBBB0.parquet",
             "dpd/_provenance/dpd_1BBBBB0.provenance.pkl.gz",
+            "dpd/_provenance/custom_1BBBBB0.provenance.pkl.gz",
             "non-dated/ref/ref_1AAAAAA/data.parquet",
             "non-dated/ref/ref_1BBBBB0/data.parquet",
         ]

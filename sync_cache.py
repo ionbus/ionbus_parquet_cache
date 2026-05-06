@@ -381,6 +381,27 @@ def _is_gcs_dpd_metadata_rel(rel_path: str) -> bool:
     )
 
 
+def _is_gcs_dpd_provenance_rel(rel_path: str) -> bool:
+    """Return True when rel_path is under a DPD provenance directory."""
+    parts = _rel_parts(rel_path)
+    return len(parts) >= 3 and parts[1] == "_provenance"
+
+
+def _is_expected_gcs_dpd_provenance_rel(
+    rel_path: str,
+    dataset_name: str,
+    suffix: str,
+) -> bool:
+    """Return True for the convention-named DPD provenance sidecar."""
+    parts = _rel_parts(rel_path)
+    return (
+        len(parts) == 3
+        and parts[0] == dataset_name
+        and parts[1] == "_provenance"
+        and parts[2] == f"{dataset_name}_{suffix}.provenance.pkl.gz"
+    )
+
+
 def _select_snapshot_suffixes(
     available: dict[tuple[bool, str], set[str]],
     all_snapshots: bool,
@@ -433,6 +454,12 @@ def _collect_gcs_sync_blobs(
             continue
         if npd_only and not is_npd:
             continue
+        if (
+            not is_npd
+            and _is_gcs_dpd_provenance_rel(rel)
+            and not _is_expected_gcs_dpd_provenance_rel(rel, name, suffix)
+        ):
+            continue
 
         candidates.append((blob_url, rel, name, is_npd, suffix))
 
@@ -471,20 +498,17 @@ def _local_dpd_snapshot_files(snap: dict) -> list[Path]:
     """Return local files that belong to a DPD snapshot."""
     files = [snap["meta_file"]] + list(snap.get("files", []))
     metadata = SnapshotMetadata.from_pickle(snap["meta_file"])
-    provenance = metadata.provenance
-    if provenance is None:
+    if metadata.provenance is None:
         return files
 
     dataset_dir = snap["meta_file"].parent.parent
-    provenance_path = Path(provenance.path)
-    if not provenance_path.is_absolute():
-        provenance_path = dataset_dir / provenance_path
-    if not provenance_path.exists():
-        raise FileNotFoundError(
-            f"Snapshot {metadata.name}_{metadata.suffix} references "
-            f"missing provenance sidecar: {provenance_path}"
-        )
-    files.append(provenance_path)
+    provenance_path = (
+        dataset_dir
+        / "_provenance"
+        / f"{metadata.name}_{metadata.suffix}.provenance.pkl.gz"
+    )
+    if provenance_path.exists():
+        files.append(provenance_path)
     return files
 
 

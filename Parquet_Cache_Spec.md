@@ -4128,16 +4128,16 @@ When `sync-cache` selects a DPD snapshot, it copies:
 
 1. the snapshot metadata pickle,
 2. every parquet file referenced by that metadata,
-3. the provenance sidecar referenced by that metadata, if present.
+3. the provenance sidecar at the expected path, if present:
+   `_provenance/{dataset_name}_{snapshot_id}.provenance.pkl.gz`.
 
 No separate flag is required to sync provenance sidecars. They are part of the
 cache snapshot, unlike sync functions, which are optional external side
 effects. A snapshot with `provenance=None` has no sidecar to copy.
 
-If snapshot metadata references a provenance sidecar but the sidecar file is
-missing, the cache is internally inconsistent. `sync-cache` should fail with a
-clear error rather than silently producing a destination snapshot whose
-provenance reference is broken.
+The sync contract is convention-based. If a user creates or renames some other
+provenance-like file outside the expected snapshot naming convention,
+`sync-cache` does not promise to discover or copy it.
 
 For DPD `--snapshot` and `--all-snapshots`, provenance sidecars follow the same
 snapshot-selection rules as metadata and parquet files. For `--rename`,
@@ -4211,7 +4211,7 @@ function failed. Before calling a sync function, the command should verify that
 the selected destination snapshot exists:
 
 - For DPDs, the destination metadata pickle, data files referenced by that
-  snapshot, and any referenced provenance sidecar should exist.
+  snapshot, and any convention-named provenance sidecar should exist.
 - For NPDs, the destination snapshot file or snapshot directory should exist.
 
 `--dry-run` is mutually exclusive with both `--run-sync-functions` and

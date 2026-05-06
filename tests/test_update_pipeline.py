@@ -593,6 +593,7 @@ class TestExecuteUpdate:
         assert metadata.lineage is not None
         assert metadata.lineage.operation == "initial"
         assert metadata.lineage.first_snapshot_id == suffix
+        assert metadata.lineage.instrument_scope == "unknown"
         assert metadata.provenance is None
 
     def test_writes_provenance_sidecar(
@@ -690,6 +691,34 @@ class TestDPDUpdate:
             2,
             1,
         )
+
+    def test_update_from_legacy_snapshot_keeps_first_snapshot_unknown(
+        self,
+        simple_dpd: DatedParquetDataset,
+    ) -> None:
+        """A lineage-aware update should not guess legacy cache origin."""
+        simple_dpd._publish_snapshot(
+            files=[],
+            schema=pa.schema([("Date", pa.date32())]),
+            cache_start_date=dt.date(2024, 1, 1),
+            cache_end_date=dt.date(2024, 1, 31),
+            suffix="0000001",
+        )
+        assert simple_dpd._metadata is not None
+        assert simple_dpd._metadata.lineage is None
+
+        source = MockDataSource(simple_dpd)
+        suffix = simple_dpd.update(
+            source,
+            start_date=dt.date(2024, 2, 1),
+            end_date=dt.date(2024, 2, 29),
+        )
+
+        assert suffix is not None
+        metadata = simple_dpd._load_metadata()
+        assert metadata.lineage is not None
+        assert metadata.lineage.base_snapshot == "0000001"
+        assert metadata.lineage.first_snapshot_id is None
 
     def test_update_dry_run(self, simple_dpd: DatedParquetDataset) -> None:
         """Dry run should not create files."""

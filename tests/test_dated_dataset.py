@@ -417,6 +417,43 @@ class TestDatedDatasetProvenanceAndHistory:
         assert [entry.operation for entry in history] == ["update", "initial"]
         assert all(entry.status == "ok" for entry in history)
 
+    def test_cache_history_broken_link_preserves_first_snapshot_id(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """A missing base snapshot should not erase known first_snapshot_id."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            lineage=SnapshotLineage(
+                base_snapshot=None,
+                first_snapshot_id="1GZ5HK0",
+                operation="initial",
+                requested_date_range=None,
+            ),
+            suffix="1GZ5HK0",
+        )
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            lineage=SnapshotLineage(
+                base_snapshot="1GZ5HK0",
+                first_snapshot_id="1GZ5HK0",
+                operation="update",
+                requested_date_range=None,
+            ),
+            suffix="1GZ5HK1",
+        )
+        (dpd.meta_dir / "test_1GZ5HK0.pkl.gz").unlink()
+
+        history = dpd.cache_history()
+
+        assert [entry.snapshot for entry in history] == ["1GZ5HK1", "1GZ5HK0"]
+        assert history[1].status == "broken_link"
+        assert history[1].first_snapshot_id == "1GZ5HK0"
+
 
 class TestDatedDatasetPublish:
     """Tests for snapshot publishing."""
