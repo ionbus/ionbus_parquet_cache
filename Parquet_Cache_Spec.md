@@ -925,6 +925,9 @@ class FuturesDataCleaner(DataCleaner):
 | `source_location` | `str` | `""` | Location of the `DataSource` subclass. Resolution order: (1) if empty/blank, uses a built-in source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)); (2) if starts with `module://`, loads from an installed Python package (e.g., `module://my_library.data_sources`) — must use the importable module path, not the distribution name (see [Installed Module Data Sources](#installed-module-data-sources)); (3) otherwise treated as a filesystem path relative to cache root or absolute. If the module cannot be imported, the class is missing, or the class does not inherit from `DataSource`, dataset creation/update fails with a configuration error. |
 | `source_class_name` | `str` | required | Name of the `DataSource` subclass. When `source_location` is empty, this must be a built-in class name (e.g., `HiveParquetSource`, `DPDSource`). |
 | `source_init_args` | `dict` | `{}` | Non-secret arguments passed to the `DataSource` constructor as `**kwargs` |
+| `sync_function_location` | `str \| None` | `None` | Optional post-sync function location. Uses the same location rules as DataSources: empty for built-in, cache-local path such as `code/sync_functions.py`, or installed package via `module://pkg.mod`. |
+| `sync_function_name` | `str \| None` | `None` | Optional function or callable class name to run when sync functions are explicitly requested by `sync-cache`. |
+| `sync_function_init_args` | `dict` | `{}` | Non-secret keyword arguments used to instantiate class-based sync functions. Plain functions must not use init args. |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove after fetching data |
 | `columns_to_rename` | `dict[str, str]` | `{}` | Columns to rename: `{old_name: new_name}` |
 | `dropna_columns` | `list[str]` | `[]` | Drop rows where any of these columns are null |
@@ -2112,9 +2115,9 @@ class ExternalDataSource(DataSource):
 
 **Scope note:**
 
-The `module://` prefix currently applies only to `source_location` for
-`DataSource` classes. The mechanism could be extended to
-`cleaning_class_location` in the future if needed.
+The `module://` prefix applies to `source_location` for `DataSource` classes
+and to `sync_function_location` for post-sync functions. The mechanism could
+be extended to `cleaning_class_location` in the future if needed.
 
 ---
 

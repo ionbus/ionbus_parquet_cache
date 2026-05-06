@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -12,7 +13,9 @@ import pytest
 
 from ionbus_parquet_cache.sync_cache import (
     _collect_gcs_sync_blobs,
+    _collect_selected_local_snapshots,
     _should_copy_file,
+    _sync_function_targets_from_selected,
     sync_cache_main,
 )
 from ionbus_parquet_cache.dated_dataset import (
@@ -1142,6 +1145,53 @@ class TestPostSyncFunctions:
         assert "dpd|test_dataset|test_dataset|" in calls
         assert str(source_with_dpd) in calls
         assert str(dest_cache) in calls
+
+    def test_sync_targets_use_preselected_snapshots(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """Post-sync targets should not rediscover newer source snapshots."""
+        from ionbus_parquet_cache.snapshot import generate_snapshot_suffix
+
+        selected = _collect_selected_local_snapshots(
+            source_path=source_with_dpd,
+            dataset_names=None,
+            ignore_dataset_names=None,
+            dpd_only=False,
+            npd_only=False,
+            all_snapshots=False,
+            snapshot_suffixes=None,
+        )
+        selected_suffixes = [item.suffix for item in selected]
+
+        future_suffix = generate_snapshot_suffix(time.time() + 86_400)
+        assert future_suffix > selected_suffixes[0]
+
+        dpd = DatedParquetDataset(
+            cache_dir=source_with_dpd,
+            name="test_dataset",
+            date_col="Date",
+            date_partition="month",
+        )
+        dpd._publish_snapshot(
+            files=[],
+            schema=pa.schema([]),
+            cache_start_date=dt.date(2024, 2, 1),
+            cache_end_date=dt.date(2024, 2, 1),
+            partition_values={},
+            suffix=future_suffix,
+        )
+
+        targets = _sync_function_targets_from_selected(
+            selected,
+            str(source_with_dpd),
+            str(dest_cache),
+            {},
+        )
+
+        assert [target.snapshot_id for target in targets] == selected_suffixes
+        assert dpd._discover_current_suffix() == future_suffix
 
     def test_cli_class_sync_function_receives_init_args(
         self,

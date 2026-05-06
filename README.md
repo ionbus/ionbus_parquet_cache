@@ -1413,6 +1413,10 @@ Execution guarantees:
 - Functions run after all selected cache files have copied successfully.
 - Functions run serially in deterministic dataset/snapshot order, not in the
   file-copy worker pool.
+- `--dry-run` cannot be combined with sync functions because hooks may perform
+  external side effects.
+- `--run-sync-only` verifies that selected destination snapshot files already
+  exist before running hooks.
 - One function failure stops subsequent functions and makes `sync-cache` exit
   nonzero.
 - Files already copied are not rolled back.
