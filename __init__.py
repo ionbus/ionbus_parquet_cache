@@ -29,6 +29,12 @@ from ionbus_parquet_cache.snapshot import (
     extract_suffix_from_filename,
     get_current_suffix,
 )
+from ionbus_parquet_cache.snapshot_history import (
+    CacheHistoryEntry,
+    DateRange,
+    SnapshotLineage,
+    SnapshotProvenanceRef,
+)
 from ionbus_parquet_cache.partition import (
     PartitionSpec,
     DATE_PARTITION_GRANULARITIES,
@@ -67,6 +73,11 @@ from ionbus_parquet_cache.bucketing import (
     bucket_instruments,
 )
 
+try:
+    from ionbus_parquet_cache._version import __version__  # type: ignore
+except ImportError:
+    __version__ = "unknown"
+
 __all__ = [
     # Exceptions
     "ParquetCacheError",
@@ -84,6 +95,10 @@ __all__ = [
     "parse_snapshot_suffix",
     "extract_suffix_from_filename",
     "get_current_suffix",
+    "CacheHistoryEntry",
+    "DateRange",
+    "SnapshotLineage",
+    "SnapshotProvenanceRef",
     # Partition utilities
     "PartitionSpec",
     "DATE_PARTITION_GRANULARITIES",
@@ -122,5 +137,3 @@ __all__ = [
     "instrument_bucket",
     "bucket_instruments",
 ]
-
-__version__ = "0.1.0"

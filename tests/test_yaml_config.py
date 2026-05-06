@@ -105,7 +105,9 @@ class TestCleaner(DataCleaner):
 class TestLoadYamlFile:
     """Tests for load_yaml_file()."""
 
-    def test_load_basic_yaml(self, temp_cache: Path, sample_yaml: Path) -> None:
+    def test_load_basic_yaml(
+        self, temp_cache: Path, sample_yaml: Path
+    ) -> None:
         """Should load a basic YAML file."""
         configs = load_yaml_file(sample_yaml, temp_cache)
 
@@ -116,7 +118,9 @@ class TestLoadYamlFile:
         assert config.date_col == "Date"
         assert config.date_partition == "month"
 
-    def test_load_partition_columns(self, temp_cache: Path, sample_yaml: Path) -> None:
+    def test_load_partition_columns(
+        self, temp_cache: Path, sample_yaml: Path
+    ) -> None:
         """Should load partition and sort columns."""
         configs = load_yaml_file(sample_yaml, temp_cache)
 
@@ -124,14 +128,63 @@ class TestLoadYamlFile:
         assert config.partition_columns == ["symbol", "month"]
         assert config.sort_columns == ["symbol", "Date"]
 
-    def test_load_source_settings(self, temp_cache: Path, sample_yaml: Path) -> None:
+    def test_load_source_settings(
+        self, temp_cache: Path, sample_yaml: Path
+    ) -> None:
         """Should load data source settings."""
         configs = load_yaml_file(sample_yaml, temp_cache)
 
         config = configs["md.test_dataset"]
         assert config.source_location == "code/test_source.py"
         assert config.source_class_name == "TestSource"
-        assert config.source_init_args == {"api_key": "test123", "timeout": 30}
+        assert config.source_init_args == {
+            "api_key": "test123",
+            "timeout": 30,
+        }
+
+    def test_load_annotations(self, temp_cache: Path) -> None:
+        """Annotations should be preserved when explicitly supplied."""
+        yaml_path = temp_cache / "yaml" / "annotations.yaml"
+        yaml_path.write_text("""
+datasets:
+    annotated:
+        annotations:
+            bitmask:
+                1: active
+                2: stale
+        source_class_name: TestSource
+""")
+
+        configs = load_yaml_file(yaml_path, temp_cache)
+        config = configs["annotated"]
+
+        assert config.annotations == {"bitmask": {1: "active", 2: "stale"}}
+        assert config.to_yaml_config()["annotations"] == config.annotations
+
+    def test_omitted_annotations_stay_omitted(
+        self,
+        temp_cache: Path,
+        sample_yaml: Path,
+    ) -> None:
+        """Omitted annotations should not be added by to_yaml_config()."""
+        config = load_yaml_file(sample_yaml, temp_cache)["md.test_dataset"]
+
+        assert config.annotations is None
+        assert "annotations" not in config.to_yaml_config()
+
+    def test_annotations_must_be_mapping(self, temp_cache: Path) -> None:
+        """Annotations must be a YAML mapping when present."""
+        yaml_path = temp_cache / "yaml" / "bad_annotations.yaml"
+        yaml_path.write_text("""
+datasets:
+    bad:
+        annotations:
+            - nope
+        source_class_name: TestSource
+""")
+
+        with pytest.raises(ConfigurationError, match="annotations"):
+            load_yaml_file(yaml_path, temp_cache)
 
     def test_load_multiple_datasets(self, temp_cache: Path) -> None:
         """Should load multiple datasets from one file."""
@@ -173,7 +226,9 @@ datasets:
 class TestLoadAllConfigs:
     """Tests for load_all_configs()."""
 
-    def test_load_all_from_yaml_dir(self, temp_cache: Path, sample_yaml: Path) -> None:
+    def test_load_all_from_yaml_dir(
+        self, temp_cache: Path, sample_yaml: Path
+    ) -> None:
         """Should load all configs from yaml/ directory."""
         configs = load_all_configs(temp_cache)
 
@@ -209,13 +264,17 @@ class TestLoadAllConfigs:
 class TestGetDatasetConfig:
     """Tests for get_dataset_config()."""
 
-    def test_get_existing_dataset(self, temp_cache: Path, sample_yaml: Path) -> None:
+    def test_get_existing_dataset(
+        self, temp_cache: Path, sample_yaml: Path
+    ) -> None:
         """Should return config for existing dataset."""
         config = get_dataset_config(temp_cache, "md.test_dataset")
 
         assert config.name == "md.test_dataset"
 
-    def test_missing_dataset_raises(self, temp_cache: Path, sample_yaml: Path) -> None:
+    def test_missing_dataset_raises(
+        self, temp_cache: Path, sample_yaml: Path
+    ) -> None:
         """Missing dataset should raise ConfigurationError."""
         with pytest.raises(ConfigurationError, match="not found"):
             get_dataset_config(temp_cache, "nonexistent")
@@ -276,7 +335,9 @@ datasets:
         assert cleaner_class is not None
         assert issubclass(cleaner_class, DataCleaner)
 
-    def test_create_cleaner(self, temp_cache: Path, sample_cleaner_file: Path) -> None:
+    def test_create_cleaner(
+        self, temp_cache: Path, sample_cleaner_file: Path
+    ) -> None:
         """Should create a DataCleaner instance."""
         yaml_content = """
 datasets:
@@ -298,7 +359,9 @@ datasets:
         assert isinstance(cleaner, DataCleaner)
         assert cleaner.min_price == 1.5
 
-    def test_no_cleaner_returns_none(self, temp_cache: Path, sample_yaml: Path) -> None:
+    def test_no_cleaner_returns_none(
+        self, temp_cache: Path, sample_yaml: Path
+    ) -> None:
         """Should return None when no cleaner configured."""
         config = get_dataset_config(temp_cache, "md.test_dataset")
 
@@ -582,14 +645,19 @@ class TestInstalledModuleDataSource:
             config.load_source_class()
         assert "must inherit from DataSource" in str(exc_info.value)
 
-    def test_create_source_from_metadata_with_module(self, temp_cache: Path) -> None:
+    def test_create_source_from_metadata_with_module(
+        self, temp_cache: Path
+    ) -> None:
         """Should load DataSource from metadata with module:// location."""
         import datetime as dt
 
         import pandas as pd
         import pyarrow as pa
 
-        from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, FileMetadata
+        from ionbus_parquet_cache.dated_dataset import (
+            DatedParquetDataset,
+            FileMetadata,
+        )
 
         # Create a DPD and publish a snapshot with module:// metadata
         dpd = DatedParquetDataset(
@@ -642,4 +710,7 @@ class TestInstalledModuleDataSource:
         # Verify the source was instantiated correctly from module://
         assert source.__class__.__name__ == "HiveParquetSource"
         # Verify it's from the right module
-        assert source.__class__.__module__ == "ionbus_parquet_cache.builtin_sources"
+        assert (
+            source.__class__.__module__
+            == "ionbus_parquet_cache.builtin_sources"
+        )

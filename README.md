@@ -16,6 +16,7 @@
    * [Using with other tools](#using-with-other-tools)
    * [Checking for updates](#checking-for-updates)
    * [Reading from historical snapshots](#reading-from-historical-snapshots)
+   * [Snapshot history and provenance](#snapshot-history-and-provenance)
    * [Reading non-dated (reference) data](#reading-non-dated-reference-data)
 - [Dataset Types](#dataset-types)
    * [DatedParquetDataset (DPD)](#datedparquetdataset-dpd)
@@ -32,10 +33,13 @@
    * [Minimal example](#minimal-example)
    * [With chunking for large datasets](#with-chunking-for-large-datasets)
    * [Post-update bookkeeping](#post-update-bookkeeping)
+   * [Snapshot provenance](#snapshot-provenance)
    * [Built-in sources](#built-in-sources)
+- [Credentials and Secrets](#credentials-and-secrets)
 - [YAML Configuration](#yaml-configuration)
    * [Basic example](#basic-example)
    * [With data transformations](#with-data-transformations)
+   * [Annotations](#annotations)
    * [Configuration reference](#configuration-reference)
 - [Data Cleaning](#data-cleaning)
 - [Instrument Hash Bucketing](#instrument-hash-bucketing)
@@ -97,6 +101,7 @@ Maintainers: release instructions live in [RELEASING.md](RELEASING.md).
 - [Using Multiple Caches](#using-multiple-caches)
 - [Updating Data](#updating-data)
 - [Writing a DataSource](#writing-a-datasource)
+- [Credentials and Secrets](#credentials-and-secrets)
 - [YAML Configuration](#yaml-configuration)
 - [Data Cleaning](#data-cleaning)
 - [CLI Tools](#cli-tools)
@@ -396,6 +401,42 @@ df_pl = registry.read_data_pl("md.futures_daily", snapshot="1H4DW00")
 dataset = registry.pyarrow_dataset("md.futures_daily", snapshot="1H4DW00")
 ```
 
+### Snapshot history and provenance
+
+DPD snapshots include lineage metadata describing how each snapshot was
+produced. Use `cache_history()` to walk backward from the current snapshot, or
+from a specific snapshot, through each snapshot's `base_snapshot` link.
+
+```python
+dpd = registry.get_dataset("md.futures_daily")
+
+# Newest to oldest lineage entries for the current snapshot
+history = dpd.cache_history()
+
+for entry in history:
+    print(entry.snapshot, entry.operation, entry.base_snapshot)
+
+# The registry exposes the same API
+history = registry.cache_history("md.futures_daily", snapshot="1H4DW01")
+```
+
+Lineage records include the operation (`initial`, `update`, `backfill`,
+`restate`, or `unknown`), the base snapshot, the first snapshot in the cache
+lineage, requested/added/rewritten date ranges, and optional instrument scope.
+Legacy snapshots without lineage return a history entry with
+`status="missing_lineage"` instead of failing.
+
+If a DataSource stores external snapshot provenance, normal data reads and
+metadata loads do not load that payload. Load it explicitly when needed:
+
+```python
+provenance = dpd.read_provenance()
+provenance = registry.read_provenance("md.futures_daily", snapshot="1H4DW01")
+```
+
+If a snapshot has no external provenance sidecar, `read_provenance()` returns
+an empty dictionary.
+
 ### Reading non-dated (reference) data
 
 ```python
@@ -680,6 +721,43 @@ class MySource(DataSource):
 Common uses: writing audit trails, recording API call counts or checksums,
 updating a separate provenance table, sending a completion notification.
 
+### Snapshot provenance
+
+Use `get_provenance(suffix, previous_suffix)` when you want opaque,
+cache-local provenance to travel with a snapshot without being loaded during
+normal reads. The default implementation returns `{}`. If your DataSource
+returns a non-empty dictionary, the cache writes it as a gzip-compressed pickle
+sidecar under `_provenance/` and stores only a small reference in snapshot
+metadata.
+
+```python
+class MySource(DataSource):
+    def available_dates(self):
+        return (dt.date(2020, 1, 1), dt.date.today() - dt.timedelta(days=1))
+
+    def get_data(self, partition_spec):
+        return fetch_from_my_api(
+            start=partition_spec.start_date,
+            end=partition_spec.end_date,
+        )
+
+    def get_provenance(
+        self,
+        suffix: str,
+        previous_suffix: str | None,
+    ) -> dict:
+        return {
+            "api_endpoint": "daily_prices",
+            "request_start": self.start_date,
+            "request_end": self.end_date,
+            "previous_snapshot": previous_suffix,
+        }
+```
+
+Return `{}` to skip writing a sidecar. The hook must return a dictionary.
+Because provenance sidecars are pickles, treat synced caches that contain them
+as trusted Python artifacts, the same way you treat DPD snapshot metadata.
+
 ### Built-in sources
 
 For common cases, you don't need to write a DataSource:
@@ -743,7 +821,40 @@ To do this:
 
 The `source_location` must use the importable module path (e.g., `module://my_library.data_sources`), not the distribution name on PyPI (which might use hyphens, like `my-library`).
 
-If your DataSource needs credentials (API keys, database passwords), fetch them from environment variables. This is more portable than storing them in YAML.
+See [Credentials and Secrets](#credentials-and-secrets) for how to pass
+secrets safely to packaged DataSources.
+
+## Credentials and Secrets
+
+Do not store credentials, API keys, passwords, tokens, or private key material
+in YAML files. YAML configuration is saved into snapshot metadata and may be
+copied when caches are synced.
+
+Treat `source_init_args`, `cleaning_init_args`, and
+`sync_function_init_args` as non-secret configuration only: endpoint URLs,
+timeouts, project names, table names, and other values that are safe to keep in
+metadata. DataSources, DataCleaners, and sync functions that need secrets
+should read them from environment variables or an external credential provider
+and fail clearly if a required value is missing.
+
+Treat `annotations` and snapshot provenance sidecars as non-secret cache
+artifacts too. They are copied with snapshots and may be readable anywhere the
+cache is synced.
+
+```python
+import os
+
+from ionbus_parquet_cache import DataSource
+
+
+class MyDataSource(DataSource):
+    def __init__(self, dataset, endpoint: str):
+        super().__init__(dataset)
+        self.endpoint = endpoint
+        self.api_key = os.environ.get("MY_API_KEY")
+        if not self.api_key:
+            raise ValueError("MY_API_KEY environment variable is not set")
+```
 
 ## YAML Configuration
 
@@ -767,6 +878,14 @@ datasets:
     sort_columns:
       - Date
       - Symbol
+
+    # Small user-owned notes stored with snapshot metadata
+    annotations:
+      bitmask_columns:
+        StatusFlags:
+          1: active
+          2: stale
+          4: manually_verified
 
     # Where to get data
     source_location: code/futures_source.py
@@ -809,6 +928,22 @@ datasets:
     dedup_keep: last  # keep last occurrence
 ```
 
+### Annotations
+
+Use `annotations` for small, user-owned information that should be stored with
+the cache's captured YAML configuration, such as bitmask definitions, enum
+labels, units, or column notes. The parquet cache stores, carries forward, and
+checks annotations, but will not use annotations for anything.
+
+Annotations are append-only across a cache lineage. Later snapshots may add
+new keys, including nested keys, but may not remove existing keys or change
+existing values. For an existing cache, omitting `annotations` carries forward
+the previous snapshot's dictionary. Supplying `annotations: {}` is allowed only
+when the previous snapshot also has no annotations.
+
+Keep annotations small. Large audit records, source manifests, request logs, or
+process graphs belong in snapshot provenance via `DataSource.get_provenance()`.
+
 ### Configuration reference
 
 | Field | Type | Default | Description |
@@ -821,6 +956,7 @@ datasets:
 | `sort_columns` | `list[str]` | `[date_col]` | Sort order within partition files; defaults to `[date_col]` if not provided |
 | `repull_n_days` | `int` | `0` | Re-fetch this many recent business days on each update |
 | `row_group_size` | `int` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values enable row-group-level predicate pushdown at the cost of more file metadata. |
+| `annotations` | `dict` | `None` | Small user-owned notes stored in the captured YAML configuration. Append-only across snapshots: additions are allowed, removals and changes are rejected. |
 | `instrument_column` | `str` | `None` | Column name holding instrument identifiers (e.g., `"ticker"`). Required when `num_instrument_buckets` is set. |
 | `num_instrument_buckets` | `int` | `None` | Enable hash bucketing: group tickers into this many bucket directories instead of one directory per ticker. Must be set together with `instrument_column`. |
 | `instruments` | `list[str]` | `None` | List of instruments to filter on (uses `instrument_column`) |
@@ -828,7 +964,7 @@ datasets:
 | `end_date_str` | `str` | `None` | Override end date (debugging only, format: `"YYYY-MM-DD"`) |
 | `source_location` | `str` | `""` | Location of DataSource class: empty for built-in sources, `code/file.py` for cache-local file, `module://pkg.mod` for installed package |
 | `source_class_name` | `str` | required | Name of the DataSource class |
-| `source_init_args` | `dict` | `{}` | Arguments passed to DataSource constructor |
+| `source_init_args` | `dict` | `{}` | Non-secret arguments passed to DataSource constructor |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove from the data |
 | `columns_to_rename` | `dict[str, str]` | `{}` | Mapping of old column names to new names |
 | `dropna_columns` | `list[str]` | `[]` | Drop rows where any of these columns are null |
@@ -836,7 +972,7 @@ datasets:
 | `dedup_keep` | `str` | `"last"` | Which duplicate to keep: `"first"` or `"last"` |
 | `cleaning_class_location` | `str` | `None` | Path to Python file with DataCleaner class |
 | `cleaning_class_name` | `str` | `None` | Name of the DataCleaner class |
-| `cleaning_init_args` | `dict` | `{}` | Arguments passed to DataCleaner constructor |
+| `cleaning_init_args` | `dict` | `{}` | Non-secret arguments passed to DataCleaner constructor |
 
 ## Data Cleaning
 
@@ -1231,6 +1367,13 @@ python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache
 ```
 
 GCS sync uses size-based change detection. Requires `pip install gcsfs`.
+For DPDs, sync copies the snapshot metadata pickle, every parquet file
+referenced by that metadata, and any provenance sidecar that follows the
+expected naming convention for the selected snapshot:
+`_provenance/{dataset_name}_{snapshot_id}.provenance.pkl.gz`. No extra flag is
+required for provenance sidecars. Only sidecars with that exact name and
+location are synced automatically; custom provenance files elsewhere in the
+cache tree are not part of the sync contract and must be managed separately.
 
 ### rename-cache
 

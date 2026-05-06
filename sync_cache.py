@@ -23,6 +23,7 @@ from ionbus_parquet_cache.cleanup_cache import (
     _discover_dpd_snapshots,
     _discover_npd_snapshots,
 )
+from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
 from ionbus_parquet_cache.snapshot import extract_suffix_from_filename
 
 
@@ -46,7 +47,9 @@ def sync_cache_main(args: list[str] | None = None) -> int:
         "push", help="Push local cache to destination"
     )
     push_parser.add_argument("source", help="Source cache directory (local)")
-    push_parser.add_argument("destination", help="Destination path (local or s3://)")
+    push_parser.add_argument(
+        "destination", help="Destination path (local or s3://)"
+    )
     _add_sync_options(push_parser)
 
     # Pull subcommand
@@ -86,11 +89,13 @@ def sync_cache_main(args: list[str] | None = None) -> int:
         )
         return 1
 
-    mode_count = sum([
-        bool(parsed.datasets),
-        parsed.dpd_only,
-        parsed.npd_only,
-    ])
+    mode_count = sum(
+        [
+            bool(parsed.datasets),
+            parsed.dpd_only,
+            parsed.npd_only,
+        ]
+    )
     if mode_count > 1:
         logger.error(
             "Error: --datasets, --dpd-only, and --npd-only are mutually exclusive"
@@ -119,7 +124,9 @@ def sync_cache_main(args: list[str] | None = None) -> int:
             return 1
 
     # Check for S3 paths
-    if parsed.source.startswith("s3://") or parsed.destination.startswith("s3://"):
+    if parsed.source.startswith("s3://") or parsed.destination.startswith(
+        "s3://"
+    ):
         logger.error("Error: S3 sync is not yet implemented")
         return 1
 
@@ -259,12 +266,14 @@ def _add_sync_options(parser: argparse.ArgumentParser) -> None:
         help="Delete files at destination not in source",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Verbose output",
     )
     parser.add_argument(
-        "--workers", "-j",
+        "--workers",
+        "-j",
         type=int,
         default=8,
         metavar="N",
@@ -372,6 +381,27 @@ def _is_gcs_dpd_metadata_rel(rel_path: str) -> bool:
     )
 
 
+def _is_gcs_dpd_provenance_rel(rel_path: str) -> bool:
+    """Return True when rel_path is under a DPD provenance directory."""
+    parts = _rel_parts(rel_path)
+    return len(parts) >= 3 and parts[1] == "_provenance"
+
+
+def _is_expected_gcs_dpd_provenance_rel(
+    rel_path: str,
+    dataset_name: str,
+    suffix: str,
+) -> bool:
+    """Return True for the convention-named DPD provenance sidecar."""
+    parts = _rel_parts(rel_path)
+    return (
+        len(parts) == 3
+        and parts[0] == dataset_name
+        and parts[1] == "_provenance"
+        and parts[2] == f"{dataset_name}_{suffix}.provenance.pkl.gz"
+    )
+
+
 def _select_snapshot_suffixes(
     available: dict[tuple[bool, str], set[str]],
     all_snapshots: bool,
@@ -410,7 +440,7 @@ def _collect_gcs_sync_blobs(
     rename_map = rename_map or {}
 
     for blob_url in blob_urls:
-        rel = blob_url[len(source_prefix):].lstrip("/")
+        rel = blob_url[len(source_prefix) :].lstrip("/")
         info = _gcs_rel_snapshot_info(rel)
         if info is None:
             continue
@@ -423,6 +453,12 @@ def _collect_gcs_sync_blobs(
         if dpd_only and is_npd:
             continue
         if npd_only and not is_npd:
+            continue
+        if (
+            not is_npd
+            and _is_gcs_dpd_provenance_rel(rel)
+            and not _is_expected_gcs_dpd_provenance_rel(rel, name, suffix)
+        ):
             continue
 
         candidates.append((blob_url, rel, name, is_npd, suffix))
@@ -456,6 +492,24 @@ def _select_local_snapshots(
     if snapshot_suffixes:
         return [s for s in snapshots if s["suffix"] in snapshot_suffixes]
     return [max(snapshots, key=lambda s: s["suffix"])]
+
+
+def _local_dpd_snapshot_files(snap: dict) -> list[Path]:
+    """Return local files that belong to a DPD snapshot."""
+    files = [snap["meta_file"]] + list(snap.get("files", []))
+    metadata = SnapshotMetadata.from_pickle(snap["meta_file"])
+    if metadata.provenance is None:
+        return files
+
+    dataset_dir = snap["meta_file"].parent.parent
+    provenance_path = (
+        dataset_dir
+        / "_provenance"
+        / f"{metadata.name}_{metadata.suffix}.provenance.pkl.gz"
+    )
+    if provenance_path.exists():
+        files.append(provenance_path)
+    return files
 
 
 def _run_sync_push(
@@ -501,9 +555,7 @@ def _run_sync_push(
         nonlocal files_skipped
         synced_paths.add(dest_rel)
         if _should_copy_file(src, dst):
-            label = (
-                f"{rel} -> {dest_rel}" if rename_map else str(rel)
-            )
+            label = f"{rel} -> {dest_rel}" if rename_map else str(rel)
             to_copy.append((src, dst, label, src.stat().st_size))
         else:
             files_skipped += 1
@@ -513,7 +565,8 @@ def _run_sync_push(
         # Filter out ignored datasets
         if ignore_dataset_names:
             dpd_snapshots = {
-                k: v for k, v in dpd_snapshots.items()
+                k: v
+                for k, v in dpd_snapshots.items()
                 if k not in ignore_dataset_names
             }
         for name, snapshots in dpd_snapshots.items():
@@ -523,15 +576,14 @@ def _run_sync_push(
                 snapshots, all_snapshots, snapshot_suffixes
             )
             for snap in targets:
-                meta_file = snap["meta_file"]
-                rel = meta_file.relative_to(source_path)
-                dest_rel = _apply_rename(rel, rename_map)
-                _collect(meta_file, dest_path / dest_rel, rel, dest_rel)
-                for data_file in snap.get("files", []):
-                    rel = data_file.relative_to(source_path)
+                for snapshot_file in _local_dpd_snapshot_files(snap):
+                    rel = snapshot_file.relative_to(source_path)
                     dest_rel = _apply_rename(rel, rename_map)
                     _collect(
-                        data_file, dest_path / dest_rel, rel, dest_rel
+                        snapshot_file,
+                        dest_path / dest_rel,
+                        rel,
+                        dest_rel,
                     )
 
     if not dpd_only:
@@ -539,7 +591,8 @@ def _run_sync_push(
         # Filter out ignored datasets
         if ignore_dataset_names:
             npd_snapshots = {
-                k: v for k, v in npd_snapshots.items()
+                k: v
+                for k, v in npd_snapshots.items()
                 if k not in ignore_dataset_names
             }
         for name, snapshots in npd_snapshots.items():
@@ -700,7 +753,8 @@ def _collect_local_sync_files(
         # Filter out ignored datasets
         if ignore_dataset_names:
             dpd_snapshots = {
-                k: v for k, v in dpd_snapshots.items()
+                k: v
+                for k, v in dpd_snapshots.items()
                 if k not in ignore_dataset_names
             }
         for name, snapshots in dpd_snapshots.items():
@@ -710,9 +764,10 @@ def _collect_local_sync_files(
                 snapshots, all_snapshots, snapshot_suffixes
             )
             for snap in targets:
-                files_to_add = [snap["meta_file"]] + list(snap.get("files", []))
-                for f in files_to_add:
-                    rel = _apply_rename(f.relative_to(source_path), rename_map)
+                for f in _local_dpd_snapshot_files(snap):
+                    rel = _apply_rename(
+                        f.relative_to(source_path), rename_map
+                    )
                     pairs.append((f, str(rel).replace("\\", "/")))
 
     if not dpd_only:
@@ -720,7 +775,8 @@ def _collect_local_sync_files(
         # Filter out ignored datasets
         if ignore_dataset_names:
             npd_snapshots = {
-                k: v for k, v in npd_snapshots.items()
+                k: v
+                for k, v in npd_snapshots.items()
                 if k not in ignore_dataset_names
             }
         for name, snapshots in npd_snapshots.items():

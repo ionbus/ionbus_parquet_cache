@@ -10,7 +10,10 @@ import pyarrow as pa
 import pytest
 
 from ionbus_parquet_cache.cache_registry import CacheRegistry, DatasetType
-from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, FileMetadata
+from ionbus_parquet_cache.dated_dataset import (
+    DatedParquetDataset,
+    FileMetadata,
+)
 from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
 from ionbus_parquet_cache.exceptions import SnapshotNotFoundError
 
@@ -36,7 +39,9 @@ def cache_with_npd(tmp_path: Path) -> Path:
 
     # Create NPD
     npd = NonDatedParquetDataset(cache_dir=cache, name="ref.instruments")
-    df = pd.DataFrame({"symbol": ["AAPL", "GOOGL"], "name": ["Apple", "Alphabet"]})
+    df = pd.DataFrame(
+        {"symbol": ["AAPL", "GOOGL"], "name": ["Apple", "Alphabet"]}
+    )
     source = tmp_path / "source.parquet"
     df.to_parquet(source, index=False)
     npd.import_snapshot(source)
@@ -73,7 +78,11 @@ def cache_with_dpd(tmp_path: Path) -> Path:
 
     # Create schema and publish
     schema = pa.schema(
-        [("Date", pa.timestamp("ns")), ("price", pa.float64()), ("year", pa.string())]
+        [
+            ("Date", pa.timestamp("ns")),
+            ("price", pa.float64()),
+            ("year", pa.string()),
+        ]
     )
     file_metadata = FileMetadata(
         path="year=Y2024/md.prices_test.parquet",
@@ -219,7 +228,9 @@ class TestCacheRegistryGet:
         )
 
         # Should find DPD
-        dpd = registry.get_dataset("md.prices", dataset_type=DatasetType.DATED)
+        dpd = registry.get_dataset(
+            "md.prices", dataset_type=DatasetType.DATED
+        )
         assert dpd is not None
         assert isinstance(dpd, DatedParquetDataset)
 
@@ -250,6 +261,19 @@ class TestCacheRegistryGet:
             "md.prices", dataset_type=DatasetType.NON_DATED
         )
         assert result is None
+
+    def test_history_and_provenance_wrappers(
+        self,
+        cache_with_dpd: Path,
+    ) -> None:
+        """Registry should delegate DPD history and provenance APIs."""
+        registry = CacheRegistry.instance(test=cache_with_dpd)
+
+        assert registry.read_provenance("md.prices") == {}
+        history = registry.cache_history("md.prices")
+
+        assert len(history) == 1
+        assert history[0].status == "missing_lineage"
 
 
 class TestCacheRegistryReadData:
@@ -379,7 +403,11 @@ class TestCacheRegistryTrimmedFiles:
 
         # Create schema and publish
         schema = pa.schema(
-            [("Date", pa.timestamp("ns")), ("price", pa.float64()), ("year", pa.string())]
+            [
+                ("Date", pa.timestamp("ns")),
+                ("price", pa.float64()),
+                ("year", pa.string()),
+            ]
         )
         file_metadata = FileMetadata(
             path="year=Y2024/md.test_1Abc23.parquet",
@@ -441,7 +469,9 @@ class TestCacheRegistryLoadedState:
         assert isinstance(dpd, DatedParquetDataset)
         assert dpd._metadata is not None
 
-    def test_get_dpd_is_update_available_works(self, cache_with_dpd: Path) -> None:
+    def test_get_dpd_is_update_available_works(
+        self, cache_with_dpd: Path
+    ) -> None:
         """is_update_available() should work on DPD without additional I/O."""
         registry = CacheRegistry.instance(test=cache_with_dpd)
 
@@ -465,7 +495,9 @@ class TestCacheRegistryLoadedState:
 class TestCacheRegistryDiscoverAll:
     """Tests for discover_all_dpds() and discover_all_npds()."""
 
-    def test_discover_all_dpds_single_cache(self, cache_with_dpd: Path) -> None:
+    def test_discover_all_dpds_single_cache(
+        self, cache_with_dpd: Path
+    ) -> None:
         """discover_all_dpds() should find DPDs in a single cache."""
         registry = CacheRegistry.instance(test=cache_with_dpd)
 
@@ -490,10 +522,18 @@ class TestCacheRegistryDiscoverAll:
         )
         year_dir = dpd1.dataset_dir / "year=Y2024"
         year_dir.mkdir(parents=True)
-        df = pd.DataFrame({"Date": pd.to_datetime(["2024-01-15"]), "price": [100.0]})
+        df = pd.DataFrame(
+            {"Date": pd.to_datetime(["2024-01-15"]), "price": [100.0]}
+        )
         file_path = year_dir / "dataset1_test.parquet"
         df.to_parquet(file_path, index=False)
-        schema = pa.schema([("Date", pa.timestamp("ns")), ("price", pa.float64()), ("year", pa.string())])
+        schema = pa.schema(
+            [
+                ("Date", pa.timestamp("ns")),
+                ("price", pa.float64()),
+                ("year", pa.string()),
+            ]
+        )
         file_metadata = FileMetadata(
             path="year=Y2024/dataset1_test.parquet",
             partition_values={"year": "Y2024"},
@@ -542,7 +582,9 @@ class TestCacheRegistryDiscoverAll:
         assert result["dataset1"][0] == "first"
         assert result["dataset2"][0] == "second"
 
-    def test_discover_all_dpds_first_cache_precedence(self, tmp_path: Path) -> None:
+    def test_discover_all_dpds_first_cache_precedence(
+        self, tmp_path: Path
+    ) -> None:
         """discover_all_dpds() should use first cache for duplicate names."""
         cache1 = tmp_path / "cache1"
         cache2 = tmp_path / "cache2"
@@ -558,10 +600,18 @@ class TestCacheRegistryDiscoverAll:
             )
             year_dir = dpd.dataset_dir / "year=Y2024"
             year_dir.mkdir(parents=True)
-            df = pd.DataFrame({"Date": pd.to_datetime(["2024-01-15"]), "price": [100.0]})
+            df = pd.DataFrame(
+                {"Date": pd.to_datetime(["2024-01-15"]), "price": [100.0]}
+            )
             file_path = year_dir / "shared_dpd_test.parquet"
             df.to_parquet(file_path, index=False)
-            schema = pa.schema([("Date", pa.timestamp("ns")), ("price", pa.float64()), ("year", pa.string())])
+            schema = pa.schema(
+                [
+                    ("Date", pa.timestamp("ns")),
+                    ("price", pa.float64()),
+                    ("year", pa.string()),
+                ]
+            )
             file_metadata = FileMetadata(
                 path="year=Y2024/shared_dpd_test.parquet",
                 partition_values={"year": "Y2024"},
@@ -585,7 +635,9 @@ class TestCacheRegistryDiscoverAll:
         assert cache_name == "first"
         assert path == cache1 / "shared_dpd"
 
-    def test_discover_all_npds_single_cache(self, cache_with_npd: Path) -> None:
+    def test_discover_all_npds_single_cache(
+        self, cache_with_npd: Path
+    ) -> None:
         """discover_all_npds() should find NPDs in a single cache."""
         registry = CacheRegistry.instance(test=cache_with_npd)
 
@@ -621,7 +673,9 @@ class TestCacheRegistryDiscoverAll:
         assert result["ref1"][0] == "first"
         assert result["ref2"][0] == "second"
 
-    def test_discover_all_npds_first_cache_precedence(self, tmp_path: Path) -> None:
+    def test_discover_all_npds_first_cache_precedence(
+        self, tmp_path: Path
+    ) -> None:
         """discover_all_npds() should use first cache for duplicate names."""
         cache1 = tmp_path / "cache1"
         cache2 = tmp_path / "cache2"
@@ -769,7 +823,11 @@ class TestRefreshAll:
         df1.to_parquet(file_path, index=False)
 
         schema = pa.schema(
-            [("Date", pa.timestamp("ns")), ("price", pa.float64()), ("year", pa.string())]
+            [
+                ("Date", pa.timestamp("ns")),
+                ("price", pa.float64()),
+                ("year", pa.string()),
+            ]
         )
         file_metadata = FileMetadata(
             path="year=Y2024/data1.parquet",
@@ -853,7 +911,11 @@ class TestRefreshAll:
         df_dpd.to_parquet(file_path, index=False)
 
         schema = pa.schema(
-            [("Date", pa.timestamp("ns")), ("price", pa.float64()), ("year", pa.string())]
+            [
+                ("Date", pa.timestamp("ns")),
+                ("price", pa.float64()),
+                ("year", pa.string()),
+            ]
         )
         file_metadata = FileMetadata(
             path="year=Y2024/data.parquet",

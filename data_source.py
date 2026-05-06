@@ -29,7 +29,6 @@ from ionbus_parquet_cache.exceptions import DataSourceError, ValidationError
 from ionbus_parquet_cache.partition import (
     PartitionSpec,
     date_partition_column_name,
-    date_partition_value,
     date_partitions,
 )
 
@@ -113,7 +112,9 @@ class DataSource(ABC):
     chunk_values: dict[str, list[Any]] = {}
     # Optional function for dynamic chunk expansion. Takes a PartitionSpec and
     # returns a list of PartitionSpecs with different chunk_info values.
-    chunk_expander: Callable[[PartitionSpec], list[PartitionSpec]] | None = None
+    chunk_expander: Callable[[PartitionSpec], list[PartitionSpec]] | None = (
+        None
+    )
 
     # Instance attributes (declared for documentation, set in __init__)
     dataset: "DatedParquetDataset"
@@ -507,9 +508,11 @@ class DataSource(ABC):
         Called once after all partitions have been written and the snapshot
         is published.
 
-        Override to record provenance, write audit trails, log metadata, or
-        do any other bookkeeping. ``self.start_date``, ``self.end_date``, and
-        ``self.instruments`` are still set from ``prepare()`` at this point.
+        Override to write external audit trails, log metadata, or do any
+        other bookkeeping. Cache-local provenance that should travel with the
+        snapshot belongs in ``get_provenance()``. ``self.start_date``,
+        ``self.end_date``, and ``self.instruments`` are still set from
+        ``prepare()`` at this point.
 
         Args:
             suffix: The snapshot suffix that was just published.
@@ -517,6 +520,20 @@ class DataSource(ABC):
                 this update, or ``None`` if this is the first update of the
                 cache.
         """
+
+    def get_provenance(
+        self,
+        suffix: str,
+        previous_suffix: str | None,
+    ) -> dict[str, Any]:
+        """
+        Return optional cache-local provenance for this snapshot.
+
+        The default empty dictionary means no provenance sidecar is written.
+        Subclasses may return any non-empty dictionary of pickle-serializable
+        values to store outside snapshot metadata.
+        """
+        return {}
 
     def _do_prepare(
         self,
@@ -541,7 +558,10 @@ class DataSource(ABC):
             is_bucketed = INSTRUMENT_BUCKET_COL in getattr(
                 self.dataset, "partition_columns", []
             )
-            if not is_bucketed and instrument_col not in self.dataset.partition_columns:
+            if (
+                not is_bucketed
+                and instrument_col not in self.dataset.partition_columns
+            ):
                 raise ValidationError(
                     f"instrument_column '{instrument_col}' must be a partition "
                     f"column to use instruments filter. "

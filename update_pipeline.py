@@ -37,6 +37,7 @@ from ionbus_parquet_cache.partition import (
     date_partition_column_name,
 )
 from ionbus_parquet_cache.snapshot import generate_snapshot_suffix
+from ionbus_parquet_cache.snapshot_history import DateRange, SnapshotLineage
 
 if TYPE_CHECKING:
     from ionbus_parquet_cache.data_cleaner import DataCleaner
@@ -176,12 +177,16 @@ def build_update_plan(
     for spec in specs:
         key = spec.partition_key
         if key not in groups:
-            groups[key] = WriteGroup(partition_values=dict(spec.partition_values))
+            groups[key] = WriteGroup(
+                partition_values=dict(spec.partition_values)
+            )
         groups[key].specs.append(spec)
 
     # Assign temp file paths and final paths
     # Get the date partition column name for navigation directory logic
-    date_part_col = date_partition_column_name(dataset.date_partition, dataset.date_col)
+    date_part_col = date_partition_column_name(
+        dataset.date_partition, dataset.date_col
+    )
 
     for key, group in groups.items():
         # Build partition path components with navigation directories
@@ -313,7 +318,9 @@ def validate_schema(
             existing_field = existing_schema.field(schema_field.name)
             if not schema_field.type.equals(existing_field.type):
                 # Check if it's a compatible promotion
-                if not _types_compatible(existing_field.type, schema_field.type):
+                if not _types_compatible(
+                    existing_field.type, schema_field.type
+                ):
                     raise SchemaMismatchError(
                         f"Column '{schema_field.name}' type changed from "
                         f"{existing_field.type} to {schema_field.type}",
@@ -376,7 +383,9 @@ def _temporal_value_to_date(value: Any) -> dt.date | None:
         return value
     if hasattr(value, "date"):
         return value.date()
-    raise ValidationError(f"Expected date-like value, got {type(value).__name__}")
+    raise ValidationError(
+        f"Expected date-like value, got {type(value).__name__}"
+    )
 
 
 def _arrow_date_range(
@@ -415,7 +424,8 @@ def _arrow_temporal_scalar(
         return pa.scalar(timestamp_value, type=arrow_type)
 
     raise ValidationError(
-        f"Date column must be an Arrow date or timestamp type, got " f"{arrow_type}"
+        f"Date column must be an Arrow date or timestamp type, got "
+        f"{arrow_type}"
     )
 
 
@@ -475,6 +485,123 @@ def _filter_out_date_window(
     return existing_data.filter(pc.or_(before_window, after_window))
 
 
+def _make_date_range(
+    start_date: dt.date | None,
+    end_date: dt.date | None,
+) -> DateRange | None:
+    """Build a DateRange when both endpoints are present and ordered."""
+    if start_date is None or end_date is None or start_date > end_date:
+        return None
+    return DateRange(start_date=start_date, end_date=end_date)
+
+
+def _spec_date_window(
+    specs: list[PartitionSpec],
+) -> tuple[dt.date | None, dt.date | None]:
+    """Return the min/max requested dates across partition specs."""
+    starts = [
+        spec.start_date for spec in specs if spec.start_date is not None
+    ]
+    ends = [spec.end_date for spec in specs if spec.end_date is not None]
+    return (min(starts) if starts else None, max(ends) if ends else None)
+
+
+def _lineage_date_ranges(
+    previous_end: dt.date | None,
+    written_start: dt.date | None,
+    written_end: dt.date | None,
+    operation: str,
+) -> tuple[list[DateRange], list[DateRange]]:
+    """Split written dates into added vs rewritten lineage ranges."""
+    written = _make_date_range(written_start, written_end)
+    if written is None:
+        return ([], [])
+
+    if operation in ("initial", "backfill"):
+        return ([written], [])
+    if operation == "restate":
+        return ([], [written])
+    if previous_end is None or written.start_date > previous_end:
+        return ([written], [])
+
+    rewritten = _make_date_range(
+        written.start_date,
+        min(written.end_date, previous_end),
+    )
+    added = _make_date_range(
+        max(written.start_date, previous_end + dt.timedelta(days=1)),
+        written.end_date,
+    )
+    return (
+        [added] if added is not None else [],
+        [rewritten] if rewritten is not None else [],
+    )
+
+
+def _build_snapshot_lineage(
+    dataset: "DatedParquetDataset",
+    plan: UpdatePlan,
+    previous_metadata: Any,
+    requested_start: dt.date | None,
+    requested_end: dt.date | None,
+    written_start: dt.date | None,
+    written_end: dt.date | None,
+    backfill: bool,
+    restate: bool,
+    instruments: list[str] | None,
+) -> SnapshotLineage:
+    """Build SnapshotLineage for a completed update."""
+    if previous_metadata is None:
+        operation = "initial"
+        base_snapshot = None
+        first_snapshot_id = plan.suffix
+        previous_end = None
+    else:
+        if restate:
+            operation = "restate"
+        elif backfill:
+            operation = "backfill"
+        else:
+            operation = "update"
+        base_snapshot = previous_metadata.suffix
+        previous_lineage = getattr(previous_metadata, "lineage", None)
+        first_snapshot_id = (
+            previous_lineage.first_snapshot_id
+            if previous_lineage is not None
+            else None
+        )
+        previous_end = previous_metadata.cache_end_date
+
+    added, rewritten = _lineage_date_ranges(
+        previous_end,
+        written_start,
+        written_end,
+        operation,
+    )
+
+    if dataset.instrument_column is None:
+        instrument_scope = "unknown"
+        instrument_values = None
+    elif instruments is None:
+        instrument_scope = "all"
+        instrument_values = None
+    else:
+        instrument_scope = "subset"
+        instrument_values = [str(value) for value in instruments]
+
+    return SnapshotLineage(
+        base_snapshot=base_snapshot,
+        first_snapshot_id=first_snapshot_id,
+        operation=operation,
+        requested_date_range=_make_date_range(requested_start, requested_end),
+        added_date_ranges=added,
+        rewritten_date_ranges=rewritten,
+        instrument_column=dataset.instrument_column,
+        instrument_scope=instrument_scope,
+        instruments=instrument_values,
+    )
+
+
 def _apply_yaml_transforms(
     rel: "duckdb.DuckDBPyRelation",
     transforms: dict[str, Any] | None,
@@ -502,11 +629,15 @@ def _apply_yaml_transforms(
     columns_to_rename = transforms.get("columns_to_rename", {})
     if columns_to_rename:
         current_cols = rel.columns
-        other_cols = [f'"{c}"' for c in current_cols if c not in columns_to_rename]
+        other_cols = [
+            f'"{c}"' for c in current_cols if c not in columns_to_rename
+        ]
         renames = ", ".join(
             f'"{old}" AS "{new}"' for old, new in columns_to_rename.items()
         )
-        select_clause = ", ".join(other_cols + [renames]) if other_cols else renames
+        select_clause = (
+            ", ".join(other_cols + [renames]) if other_cols else renames
+        )
         rel = duckdb.sql(f"SELECT {select_clause} FROM rel")
 
     # 2. Drop columns
@@ -520,7 +651,9 @@ def _apply_yaml_transforms(
     # 3. Drop rows with nulls
     dropna_columns = transforms.get("dropna_columns", [])
     if dropna_columns:
-        conditions = " AND ".join(f'"{c}" IS NOT NULL' for c in dropna_columns)
+        conditions = " AND ".join(
+            f'"{c}" IS NOT NULL' for c in dropna_columns
+        )
         rel = duckdb.sql(f"SELECT * FROM rel WHERE {conditions}")
 
     # 4. Deduplicate
@@ -533,7 +666,9 @@ def _apply_yaml_transforms(
         key_cols = ", ".join(f'"{c}"' for c in dedup_columns)
 
         # Add row number to track input order
-        rel = duckdb.sql("SELECT *, ROW_NUMBER() OVER () AS _input_order FROM rel")
+        rel = duckdb.sql(
+            "SELECT *, ROW_NUMBER() OVER () AS _input_order FROM rel"
+        )
 
         if dedup_keep == "first":
             rel = duckdb.sql(
@@ -561,8 +696,12 @@ def execute_update(
     cleaner: "DataCleaner | None" = None,
     dry_run: bool = False,
     backfill: bool = False,
+    restate: bool = False,
     transforms: dict[str, Any] | None = None,
     yaml_config: dict[str, Any] | None = None,
+    update_start: dt.date | None = None,
+    update_end: dt.date | None = None,
+    instruments: list[str] | None = None,
 ) -> str:
     """
     Execute the update plan.
@@ -574,10 +713,14 @@ def execute_update(
         cleaner: Optional DataCleaner to apply.
         dry_run: If True, don't write any files.
         backfill: If True, preserve existing data and only add new rows.
+        restate: If True, replace data for the requested date range.
         transforms: Optional YAML transform settings (columns_to_rename,
             columns_to_drop, dropna_columns, dedup_columns, dedup_keep).
         yaml_config: Full YAML configuration to store in snapshot metadata.
             If provided, enables updating without the original YAML file.
+        update_start: Requested update start date for lineage.
+        update_end: Requested update end date for lineage.
+        instruments: Requested instrument subset for lineage.
 
     Returns:
         The new snapshot suffix.
@@ -588,9 +731,16 @@ def execute_update(
         SnapshotPublishError: If publishing fails.
     """
     assert not dataset.is_gcs
+    previous_metadata = dataset._metadata
     previous_suffix: str | None = (
-        dataset._metadata.suffix if dataset._metadata is not None else None
+        previous_metadata.suffix if previous_metadata is not None else None
     )
+    if instruments is None:
+        instruments = getattr(source, "instruments", None)
+    if update_start is None or update_end is None:
+        spec_start, spec_end = _spec_date_window(plan.specs_in_order)
+        update_start = update_start or spec_start
+        update_end = update_end or spec_end
     merged_schema: pa.Schema | None = None
     min_date: dt.date | None = None
     max_date: dt.date | None = None
@@ -691,7 +841,9 @@ def execute_update(
             )
 
         if dry_run:
-            logger.debug(f"Dry run complete for {dataset.name}, suffix={plan.suffix}")
+            logger.debug(
+                f"Dry run complete for {dataset.name}, suffix={plan.suffix}"
+            )
             return plan.suffix
 
         logger.debug(f"Consolidating {len(plan.groups)} partition groups")
@@ -701,8 +853,8 @@ def execute_update(
 
         # Get existing files from metadata for merge logic
         existing_files_by_partition: dict[tuple, Path] = {}
-        if dataset._metadata:
-            for fm in dataset._metadata.files:
+        if previous_metadata:
+            for fm in previous_metadata.files:
                 full_path = cast(Path, dataset.dataset_dir) / fm.path
                 if full_path.exists():
                     key = tuple(sorted(fm.partition_values.items()))
@@ -718,7 +870,9 @@ def execute_update(
 
             # Read all new data chunks (only files that were actually written;
             # a file is absent when get_data() returned None for that spec)
-            tables = [pq.read_table(f) for f in group.temp_files if f.exists()]
+            tables = [
+                pq.read_table(f) for f in group.temp_files if f.exists()
+            ]
             if not tables:
                 continue  # Every spec in this group was skipped
             new_data = pa.concat_tables(tables)
@@ -730,7 +884,8 @@ def execute_update(
             if existing_path and existing_path.exists():
                 existing_data = pq.read_table(existing_path)
                 existing_cols_to_drop = sorted(
-                    set(group.partition_values) & set(existing_data.column_names)
+                    set(group.partition_values)
+                    & set(existing_data.column_names)
                 )
                 if existing_cols_to_drop:
                     existing_data = existing_data.drop(existing_cols_to_drop)
@@ -789,9 +944,12 @@ def execute_update(
                 if temp_file.exists():
                     temp_file.unlink()
 
+        written_min_date = min_date
+        written_max_date = max_date
+
         # Include unchanged files from previous snapshot and merge metadata
-        if dataset._metadata:
-            for fm in dataset._metadata.files:
+        if previous_metadata:
+            for fm in previous_metadata.files:
                 key = tuple(sorted(fm.partition_values.items()))
                 if key not in updated_partition_keys:
                     full_path = cast(Path, dataset.dataset_dir) / fm.path
@@ -802,16 +960,23 @@ def execute_update(
                             partition_values_seen[col].add(val)
 
             # Extend date range to include previous snapshot dates
-            if dataset._metadata.cache_start_date:
-                if min_date is None or dataset._metadata.cache_start_date < min_date:
-                    min_date = dataset._metadata.cache_start_date
-            if dataset._metadata.cache_end_date:
-                if max_date is None or dataset._metadata.cache_end_date > max_date:
-                    max_date = dataset._metadata.cache_end_date
+            if previous_metadata.cache_start_date:
+                if (
+                    min_date is None
+                    or previous_metadata.cache_start_date < min_date
+                ):
+                    min_date = previous_metadata.cache_start_date
+            if previous_metadata.cache_end_date:
+                if (
+                    max_date is None
+                    or previous_metadata.cache_end_date > max_date
+                ):
+                    max_date = previous_metadata.cache_end_date
 
         # Build partition values dict for metadata
         pv_dict = {
-            col: sorted(list(vals)) for col, vals in partition_values_seen.items()
+            col: sorted(list(vals))
+            for col, vals in partition_values_seen.items()
         }
 
         logger.debug(
@@ -820,16 +985,51 @@ def execute_update(
             f"{max_date}"
         )
 
-        # Publish snapshot (use the suffix from the plan to match data files)
-        dataset._publish_snapshot(
-            files=file_metadata_list,
-            schema=merged_schema or pa.schema([]),
-            cache_start_date=min_date,
-            cache_end_date=max_date,
-            partition_values=pv_dict,
-            yaml_config=yaml_config,
-            suffix=plan.suffix,
-        )
+        provenance_ref = None
+        try:
+            provenance_payload = source.get_provenance(
+                plan.suffix,
+                previous_suffix,
+            )
+            if not isinstance(provenance_payload, dict):
+                raise ValidationError(
+                    f"{source.__class__.__name__}.get_provenance() must "
+                    f"return a dict, got {type(provenance_payload).__name__}"
+                )
+            if provenance_payload:
+                provenance_ref = dataset._write_provenance_sidecar(
+                    plan.suffix,
+                    provenance_payload,
+                )
+
+            lineage = _build_snapshot_lineage(
+                dataset=dataset,
+                plan=plan,
+                previous_metadata=previous_metadata,
+                requested_start=update_start,
+                requested_end=update_end,
+                written_start=written_min_date,
+                written_end=written_max_date,
+                backfill=backfill,
+                restate=restate,
+                instruments=instruments,
+            )
+
+            # Use plan.suffix so metadata matches the data file names.
+            dataset._publish_snapshot(
+                files=file_metadata_list,
+                schema=merged_schema or pa.schema([]),
+                cache_start_date=min_date,
+                cache_end_date=max_date,
+                partition_values=pv_dict,
+                yaml_config=yaml_config,
+                lineage=lineage,
+                provenance=provenance_ref,
+                suffix=plan.suffix,
+            )
+        except Exception:
+            dataset._delete_provenance_sidecar(provenance_ref)
+            raise
 
         logger.info(f"Published snapshot {plan.suffix} for {dataset.name}")
 

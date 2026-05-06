@@ -8,6 +8,9 @@ Metadata is stored in `_meta_data/` as pickled snapshot files.
 from __future__ import annotations
 
 import datetime as dt
+import gzip
+import pickle
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -44,6 +47,11 @@ from ionbus_parquet_cache.snapshot import (
     generate_snapshot_suffix,
     get_current_suffix,
     is_valid_suffix,
+)
+from ionbus_parquet_cache.snapshot_history import (
+    CacheHistoryEntry,
+    SnapshotLineage,
+    SnapshotProvenanceRef,
 )
 from ionbus_parquet_cache.update_pipeline import (
     build_update_plan,
@@ -94,7 +102,8 @@ class SnapshotMetadata:
         cache_start_date: Earliest date in the cache.
         cache_end_date: Latest date in the cache.
         partition_values: Dict of partition column -> distinct values.
-        created_at: Timestamp when snapshot was created.
+        lineage: How this snapshot was produced.
+        provenance: Optional reference to an external provenance sidecar.
         yaml_config: Full YAML configuration at time of snapshot.
     """
 
@@ -106,10 +115,22 @@ class SnapshotMetadata:
     cache_start_date: dt.date | None = None
     cache_end_date: dt.date | None = None
     partition_values: dict[str, list[Any]] = field(default_factory=dict)
-    created_at: dt.datetime = field(default_factory=dt.datetime.now)
+    lineage: SnapshotLineage | None = None
+    provenance: SnapshotProvenanceRef | None = None
+
+    def _normalize_legacy_state(self) -> None:
+        """Fill fields missing from older pickles and drop retired state."""
+        if not hasattr(self, "partition_values"):
+            self.partition_values = {}
+        if not hasattr(self, "lineage"):
+            self.lineage = None
+        if not hasattr(self, "provenance"):
+            self.provenance = None
+        self.__dict__.pop("created_at", None)
 
     def to_pickle(self, path: Path) -> None:
         """Save to pickle file."""
+        self._normalize_legacy_state()
         pd.to_pickle(
             self,
             path,
@@ -117,9 +138,16 @@ class SnapshotMetadata:
         )  # type: ignore
 
     @classmethod
-    def from_pickle(cls, path: Path) -> "SnapshotMetadata":
+    def from_pickle(cls, path: Any) -> "SnapshotMetadata":
         """Load from pickle file."""
-        return pd.read_pickle(path)
+        if isinstance(path, (str, Path)):
+            metadata = pd.read_pickle(path)
+        else:
+            with gzip.open(path, "rb") as gz:
+                metadata = pickle.load(gz)
+        if isinstance(metadata, cls):
+            metadata._normalize_legacy_state()
+        return metadata
 
 
 class DatedParquetDataset(ParquetDataset):
@@ -188,14 +216,19 @@ class DatedParquetDataset(ParquetDataset):
             self.sort_columns = [self.date_col]
 
         # Auto-append date partition column if not in partition_columns
-        date_part_col = date_partition_column_name(self.date_partition, self.date_col)
+        date_part_col = date_partition_column_name(
+            self.date_partition, self.date_col
+        )
         if date_part_col not in self.partition_columns:
             self.partition_columns = self.partition_columns + [date_part_col]
 
         # --- Instrument bucketing validation and setup ---
         # num_instrument_buckets requires instrument_column (but instrument_column
         # alone is valid for the non-bucketed partition-column use case)
-        if self.num_instrument_buckets is not None and self.instrument_column is None:
+        if (
+            self.num_instrument_buckets is not None
+            and self.instrument_column is None
+        ):
             raise ValidationError(
                 "instrument_column and num_instrument_buckets must both be set or both be None"
             )
@@ -217,7 +250,9 @@ class DatedParquetDataset(ParquetDataset):
                     "— the library manages its partitioning via __instrument_bucket__"
                 )
             # Inject __instrument_bucket__ before date partition col
-            other_cols = [c for c in self.partition_columns if c != date_part_col]
+            other_cols = [
+                c for c in self.partition_columns if c != date_part_col
+            ]
             self.partition_columns = (
                 [INSTRUMENT_BUCKET_COL] + other_cols + [date_part_col]
             )
@@ -238,6 +273,13 @@ class DatedParquetDataset(ParquetDataset):
         if self.is_gcs:
             return f"{self.cache_dir}/{self.name}/_meta_data"
         return self.dataset_dir / "_meta_data"  # type: ignore[union-attr]
+
+    @property
+    def provenance_dir(self) -> Path | str:
+        """Return the provenance sidecar directory path."""
+        if self.is_gcs:
+            return f"{self.cache_dir}/{self.name}/_provenance"
+        return self.dataset_dir / "_provenance"  # type: ignore[union-attr]
 
     def _discover_current_suffix(self) -> str | None:
         """
@@ -283,6 +325,40 @@ class DatedParquetDataset(ParquetDataset):
                     suffixes.append(suffix)
         return get_current_suffix(suffixes)
 
+    def _load_metadata_for_snapshot(self, suffix: str) -> SnapshotMetadata:
+        """
+        Load metadata for a specific snapshot suffix.
+
+        Args:
+            suffix: Snapshot suffix to load.
+
+        Raises:
+            SnapshotNotFoundError: If the metadata file does not exist.
+        """
+        if self.is_gcs:
+            meta_url = f"{self.meta_dir}/{self.name}_{suffix}.pkl.gz"
+            from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_open
+
+            if not gcs_exists(meta_url):
+                raise SnapshotNotFoundError(
+                    f"Snapshot '{suffix}' not found for DPD '{self.name}'",
+                    dataset_name=self.name,
+                )
+            logger.debug(f"Loading metadata for {self.name} from {meta_url}")
+            with gcs_open(meta_url) as f:
+                return SnapshotMetadata.from_pickle(f)
+
+        meta_path = (
+            self.meta_dir / f"{self.name}_{suffix}.pkl.gz"
+        )  # type: ignore[operator]
+        if not meta_path.exists():
+            raise SnapshotNotFoundError(
+                f"Snapshot '{suffix}' not found for DPD '{self.name}'",
+                dataset_name=self.name,
+            )
+        logger.debug(f"Loading metadata for {self.name} from {meta_path}")
+        return SnapshotMetadata.from_pickle(meta_path)
+
     def _load_metadata(self) -> SnapshotMetadata:
         """
         Load the current snapshot metadata.
@@ -302,27 +378,7 @@ class DatedParquetDataset(ParquetDataset):
                 dataset_name=self.name,
             )
 
-        if self.is_gcs:
-            meta_url = f"{self.meta_dir}/{self.name}_{self.current_suffix}.pkl.gz"
-            from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_open
-
-            if not gcs_exists(meta_url):
-                raise SnapshotNotFoundError(
-                    f"Metadata file not found: {meta_url}",
-                    dataset_name=self.name,
-                )
-            logger.debug(f"Loading metadata for {self.name} from {meta_url}")
-            with gcs_open(meta_url) as f:
-                metadata = pd.read_pickle(f)
-        else:
-            meta_path = self.meta_dir / f"{self.name}_{self.current_suffix}.pkl.gz"  # type: ignore[operator]
-            if not meta_path.exists():
-                raise SnapshotNotFoundError(
-                    f"Metadata file not found: {meta_path}",
-                    dataset_name=self.name,
-                )
-            logger.debug(f"Loading metadata for {self.name} from {meta_path}")
-            metadata = SnapshotMetadata.from_pickle(meta_path)
+        metadata = self._load_metadata_for_snapshot(self.current_suffix)
 
         # Validate num_instrument_buckets consistency
         stored_buckets = metadata.yaml_config.get("num_instrument_buckets")
@@ -380,25 +436,7 @@ class DatedParquetDataset(ParquetDataset):
         Raises:
             SnapshotNotFoundError: If the snapshot does not exist.
         """
-        if self.is_gcs:
-            meta_url = f"{self.meta_dir}/{self.name}_{suffix}.pkl.gz"
-            from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_open
-
-            if not gcs_exists(meta_url):
-                raise SnapshotNotFoundError(
-                    f"Snapshot '{suffix}' not found for DPD '{self.name}'",
-                    dataset_name=self.name,
-                )
-            with gcs_open(meta_url) as f:
-                metadata = pd.read_pickle(f)
-        else:
-            meta_path = self.meta_dir / f"{self.name}_{suffix}.pkl.gz"  # type: ignore[operator]
-            if not meta_path.exists():
-                raise SnapshotNotFoundError(
-                    f"Snapshot '{suffix}' not found for DPD '{self.name}'",
-                    dataset_name=self.name,
-                )
-            metadata = SnapshotMetadata.from_pickle(meta_path)
+        metadata = self._load_metadata_for_snapshot(suffix)
         return self._build_dataset_from_metadata(metadata, suffix)
 
     def _build_dataset_from_metadata(
@@ -584,6 +622,277 @@ class DatedParquetDataset(ParquetDataset):
 
         return result
 
+    def _default_yaml_config(self) -> dict[str, Any]:
+        """Build the default captured YAML config for this DPD."""
+        return {
+            "date_col": self.date_col,
+            "date_partition": self.date_partition,
+            "partition_columns": self.partition_columns,
+            "sort_columns": self.sort_columns or [self.date_col],
+            "description": self.description,
+            "start_date_str": self.start_date_str,
+            "end_date_str": self.end_date_str,
+            "repull_n_days": self.repull_n_days,
+            "instrument_column": self.instrument_column,
+            "instruments": self.instruments,
+            "num_instrument_buckets": self.num_instrument_buckets,
+            "row_group_size": self.row_group_size,
+        }
+
+    def _load_current_metadata_if_available(self) -> None:
+        """Populate _metadata when a current snapshot exists."""
+        if self._metadata is not None:
+            return
+        try:
+            self._metadata = self._load_metadata()
+        except SnapshotNotFoundError:
+            pass
+
+    def _existing_annotations(self) -> dict[str, Any]:
+        """Return annotations from the current snapshot, or an empty dict."""
+        self._load_current_metadata_if_available()
+        if self._metadata is None:
+            return {}
+        annotations = self._metadata.yaml_config.get("annotations", {})
+        if annotations is None:
+            return {}
+        if not isinstance(annotations, dict):
+            raise ValidationError(
+                f"Existing annotations for '{self.name}' must be a dict, "
+                f"got {type(annotations).__name__}"
+            )
+        return annotations
+
+    def _assert_annotations_append_only(
+        self,
+        old: dict[str, Any],
+        new: dict[str, Any],
+        path: str = "annotations",
+    ) -> None:
+        """Reject annotation removals and changes to existing values."""
+        for key, old_value in old.items():
+            child_path = f"{path}.{key}"
+            if key not in new:
+                raise ValidationError(
+                    f"{child_path} cannot be removed from annotations"
+                )
+
+            new_value = new[key]
+            if isinstance(old_value, dict) and isinstance(new_value, dict):
+                self._assert_annotations_append_only(
+                    old_value,
+                    new_value,
+                    child_path,
+                )
+            elif new_value != old_value:
+                raise ValidationError(
+                    f"{child_path} cannot change in annotations: "
+                    f"{old_value!r} -> {new_value!r}"
+                )
+
+    def _resolve_yaml_config_annotations(
+        self,
+        yaml_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """
+        Return a metadata config with watched annotations resolved.
+
+        Omitting annotations carries forward the previous snapshot's value.
+        Supplying annotations may add keys, but may not remove or change
+        existing keys.
+        """
+        resolved = (
+            self._default_yaml_config()
+            if yaml_config is None
+            else dict(yaml_config)
+        )
+        existing = self._existing_annotations()
+
+        if "annotations" not in resolved:
+            if existing:
+                resolved["annotations"] = deepcopy(existing)
+            return resolved
+
+        annotations = resolved["annotations"]
+        if annotations is None or not isinstance(annotations, dict):
+            raise ValidationError(
+                f"annotations for '{self.name}' must be a dict when supplied"
+            )
+
+        self._assert_annotations_append_only(existing, annotations)
+        return resolved
+
+    def _provenance_relative_path(self, suffix: str) -> str:
+        """Return the dataset-relative provenance sidecar path."""
+        return f"_provenance/{self.name}_{suffix}.provenance.pkl.gz"
+
+    def _write_provenance_sidecar(
+        self,
+        suffix: str,
+        payload: dict[str, Any],
+    ) -> SnapshotProvenanceRef:
+        """Write a gzip pickle provenance sidecar for a snapshot."""
+        assert not self.is_gcs
+        rel_path = self._provenance_relative_path(suffix)
+        sidecar_path = self.dataset_dir / rel_path  # type: ignore[operator]
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(sidecar_path, "wb") as f:
+            pickle.dump(
+                payload,
+                f,
+                protocol=SNAPSHOT_METADATA_PICKLE_PROTOCOL,
+            )
+        return SnapshotProvenanceRef(
+            path=rel_path,
+            checksum=get_file_hash(sidecar_path),
+            size_bytes=sidecar_path.stat().st_size,
+        )
+
+    def _delete_provenance_sidecar(
+        self,
+        provenance: SnapshotProvenanceRef | None,
+    ) -> None:
+        """Best-effort cleanup for an unpublished provenance sidecar."""
+        if self.is_gcs or provenance is None:
+            return
+        sidecar_path = (
+            self.dataset_dir / provenance.path
+        )  # type: ignore[operator]
+        try:
+            sidecar_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def read_provenance(self, snapshot: str | None = None) -> dict[str, Any]:
+        """
+        Load the optional external provenance sidecar for a snapshot.
+
+        Returns an empty dict when the snapshot has no provenance sidecar.
+        """
+        if snapshot is None:
+            if self._metadata is None:
+                self._metadata = self._load_metadata()
+            metadata = self._metadata
+        else:
+            metadata = self._load_metadata_for_snapshot(snapshot)
+
+        provenance = metadata.provenance
+        if provenance is None:
+            return {}
+
+        if self.is_gcs:
+            from ionbus_parquet_cache.gcs_utils import (
+                gcs_exists,
+                gcs_join,
+                gcs_open,
+            )
+
+            sidecar_url = gcs_join(str(self.dataset_dir), provenance.path)
+            if not gcs_exists(sidecar_url):
+                raise FileNotFoundError(
+                    f"Provenance sidecar not found: {sidecar_url}"
+                )
+            with gcs_open(sidecar_url) as f:
+                with gzip.open(f, "rb") as gz:
+                    payload = pickle.load(gz)
+        else:
+            sidecar_path = (
+                self.dataset_dir / provenance.path
+            )  # type: ignore[operator]
+            if not sidecar_path.exists():
+                raise FileNotFoundError(
+                    f"Provenance sidecar not found: {sidecar_path}"
+                )
+            if get_file_hash(sidecar_path) != provenance.checksum:
+                raise ValidationError(
+                    f"Provenance checksum mismatch for {sidecar_path}"
+                )
+            with gzip.open(sidecar_path, "rb") as f:
+                payload = pickle.load(f)
+
+        if not isinstance(payload, dict):
+            raise ValidationError(
+                f"Provenance sidecar for '{self.name}' must contain a dict"
+            )
+        return payload
+
+    def cache_history(
+        self,
+        snapshot: str | None = None,
+    ) -> list[CacheHistoryEntry]:
+        """
+        Return lineage history, walking backward from a snapshot.
+
+        The returned list starts with the requested/current snapshot and then
+        follows each lineage ``base_snapshot`` link backward.
+        """
+        suffix = snapshot
+        if suffix is None:
+            suffix = self.current_suffix or self._discover_current_suffix()
+        if suffix is None:
+            raise SnapshotNotFoundError(
+                f"No valid snapshot found for DPD '{self.name}'",
+                dataset_name=self.name,
+            )
+
+        history: list[CacheHistoryEntry] = []
+        seen: set[str] = set()
+        first_snapshot_id: str | None = None
+        while suffix is not None:
+            if suffix in seen:
+                history.append(
+                    CacheHistoryEntry(
+                        snapshot=suffix,
+                        operation="unknown",
+                        base_snapshot=None,
+                        first_snapshot_id=first_snapshot_id,
+                        requested_date_range=None,
+                        added_date_ranges=[],
+                        rewritten_date_ranges=[],
+                        instrument_column=None,
+                        instrument_scope="unknown",
+                        instruments=None,
+                        status="broken_link",
+                        message=f"Lineage cycle detected at {suffix}.",
+                    )
+                )
+                break
+            seen.add(suffix)
+
+            try:
+                metadata = self._load_metadata_for_snapshot(suffix)
+            except SnapshotNotFoundError as e:
+                history.append(
+                    CacheHistoryEntry(
+                        snapshot=suffix,
+                        operation="unknown",
+                        base_snapshot=None,
+                        first_snapshot_id=first_snapshot_id,
+                        requested_date_range=None,
+                        added_date_ranges=[],
+                        rewritten_date_ranges=[],
+                        instrument_column=None,
+                        instrument_scope="unknown",
+                        instruments=None,
+                        status="broken_link",
+                        message=str(e),
+                    )
+                )
+                break
+
+            entry = CacheHistoryEntry.from_metadata(metadata)
+            history.append(entry)
+            if metadata.lineage is not None:
+                first_snapshot_id = metadata.lineage.first_snapshot_id
+            if (
+                metadata.lineage is None
+                or metadata.lineage.base_snapshot is None
+            ):
+                break
+            suffix = metadata.lineage.base_snapshot
+
+        return history
+
     def _publish_snapshot(
         self,
         files: list[FileMetadata],
@@ -592,6 +901,8 @@ class DatedParquetDataset(ParquetDataset):
         cache_end_date: dt.date | None = None,
         partition_values: dict[str, list[Any]] | None = None,
         yaml_config: dict[str, Any] | None = None,
+        lineage: SnapshotLineage | None = None,
+        provenance: SnapshotProvenanceRef | None = None,
         suffix: str | None = None,
     ) -> str:
         """
@@ -606,6 +917,8 @@ class DatedParquetDataset(ParquetDataset):
             cache_end_date: Latest date in the cache.
             partition_values: Dict of partition column -> distinct values.
             yaml_config: Full YAML configuration at time of snapshot.
+            lineage: How this snapshot was produced.
+            provenance: Optional external provenance sidecar reference.
             suffix: Optional suffix to use. If None, generates a new one.
 
         Returns:
@@ -635,26 +948,16 @@ class DatedParquetDataset(ParquetDataset):
 
         # Build yaml_config with all DPD configuration fields if not provided
         if yaml_config is None:
-            yaml_config = {
-                "date_col": self.date_col,
-                "date_partition": self.date_partition,
-                "partition_columns": self.partition_columns,
-                "sort_columns": self.sort_columns or [self.date_col],
-                "description": self.description,
-                "start_date_str": self.start_date_str,
-                "end_date_str": self.end_date_str,
-                "repull_n_days": self.repull_n_days,
-                "instrument_column": self.instrument_column,
-                "instruments": self.instruments,
-                "num_instrument_buckets": self.num_instrument_buckets,
-                "row_group_size": self.row_group_size,
-            }
+            yaml_config = self._default_yaml_config()
         else:
             # Caller-supplied yaml_config may have pre-expansion partition_columns
             # (e.g. from DatasetConfig.to_yaml_config() which stores the YAML value
             # before model_post_init expands it). Always stamp the actual runtime
             # partition_columns so _build_dataset_from_metadata reads them correctly.
-            yaml_config = {**yaml_config, "partition_columns": self.partition_columns}
+            yaml_config = {
+                **yaml_config,
+                "partition_columns": self.partition_columns,
+            }
 
         # Build metadata
         metadata = SnapshotMetadata(
@@ -666,6 +969,8 @@ class DatedParquetDataset(ParquetDataset):
             cache_start_date=cache_start_date,
             cache_end_date=cache_end_date,
             partition_values=partition_values or {},
+            lineage=lineage,
+            provenance=provenance,
         )
 
         # Ensure metadata directory exists
@@ -821,7 +1126,9 @@ class DatedParquetDataset(ParquetDataset):
 
     @property
     def _lock_path(self) -> Path:
-        lock_root = self.lock_dir if self.lock_dir is not None else self.dataset_dir
+        lock_root = (
+            self.lock_dir if self.lock_dir is not None else self.dataset_dir
+        )
         return lock_root / f"{self.name}_update.lock"
 
     @staticmethod
@@ -875,11 +1182,18 @@ class DatedParquetDataset(ParquetDataset):
             started = info.get("started_at", "unknown")
             age = None
             try:
-                age = time.time() - dt.datetime.fromisoformat(started).timestamp()
+                age = (
+                    time.time()
+                    - dt.datetime.fromisoformat(started).timestamp()
+                )
             except Exception:
                 pass
 
-            age_str = f"{age / 60:.1f} minutes" if age is not None else "unknown age"
+            age_str = (
+                f"{age / 60:.1f} minutes"
+                if age is not None
+                else "unknown age"
+            )
             raise UpdateLockedError(
                 f"Dataset '{self.name}' is locked for update.\n"
                 f"  Lock file : {lock_path}\n"
@@ -1031,7 +1345,10 @@ class DatedParquetDataset(ParquetDataset):
         # instrument list on a bucketed dataset that already has a snapshot.
         # TODO: remove this guard once _BucketedDataSourceWrapper.get_data()
         # reads and merges existing bucket data before writing.
-        if self.num_instrument_buckets is not None and instruments is not None:
+        if (
+            self.num_instrument_buckets is not None
+            and instruments is not None
+        ):
             raise ValidationError(
                 f"Partial-instrument updates are not yet supported for bucketed "
                 f"datasets (num_instrument_buckets={self.num_instrument_buckets}). "
@@ -1043,13 +1360,17 @@ class DatedParquetDataset(ParquetDataset):
 
         # Validate backfill/restate constraints
         if backfill and restate:
-            raise ValidationError("backfill and restate are mutually exclusive")
+            raise ValidationError(
+                "backfill and restate are mutually exclusive"
+            )
 
         if backfill and end_date is not None:
             raise ValidationError("end_date not allowed with backfill=True")
 
         if restate and (start_date is None or end_date is None):
-            raise ValidationError("restate requires both start_date and end_date")
+            raise ValidationError(
+                "restate requires both start_date and end_date"
+            )
 
         # For backfill, auto-set end_date to cache_start - 1 day
         if backfill:
@@ -1060,7 +1381,9 @@ class DatedParquetDataset(ParquetDataset):
                     pass  # No existing cache, backfill is normal update
 
             if self._metadata and self._metadata.cache_start_date:
-                backfill_end = self._metadata.cache_start_date - dt.timedelta(days=1)
+                backfill_end = self._metadata.cache_start_date - dt.timedelta(
+                    days=1
+                )
                 end_date = backfill_end
 
                 # Validate backfill constraint: start must be before cache_start
@@ -1127,6 +1450,8 @@ class DatedParquetDataset(ParquetDataset):
                     f"Got: {type(source).__name__}"
                 )
 
+        yaml_config = self._resolve_yaml_config_annotations(yaml_config)
+
         # Prepare source
         source._do_prepare(update_start, update_end, instruments)
 
@@ -1142,7 +1467,9 @@ class DatedParquetDataset(ParquetDataset):
         temp_dir = self.dataset_dir / f"_tmp_{plan_suffix}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         try:
-            plan = build_update_plan(self, specs, temp_dir, suffix=plan_suffix)
+            plan = build_update_plan(
+                self, specs, temp_dir, suffix=plan_suffix
+            )
             # plan.suffix == plan_suffix, so temp dir name matches snapshot suffix
 
             # Execute update
@@ -1153,8 +1480,12 @@ class DatedParquetDataset(ParquetDataset):
                 cleaner=cleaner,
                 dry_run=dry_run,
                 backfill=backfill,
+                restate=restate,
                 transforms=transforms,
                 yaml_config=yaml_config,
+                update_start=update_start,
+                update_end=update_end,
+                instruments=instruments,
             )
         finally:
             # Clean up temp dir
@@ -1196,7 +1527,9 @@ class DatedParquetDataset(ParquetDataset):
             ValueError: If ``instruments`` is given but
                 ``instrument_column`` is not set.
         """
-        combined_filters = self._build_instrument_filters(instruments, filters)
+        combined_filters = self._build_instrument_filters(
+            instruments, filters
+        )
         return super().read_data(
             start_date=start_date,
             end_date=end_date,
@@ -1219,7 +1552,9 @@ class DatedParquetDataset(ParquetDataset):
 
         See :meth:`read_data` for parameter documentation.
         """
-        combined_filters = self._build_instrument_filters(instruments, filters)
+        combined_filters = self._build_instrument_filters(
+            instruments, filters
+        )
         return super().read_data_pl(
             start_date=start_date,
             end_date=end_date,
@@ -1273,9 +1608,13 @@ class DatedParquetDataset(ParquetDataset):
         if existing_filters is None:
             return new_filters
         if isinstance(existing_filters, pds.Expression):
-            row_expr = pds.field(self.instrument_column).isin(instrument_values)
+            row_expr = pds.field(self.instrument_column).isin(
+                instrument_values
+            )
             if bucket_values is not None:
-                bucket_expr = pds.field(INSTRUMENT_BUCKET_COL).isin(bucket_values)
+                bucket_expr = pds.field(INSTRUMENT_BUCKET_COL).isin(
+                    bucket_values
+                )
                 return bucket_expr & row_expr & existing_filters
             return row_expr & existing_filters
         # Assume it's a list of tuples

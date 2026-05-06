@@ -22,6 +22,7 @@ from ionbus_parquet_cache.exceptions import (
     ConfigurationError,
     DataSourceError,
     SnapshotNotFoundError,
+    ValidationError,
 )
 from ionbus_parquet_cache.yaml_config import load_yaml_file
 from ionbus_utils.logging_utils import logger
@@ -60,9 +61,13 @@ def check_config_consistency(
 
         # Normalize None vs empty list/dict
         if yaml_value is None:
-            yaml_value = [] if field in ("partition_columns", "sort_columns") else None
+            yaml_value = (
+                [] if field in ("partition_columns", "sort_columns") else None
+            )
         if stored_value is None:
-            stored_value = [] if field in ("partition_columns", "sort_columns") else None
+            stored_value = (
+                [] if field in ("partition_columns", "sort_columns") else None
+            )
 
         # Normalize sort_columns default
         if field == "sort_columns":
@@ -142,7 +147,8 @@ def create_cache_main(args: list[str] | None = None) -> int:
         help="Keep existing cache config, only use YAML for DataSource definition",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Verbose output",
     )
@@ -151,9 +157,7 @@ def create_cache_main(args: list[str] | None = None) -> int:
 
     # Validate arguments
     if parsed.backfill and parsed.restate:
-        logger.error(
-            "Error: --backfill and --restate are mutually exclusive"
-        )
+        logger.error("Error: --backfill and --restate are mutually exclusive")
         return 1
 
     if parsed.backfill and parsed.end_date:
@@ -179,9 +183,7 @@ def create_cache_main(args: list[str] | None = None) -> int:
         try:
             start_date = dt.date.fromisoformat(parsed.start_date)
         except ValueError:
-            logger.error(
-                f"Error: Invalid start date: {parsed.start_date}"
-            )
+            logger.error(f"Error: Invalid start date: {parsed.start_date}")
             return 1
 
     if parsed.end_date:
@@ -254,17 +256,13 @@ def _run_create_from_yaml(
     # Load configs from the YAML file
     configs = load_yaml_file(yaml_path, cache_path)
     if not configs:
-        logger.error(
-            f"Error: No dataset configurations found in {yaml_path}"
-        )
+        logger.error(f"Error: No dataset configurations found in {yaml_path}")
         return 1
 
     # Filter to requested dataset
     if dataset_name:
         if dataset_name not in configs:
-            logger.error(
-                f"Error: Dataset '{dataset_name}' not found in YAML"
-            )
+            logger.error(f"Error: Dataset '{dataset_name}' not found in YAML")
             return 1
         configs = {dataset_name: configs[dataset_name]}
 
@@ -351,7 +349,9 @@ def _run_create_from_yaml(
 
             # Use stored config if preserving, otherwise use YAML config
             config_for_metadata = (
-                stored_config if preserve_config and stored_config else yaml_config
+                stored_config
+                if preserve_config and stored_config
+                else yaml_config
             )
 
             suffix = dpd.update(
@@ -376,7 +376,7 @@ def _run_create_from_yaml(
             else:
                 logger.info(f"  {name}: no update needed")
 
-        except (ConfigurationError, DataSourceError) as e:
+        except (ConfigurationError, DataSourceError, ValidationError) as e:
             logger.error(f"  {name}: ERROR - {e}")
             error_count += 1
 

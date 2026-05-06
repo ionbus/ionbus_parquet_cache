@@ -16,6 +16,7 @@
     * [`DatedParquetDataset`](#datedparquetdataset)
     * [`NonDatedParquetDataset`](#nondatedparquetdataset)
 - [YAML Configuration](#yaml-configuration)
+- [Credentials and Secrets](#credentials-and-secrets)
 - [Data Source Interface](#data-source-interface)
     * [`DataSource` abstract class](#datasource-abstract-class)
     * [Implementing a `DataSource`](#implementing-a-datasource)
@@ -101,8 +102,11 @@ The update flow should be implemented as a deterministic state machine:
 3. `transform`: apply YAML transformations and optional `DataCleaner` on DuckDB relations.
 4. `write_temp`: write new parquet files to temporary paths and compute checksums/size.
 5. `validate`: verify schema compatibility and file integrity for all new outputs.
-6. `publish_snapshot`: write new snapshot metadata and atomically promote it to current.
-7. `finalize`: best-effort cleanup of orphan temp files.
+6. `collect_provenance`: call the DataSource provenance hook and write an
+   external sidecar only if it returns a non-empty dictionary.
+7. `publish_snapshot`: write new snapshot metadata and atomically promote it to current.
+8. `finalize`: best-effort cleanup of orphan temp files and orphan
+   provenance sidecars from failed publishes.
 
 Failure behavior:
 
@@ -138,7 +142,9 @@ Failure behavior:
 
 - Current snapshot selection is deterministic (lexicographically last suffix).
 - `cleanup-cache` in snapshot cleanup mode generates a script for human review; trim mode immediately mutates state (see [Trimming](#trimming-dangerous-operation)).
-- `sync-cache` transfers data and metadata only (not `yaml/`, not `code/`). Supports DPDs only, NPDs only, or both.
+- `sync-cache` transfers data, snapshot metadata, and referenced snapshot
+  provenance sidecars only (not `yaml/`, not `code/`). Supports DPDs only,
+  NPDs only, or both.
 
 ## Implementation Readiness Checklist
 
@@ -192,6 +198,8 @@ The cache is a directory containing:
         _meta_data/
             md.futures_daily_1H4DW00.pkl.gz
             md.futures_daily_1H4DW01.pkl.gz   <- current snapshot (largest suffix)
+        _provenance/               <- optional large per-snapshot user provenance
+            md.futures_daily_1H4DW01.provenance.pkl.gz
         FutureRoot=ES/
             year=Y2023/FutureRoot=ES_year=Y2023_1H4DW00.parquet
             year=Y2024/FutureRoot=ES_year=Y2024_1H4DW00.parquet
@@ -236,8 +244,8 @@ The cache is loaded by pointing to the cache root directory.
 - **code/ files:** Only needed when updating data. They contain the
   `DataSource` implementations referenced by yaml files.
 
-This means a synced cache (data + metadata only) is fully readable
-without the yaml/ or code/ directories.
+This means a synced cache (data + snapshot metadata, plus any referenced
+provenance sidecars) is fully readable without the yaml/ or code/ directories.
 
 **Separate git repos for `yaml/` and `code/`:**
 
@@ -328,6 +336,8 @@ df = registry.read_data("md.futures_daily", cache_name="official")
 | `to_table(name, filters=None, ...)` | Read data, returning a PyArrow `Table` |
 | `pyarrow_dataset(name, start_date=None, end_date=None, filters=None, cache_name=None, snapshot=None)` | Get PyArrow dataset from first matching cache |
 | `get_latest_snapshot(name, cache_name=None)` | Return the latest snapshot suffix string for a dataset |
+| `cache_history(name, cache_name=None, snapshot=None)` | Return snapshot lineage history, walking backward from the current or specified snapshot |
+| `read_provenance(name, cache_name=None, snapshot=None)` | Explicitly load the optional external provenance sidecar for a DPD snapshot |
 | `data_summary()` | DataFrame summarizing all datasets across all caches |
 | `discover_dpds(cache_path)` | Discover DPDs in a cache by scanning for `_meta_data` directories |
 | `discover_npds(cache_path)` | Discover NPDs by scanning the `non-dated` directory |
@@ -492,14 +502,17 @@ by date (and optionally by additional columns).
   version, also requires date range.
 - `update(source, start_date=None, end_date=None, instruments=None,
   dry_run=False, cleaner=None, backfill=False, restate=False,
-  transforms=None, yaml_config=None)` -- updates the cache using the given
-  `DataSource`. If dates are not specified, computes the window from
+  transforms=None, yaml_config=None)` --
+  updates the cache using the given `DataSource`. If dates are not specified,
+  computes the window from
   `source.available_dates()` and the cache's current state. Additional
   parameters: `dry_run` computes the plan but writes no files; `cleaner`
   applies a `DataCleaner` to the data; `transforms` is a dict of YAML
   transform settings (columns_to_rename, columns_to_drop, dropna_columns,
   dedup_columns, dedup_keep); `yaml_config` stores the full YAML configuration
-  in snapshot metadata, enabling updates without the original YAML file.
+  in snapshot metadata, including the watched user `annotations` YAML dictionary.
+  External snapshot provenance comes from the DataSource provenance hook, not
+  from an `update()` argument.
 - `get_partition_values(column)` -- returns the list of distinct values
   for a partition column from the current snapshot metadata. Useful for
   DataSources to know what partition values exist in the cache.
@@ -516,6 +529,11 @@ by date (and optionally by additional columns).
   from the stored metadata. Returns a dict with keys `columns_to_rename`,
   `columns_to_drop`, `dropna_columns`, `dedup_columns`, `dedup_keep`, or
   `None` if no transforms are configured.
+- `cache_history(snapshot=None)` -- returns snapshot lineage history,
+  walking backward from the current snapshot or the specified snapshot.
+- `read_provenance(snapshot=None)` -- explicitly load the optional external
+  provenance sidecar for the current snapshot or a specified snapshot. Normal
+  metadata loads and data reads do not load provenance sidecars.
 
 Each `DatedParquetDataset` is defined by a YAML file in the `yaml` subdirectory of the cache root.
 See [YAML Configuration](#yaml-configuration) for the full format.
@@ -901,11 +919,12 @@ class FuturesDataCleaner(DataCleaner):
 | `end_date_str` | `str` | `None` | **Debugging/testing only.** Optional override for latest date (ISO format). If set, the DPD guarantees that `get_data()` will never be called with an end date later than this value. Rarely used in production YAML files. |
 | `repull_n_days` | `int` | `0` | Number of trailing business days to re-fetch each update |
 | `row_group_size` | `int \| None` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values allow row-group-level predicate pushdown within a file at the cost of more metadata overhead. Only relevant when files are large enough to contain multiple row groups. |
+| `annotations` | `dict \| None` | `None` | Small user-owned annotations stored as part of the captured YAML configuration in every snapshot metadata pickle. Intended for compact notes that make user code easier to understand or use, such as bitmask definitions, enum labels, units, or column notes. Existing entries are append-only: later snapshots may add new keys, but may not remove keys or change values already present in the previous snapshot. |
 | `instrument_column` | `str` | `None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Can be used for filtering at read time and does not need to be a partition column. |
 | `instruments` | `list[str]` | `None` | Instruments to include in updates. If `None`, fetches all instruments. Can be expanded over time using backfill (see below). |
 | `source_location` | `str` | `""` | Location of the `DataSource` subclass. Resolution order: (1) if empty/blank, uses a built-in source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)); (2) if starts with `module://`, loads from an installed Python package (e.g., `module://my_library.data_sources`) — must use the importable module path, not the distribution name (see [Installed Module Data Sources](#installed-module-data-sources)); (3) otherwise treated as a filesystem path relative to cache root or absolute. If the module cannot be imported, the class is missing, or the class does not inherit from `DataSource`, dataset creation/update fails with a configuration error. |
 | `source_class_name` | `str` | required | Name of the `DataSource` subclass. When `source_location` is empty, this must be a built-in class name (e.g., `HiveParquetSource`, `DPDSource`). |
-| `source_init_args` | `dict` | `{}` | Arguments passed to the `DataSource` constructor as `**kwargs` |
+| `source_init_args` | `dict` | `{}` | Non-secret arguments passed to the `DataSource` constructor as `**kwargs` |
 | `columns_to_drop` | `list[str]` | `[]` | Columns to remove after fetching data |
 | `columns_to_rename` | `dict[str, str]` | `{}` | Columns to rename: `{old_name: new_name}` |
 | `dropna_columns` | `list[str]` | `[]` | Drop rows where any of these columns are null |
@@ -913,7 +932,58 @@ class FuturesDataCleaner(DataCleaner):
 | `dedup_keep` | `str` | `"last"` | Which duplicate to keep: `"first"` or `"last"` |
 | `cleaning_class_location` | `str` | `None` | Path to Python file with `DataCleaner` subclass (relative to cache root or absolute) |
 | `cleaning_class_name` | `str` | `None` | Name of the `DataCleaner` subclass in `cleaning_class_location` |
-| `cleaning_init_args` | `dict` | `{}` | Arguments passed to the `DataCleaner` constructor as `**kwargs` |
+| `cleaning_init_args` | `dict` | `{}` | Non-secret arguments passed to the `DataCleaner` constructor as `**kwargs` |
+
+**User annotations:**
+
+The `annotations` YAML field is a small, user-owned namespace inside a
+dataset's configuration. The parquet cache stores it, carries it forward, and
+checks that existing entries are not removed or changed. The parquet cache will
+not use annotations for anything. This information exists only to make the
+user's life easier, and only user code should assign semantic meaning to its
+contents.
+
+Users may put whatever compact dictionary they want here, and it is copied into
+the existing captured YAML stored with each snapshot metadata pickle.
+
+Common examples include:
+
+- bitmask definitions for compact integer flag columns,
+- enum or categorical value descriptions,
+- column units or display hints,
+- dataset-specific notes that readers need frequently.
+
+Example:
+
+```yaml
+datasets:
+  md.quotes:
+    annotations:
+      bitmasks:
+        quote_flags:
+          dtype: uint8
+          bits:
+            0: regular_session
+            1: crossed_market
+            2: stale_quote
+```
+
+`annotations` must remain small. Large audit records, source manifests, process
+graphs, or arbitrary payloads belong in the external provenance sidecar
+described below.
+
+`annotations` is watched across a cache lineage. The first snapshot establishes
+the initial dictionary. Later snapshots may add fields, but they may not remove
+existing fields or change the value of an existing field. This check is
+recursive for nested dictionaries: new nested keys are allowed, but every
+existing key path from the previous snapshot must still exist and compare
+equal unless both old and new values are dictionaries being extended.
+
+For an existing cache, omitting `annotations` carries forward the previous
+snapshot's dictionary. Supplying `annotations: {}` is allowed only when the
+previous dictionary was empty; otherwise it attempts to remove existing fields
+and raises `ValidationError`. To remove or redefine entries, create a new
+dataset or perform an explicit rebuild whose lineage starts a new cache.
 
 **Instrument filtering:**
 
@@ -956,6 +1026,37 @@ To add new instruments to an existing dataset:
 
 This workflow lets you start with a subset of instruments and gradually
 expand as needed, without re-fetching existing data.
+
+---
+
+## Credentials and Secrets
+
+Do not store credentials, API keys, passwords, tokens, or private key material
+in YAML files. YAML configuration is stored in snapshot metadata and may be
+copied when caches are synced.
+
+Treat `annotations`, provenance sidecar contents, `source_init_args`,
+`cleaning_init_args`, and `sync_function_init_args` as non-secret information:
+endpoint URLs, timeouts, project names, table names, bitmask definitions,
+source manifests, process graphs, and other values that are safe to sync with
+the cache. DataSources, DataCleaners, and sync functions that need secrets
+should read them from environment variables or an external credential provider
+and fail clearly if a required value is missing.
+
+```python
+import os
+
+from ionbus_parquet_cache import DataSource
+
+
+class MyDataSource(DataSource):
+    def __init__(self, dataset, endpoint: str):
+        super().__init__(dataset)
+        self.endpoint = endpoint
+        self.api_key = os.environ.get("MY_API_KEY")
+        if not self.api_key:
+            raise ValueError("MY_API_KEY environment variable is not set")
+```
 
 ---
 
@@ -1091,15 +1192,28 @@ calling `prepare()` directly.
    - YAML transforms and DataCleaner are applied per-chunk (each temp
      file is already cleaned)
 
-7. **DPD calls `source.on_update_complete(suffix, previous_suffix)` once after publish:**
+7. **DPD calls `source.get_provenance(suffix, previous_suffix)` before publish:**
+   - Called after all data files have been written and validated, but before
+     snapshot metadata is published
+   - Not called on dry runs, no-op updates, or failed updates
+   - The base implementation returns `{}`
+   - If the returned dictionary is non-empty, the DPD writes it to the
+     external provenance sidecar and stores a `SnapshotProvenanceRef` in the
+     snapshot metadata
+   - If the returned dictionary is empty, no provenance sidecar is written and
+     the snapshot metadata stores `provenance=None`
+   - This hook is for data that should travel with the cache snapshot
+
+8. **DPD calls `source.on_update_complete(suffix, previous_suffix)` once after publish:**
    - Called after all partitions have been written and the snapshot is
      published; not called on dry runs or if the update is a no-op
    - `suffix` is the newly published snapshot; `previous_suffix` is the
      snapshot that existed before this update, or `None` on first update
    - `self.start_date`, `self.end_date`, and `self.instruments` are still
      set from `prepare()` at this point
-   - Default is a no-op; override to record provenance, write audit
-     trails, send notifications, etc.
+   - Default is a no-op; override for external side effects such as updating
+     an asset registry, writing audit trails outside the cache, or sending
+     notifications
 
 **Data fetching strategies:**
 
@@ -1137,11 +1251,14 @@ that partition are processed. See
 - `available_dates()` - Return the date range the source can provide
 - `get_data()` - Return data for a single partition/chunk
 
-**Three optional methods** (base class provides default implementations):
+**Four optional methods** (base class provides default implementations):
 
 - `prepare()` - Set up for fetching (default calls `set_date_instruments()`)
 - `get_partitions()` - Return list of partitions to update (default uses class attributes)
-- `on_update_complete(suffix, previous_suffix)` - Post-update bookkeeping hook (default is a no-op). `previous_suffix` is None on first update.
+- `get_provenance(suffix, previous_suffix)` - Return optional snapshot
+  provenance to store with the cache (default returns `{}`).
+- `on_update_complete(suffix, previous_suffix)` - Post-update side-effect hook
+  (default is a no-op). `previous_suffix` is None on first update.
 
 **Method details:**
 
@@ -1322,6 +1439,59 @@ The return type can be:
 
 The system will convert to the appropriate format internally.
 
+#### `get_provenance(...)`
+
+```python
+def get_provenance(
+    self,
+    suffix: str,
+    previous_suffix: str | None,
+) -> dict[str, Any]:
+    return {}
+```
+
+Called after all data files for the update have been written and validated,
+but before the snapshot metadata is published. The base class returns an empty
+dictionary.
+
+This hook is for provenance that should travel with the cache snapshot. The
+DataSource may build the dictionary from information it gathered during
+`prepare()`, `get_partitions()`, and `get_data()`, plus the final snapshot
+context:
+
+- `suffix` is the snapshot suffix about to be published.
+- `previous_suffix` is the suffix of the snapshot that existed before this
+  update, or `None` if this is the first update of the cache.
+- `self.start_date`, `self.end_date`, and `self.instruments` are still set from
+  `prepare()`.
+
+The method must return a `dict[str, Any]`. Returning a non-dictionary raises
+`ValidationError`.
+
+If the returned dictionary is empty, no provenance sidecar is written and the
+snapshot metadata stores `provenance=None`. If the returned dictionary is
+non-empty, the DPD stores it as a gzip-compressed pickle sidecar and records a
+`SnapshotProvenanceRef` in the snapshot metadata.
+
+```python
+class MySource(DataSource):
+    def prepare(self, start_date, end_date, instruments=None):
+        self.set_date_instruments(start_date, end_date, instruments)
+        self.api_manifest = self.api.describe_run(start_date, end_date)
+
+    def get_provenance(
+        self,
+        suffix: str,
+        previous_suffix: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "snapshot": suffix,
+            "previous_snapshot": previous_suffix,
+            "source": "my_api",
+            "manifest": self.api_manifest,
+        }
+```
+
 #### `on_update_complete(...)`
 
 ```python
@@ -1330,9 +1500,10 @@ def on_update_complete(self, suffix: str, previous_suffix: str | None) -> None:
 ```
 
 Called once after all partitions have been written and the snapshot is published.
-The base class provides a no-op default. Override to record provenance, write
-audit trails, send completion notifications, update a separate tracking table,
-etc.
+The base class provides a no-op default. Override for side effects that should
+happen after the cache snapshot is visible, such as updating an asset registry,
+writing audit trails outside the cache, sending completion notifications, or
+updating a separate tracking table.
 
 - Called only when an actual snapshot is published — not on dry runs and not
   when the update is a no-op (no partitions to process).
@@ -1885,12 +2056,8 @@ datasets:
 4. At load time, the system uses `importlib.import_module()` to dynamically
    import the module and retrieve the class
 
-**Credentials and secrets:**
-
-If a `DataSource` needs credentials (API keys, database passwords, etc.),
-fetch them from environment variables. This is more portable and doesn't
-expose secrets in YAML or metadata files. The `DataSource` should fail loudly
-(raise an error) if a required credential is missing.
+For credentials and secret handling, see
+[Credentials and Secrets](#credentials-and-secrets).
 
 **Class requirements:**
 
@@ -2587,11 +2754,18 @@ Updating a `DatedParquetDataset` requires a `DataSource` subclass.
      (no error, no files written).
    - **Guarantee:** `get_data()` will never be called with dates outside
      these bounds.
-4. Call `source.prepare(start_date, end_date, instruments)` internally
+4. Validate the watched user annotations in `yaml_config["annotations"]` before any
+   data fetches or file writes. If this is a new cache, store the supplied
+   dictionary or `{}`. If the dataset already has a snapshot and `annotations` is
+   omitted, carry forward the previous snapshot's dictionary in the new
+   captured YAML. If `annotations` is supplied, it may only add keys to the
+   previous dictionary. Removing existing keys or changing existing values
+   raises `ValidationError`.
+5. Call `source.prepare(start_date, end_date, instruments)` internally
    to establish the update scope.
-5. Call `source.get_partitions()` to get the list of `PartitionSpec`
+6. Call `source.get_partitions()` to get the list of `PartitionSpec`
    objects that need updating.
-6. **Plan the write strategy (before any writes):**
+7. **Plan the write strategy (before any writes):**
    - Group specs by `partition_values` to determine which chunks combine
      into which final partition files.
    - For each group, determine the final partition file path.
@@ -2600,7 +2774,7 @@ Updating a `DatedParquetDataset` requires a `DataSource` subclass.
    - Set `temp_file_path` on each `PartitionSpec` so the target is known
      before processing begins.
    - Result: a complete map of temp files → final files before any I/O.
-7. For each `PartitionSpec` (in order returned):
+8. For each `PartitionSpec` (in order returned):
    a. Call `source.get_data(partition_spec)` to fetch data for this chunk.
    b. Apply YAML transformations (rename, drop, dropna, dedup).
    c. Apply `DataCleaner` if configured.
@@ -2610,21 +2784,34 @@ Updating a `DatedParquetDataset` requires a `DataSource` subclass.
       this prevents orphaned temp files from cluttering the cache on crashes;
       partition columns are stripped from the data before writing;
       temp filename encodes partition context, run suffix, and chunk_id).
-8. After all chunks for a partition are written, consolidate:
+9. After all chunks for a partition are written, consolidate:
    a. Read all temp files for the partition.
    b. If an existing file exists, merge: keep rows outside the update
       date range from the existing file, union with new data.
    c. Sort again by `sort_columns` (to interleave chunks correctly).
    d. Write the final consolidated partition file.
    e. Delete temp chunk files.
-9. Validate schema compatibility and file integrity for all new files.
-10. Publish snapshot atomically:
+10. Validate schema compatibility and file integrity for all new files.
+11. Call `source.get_provenance(plan.suffix, previous_suffix)`. The hook must
+    return a dictionary. If it returns `{}`, do not write a provenance sidecar.
+    If it returns a non-empty dictionary, write that dictionary as a
+    gzip-compressed pickle sidecar under `_provenance/` and compute its
+    checksum and size. This file is written before publishing snapshot metadata
+    so the metadata can contain a `SnapshotProvenanceRef`.
+12. Publish snapshot atomically:
     - Write `_meta_data/{name}_{suffix}.pkl.gz` containing the updated
       file list, partition values, and checksums for every file in the
       dataset (not just files written this run).
-11. Invalidate the cached PyArrow dataset so the next read constructs
+    - Include lineage metadata describing the base snapshot, operation,
+      added date ranges, rewritten date ranges, and instrument scope for
+      this update.
+    - Include the captured YAML configuration, with watched user annotations
+      carried forward or extended, and when present a provenance sidecar
+      reference.
+13. Invalidate the cached PyArrow dataset so the next read constructs
     a fresh one from the new snapshot.
-12. Best-effort cleanup of orphan temp files.
+14. Best-effort cleanup of orphan temp files and orphan provenance sidecars
+    from failed publishes.
 
 **Correction window (`repull_n_days`):**
 
@@ -2785,6 +2972,24 @@ extremes naturally:
             |  3. Sort again by sort_columns (interleave chunks) |
             |  4. Write final consolidated partition file        |
             |  5. Delete temp chunk files                        |
+            +---------------------+------------------------------+
+                                  |
+                                  v
+            +----------------------------------------------------+
+            |  Validate schema and file integrity                |
+            +---------------------+------------------------------+
+                                  |
+                                  v
+            +----------------------------------------------------+
+            |  DataSource.get_provenance(suffix, previous)       |
+            |  - {}: no provenance sidecar                       |
+            |  - non-empty dict: write .provenance.pkl.gz        |
+            +---------------------+------------------------------+
+                                  |
+                                  v
+            +----------------------------------------------------+
+            |  Publish snapshot metadata with optional           |
+            |  SnapshotProvenanceRef                             |
             +----------------------------------------------------+
 
 ```
@@ -3059,6 +3264,8 @@ time it was written.
     "cache_start_date": dt.date,  # earliest date in the cache
     "cache_end_date": dt.date,    # latest date in the cache
     "partition_values": dict,     # {column: [distinct values]} for all partition columns
+    "lineage": SnapshotLineage | None,  # how this snapshot was produced
+    "provenance": SnapshotProvenanceRef | None,  # optional external sidecar
     "files": [
         {
             "path": str,          # relative path from dataset root
@@ -3080,6 +3287,190 @@ The `size_bytes` field makes it easy to calculate disk savings when
 cleaning up old snapshots: sum the sizes of files that only appear in
 older snapshots and not in the current one.
 
+**User annotations in the captured YAML:**
+
+The user `annotations` dictionary is not a separate top-level snapshot field. It
+lives under the dataset's captured YAML configuration, which is already stored
+inside each snapshot metadata pickle. The library treats that YAML subtree as a
+small, user-owned namespace: it stores it, compares it across snapshots, and
+returns it to callers as part of the normal metadata/YAML path. The parquet
+cache will not use annotations for anything. This information exists only to
+make the user's life easier, and only user code should assign semantic meaning
+to the dictionary's schema.
+
+`annotations` must be pickle-serializable and equality-comparable. It should stay
+small. If a value is large enough that loading it with every snapshot metadata
+read would hurt cache performance, store it as external provenance instead.
+
+For a new cache, the first snapshot establishes the initial dictionary. For
+later snapshots, omitting `annotations` carries forward the previous snapshot's
+dictionary into the new captured YAML. Supplying a dictionary compares it to
+the previous snapshot's dictionary before data is fetched or written. The new
+dictionary may add keys, including nested keys inside existing dictionaries,
+but every previously existing key path must still exist and every previously
+existing non-dictionary value must compare equal.
+
+Removing a key, changing a scalar/list/object value, or changing a value's type
+raises `ValidationError`. Replacing a dictionary with a non-dictionary also
+raises `ValidationError`. To remove or redefine entries, use a new dataset or
+an explicit rebuild whose lineage starts a new cache.
+
+The YAML loader must preserve whether `annotations` was omitted. On an existing
+cache, omitting annotations inherits the current snapshot annotations, while an
+explicit `annotations: {}` is treated as a supplied dictionary and compared
+normally.
+
+Legacy snapshots without an `annotations` YAML field are treated as `{}`.
+Adding annotations to a legacy empty dictionary is allowed because it is an
+append-only extension.
+
+**Snapshot lineage metadata:**
+
+Each new DPD snapshot should record how it was produced. This is stored on the
+snapshot itself, not in a separate mutable history log.
+
+The lineage deliberately does not include `created_at`. The snapshot suffix is
+the chronological identifier.
+
+```python
+@dataclass
+class DateRange:
+    start_date: dt.date
+    end_date: dt.date
+
+
+@dataclass
+class SnapshotLineage:
+    # None means this snapshot did not use another snapshot as its base.
+    base_snapshot: str | None
+
+    # Snapshot id of the first snapshot in this cache lineage.
+    first_snapshot_id: str | None
+
+    # "initial", "update", "backfill", "restate", "rebuild", or "unknown".
+    operation: str
+
+    # What the caller asked for after automatic date-window resolution.
+    # This is optional audit context; actual ranges below are authoritative.
+    requested_date_range: DateRange | None
+
+    # Dates newly added to the cache by this snapshot.
+    added_date_ranges: list[DateRange]
+
+    # Dates whose previous rows were intentionally replaced by this snapshot.
+    rewritten_date_ranges: list[DateRange]
+
+    # Instrument scope of the write, if any.
+    instrument_column: str | None
+    instrument_scope: str  # "all", "subset", or "unknown"
+    instruments: list[str] | None
+```
+
+`base_snapshot` is the previous snapshot suffix when the new snapshot is
+derived from an existing cache. It is `None` for a new cache, a full rebuild
+that intentionally ignores previous metadata, or any other snapshot that is
+not based on earlier cache state.
+
+`first_snapshot_id` records the first snapshot id for this cache lineage. It is
+the current snapshot suffix for an initial snapshot, and later snapshots carry
+it forward from their base snapshot's lineage. This is an id, not a timestamp
+field; any display timestamp should be derived from the snapshot id.
+
+If a new lineage-aware snapshot is derived from a legacy snapshot with no
+lineage, `base_snapshot` is the legacy snapshot suffix and
+`first_snapshot_id=None`. History walking can then report that the chain
+continues into legacy metadata whose origin is unknown.
+
+`added_date_ranges` and `rewritten_date_ranges` must remain separate:
+
+- First snapshot for a new cache:
+  - `base_snapshot=None`
+  - `first_snapshot_id=<new snapshot suffix>`
+  - `operation="initial"`
+  - `added_date_ranges` contains the written date range
+  - `rewritten_date_ranges=[]`
+- Normal daily update:
+  - `base_snapshot=<previous suffix>`
+  - `first_snapshot_id=<previous lineage first_snapshot_id>`
+  - `operation="update"`
+  - `added_date_ranges` contains the new date range
+  - `rewritten_date_ranges=[]`
+- Normal update with `repull_n_days`:
+  - `added_date_ranges` contains any dates after the previous cache end
+  - `rewritten_date_ranges` contains the trailing correction window that was
+    re-fetched and replaced
+- Backfill:
+  - `operation="backfill"`
+  - `added_date_ranges` contains the backfilled range
+  - `rewritten_date_ranges=[]`
+- Restate:
+  - `operation="restate"`
+  - `rewritten_date_ranges` contains the restated date range
+  - `added_date_ranges` is normally empty, unless the restate also expands
+    coverage beyond the previous snapshot
+
+The date ranges should represent the best-known actual written scope. In
+practice this usually matches the resolved requested date window. If a source
+returns no data for part of the requested window, the actual ranges may be
+narrower than `requested_date_range`.
+
+Instrument scope is independent of operation and records how the write was
+requested, not whether the requested set happens to equal the full universe. A
+normal update, backfill, or restate may write all instruments or a requested
+subset:
+
+- `instrument_scope="all"` when no instrument filter limited the write.
+- `instrument_scope="subset"` when `instruments` was explicitly provided.
+  Store the sorted instrument list in `instruments`. This remains `"subset"`
+  even if the caller explicitly listed every instrument in the dataset.
+- `instrument_scope="unknown"` for legacy snapshots or cases where the scope
+  cannot be determined.
+
+**External snapshot provenance:**
+
+`provenance` is for larger, optional, per-snapshot information that should
+travel with the cache but should not be loaded as part of the normal snapshot
+metadata read path. The library treats the provenance blob as opaque
+user-provided data.
+
+The DataSource supplies this data through `get_provenance()`. The base
+implementation returns `{}`. If the returned dictionary is empty, the snapshot
+has no external provenance sidecar. If the returned dictionary is non-empty,
+the library stores it as a gzip-compressed pickle file:
+
+```text
+{dataset_name}/_provenance/{dataset_name}_{snapshot_id}.provenance.pkl.gz
+```
+
+The snapshot metadata stores only a small reference:
+
+```python
+@dataclass
+class SnapshotProvenanceRef:
+    # Relative path from dataset root.
+    path: str
+
+    # Checksum of the compressed pickle bytes.
+    checksum: str
+
+    # Size of the compressed pickle file.
+    size_bytes: int
+```
+
+The provenance hook must return a `dict[str, Any]`; returning any other type
+raises `ValidationError`. The dictionary contents are otherwise unconstrained.
+It may contain Python objects such as `datetime.date` or `datetime.datetime`
+values. Because it is stored as pickle, a synced cache with provenance should
+be treated as a trusted Python artifact, the same way DPD snapshot metadata
+pickles are trusted.
+
+Normal metadata loads, dataset discovery, summaries, and reads must not load
+provenance sidecars. They only read `SnapshotProvenanceRef`. Callers load the
+blob explicitly via `read_provenance(snapshot=None)`.
+
+If `get_provenance()` returns `{}`, no sidecar is written and `provenance` is
+`None` in the snapshot metadata.
+
 **YAML configuration in metadata:**
 
 The `yaml` field stores the complete YAML configuration at the time
@@ -3097,6 +3488,13 @@ any point in its history, including:
 If the YAML configuration changes between updates (e.g., adding a new
 transform or changing sort order), each snapshot reflects the
 configuration that was in effect when it was created.
+
+The captured YAML is authoritative for the watched user `annotations` dictionary.
+On update, the implementation compares the new YAML `annotations` subtree to the
+previous snapshot's captured YAML `annotations` subtree and carries the previous
+dictionary forward when the field is omitted. The top-level snapshot
+`provenance` field remains authoritative for external provenance loading and
+sync.
 
 **Note:** The metadata contains the configuration for reference, but may
 not be sufficient to re-run the update if the Python source files
@@ -3116,6 +3514,52 @@ was processed.
 - Older snapshots are kept on disk (never deleted automatically),
   allowing readers to pin to a specific snapshot by loading an
   earlier pickle file explicitly.
+
+**Cache history API:**
+
+The cache should expose a history function for DPDs:
+
+```python
+dpd.cache_history(snapshot: str | None = None) -> CacheHistory
+
+registry.cache_history(
+    name: str,
+    cache_name: str | None = None,
+    snapshot: str | None = None,
+) -> CacheHistory
+```
+
+If `snapshot` is omitted, history starts at the current snapshot. If provided,
+history starts at that specific snapshot. The function then walks backward by
+following each snapshot's `lineage.base_snapshot`.
+
+The returned history should include, in newest-to-oldest order:
+
+- snapshot suffix,
+- operation,
+- base snapshot,
+- first snapshot id,
+- requested date range,
+- added date ranges,
+- rewritten date ranges,
+- instrument scope,
+- instrument column and instrument list when applicable,
+- a status for each entry.
+
+If a snapshot says it was based on another snapshot that cannot be found, the
+history result should include a broken-link entry instead of failing silently.
+For example:
+
+```text
+Snapshot 1XYZ999 says it was based on 1ABC123, but 1ABC123 was not found.
+```
+
+If a snapshot has no lineage metadata, the history result should include a
+status entry instead of failing silently. For example:
+
+```text
+Snapshot 1XYZ999 has no lineage metadata.
+```
 
 **Partition column values are NOT stored in the parquet files.** They
 are stored in the snapshot pickle metadata and injected as virtual
@@ -3541,6 +3985,7 @@ snapshots), making it efficient for replication.
 
 - Data files (parquet)
 - Metadata (`_meta_data/` pickles for DPDs, snapshot files for NPDs)
+- Referenced DPD provenance sidecars (`_provenance/*.provenance.pkl.gz`)
 
 **What does NOT get synced:**
 
@@ -3647,6 +4092,10 @@ for details.
 --daemon                        # Run continuously instead of once
 --update-interval N             # Seconds between sync checks (default: 60)
 --rename OLD:NEW                # Copy dataset with a different name at destination
+--run-sync-functions            # Run configured post-sync functions after copying
+--run-sync-only                 # Run configured sync functions without copying
+--sync-function LOCATION:NAME   # Run this sync function for selected snapshots
+--sync-function-init-args JSON  # Optional JSON kwargs for CLI sync function class
 --workers N                     # Parallel upload/download workers (default: 8)
 ```
 
@@ -3672,30 +4121,189 @@ If you do not specify `--datasets`, the old dataset name is automatically
 used as the filter. Only one rename mapping can be specified per command.
 The source dataset name must match the dataset being synced.
 
-**Sync functions (optional supplemental operations):**
+**Snapshot provenance sidecars:**
 
-Sync functions allow you to perform additional operations during cache sync
-(e.g., syncing provenance metadata, updating external catalogs, or replicating
-supplemental data). A sync function receives the snapshot ID, source location,
-and destination location, and can perform any operations needed to keep
-auxiliary data in sync with the snapshot.
+DPD provenance sidecars are selected and synced with their owning DPD snapshot.
+When `sync-cache` selects a DPD snapshot, it copies:
+
+1. the snapshot metadata pickle,
+2. every parquet file referenced by that metadata,
+3. the provenance sidecar at the expected path, if present:
+   `_provenance/{dataset_name}_{snapshot_id}.provenance.pkl.gz`.
+
+No separate flag is required to sync provenance sidecars. They are part of the
+cache snapshot, unlike sync functions, which are optional external side
+effects. A snapshot with `provenance=None` has no sidecar to copy.
+
+The sync contract is convention-based. If a user creates or renames some other
+provenance-like file outside the expected snapshot naming convention,
+`sync-cache` does not promise to discover or copy it.
+
+For DPD `--snapshot` and `--all-snapshots`, provenance sidecars follow the same
+snapshot-selection rules as metadata and parquet files. For `--rename`,
+provenance sidecar paths follow the same dataset-name path rewrite as the rest
+of the selected snapshot files.
+
+**Sync functions (optional post-sync operations):**
+
+Sync functions allow a dataset to declare optional supplemental work that can
+run after cache files have been synced (e.g., syncing provenance metadata,
+updating external catalogs, or replicating auxiliary data).
+
+Defining a sync function in YAML does **not** make it run automatically. The
+normal `sync-cache push` and `sync-cache pull` commands copy cache files only.
+Configured sync functions run only when the user explicitly requests them with
+`--run-sync-functions`, or when retrying them with `--run-sync-only`.
+
+**Expected use cases:**
+
+- Fast file replication: copy cache files between local locations or between
+  cache storage locations without updating any external systems. This is the
+  default `sync-cache` behavior and should stay fast and side-effect free.
+- Publishing a cache update: push files from a local cache to remote storage,
+  then update an asset registry, provenance catalog, or other external system
+  with metadata that differs from the cache's internal snapshot metadata. This
+  requires `--run-sync-functions` or `--sync-function`.
+- Repairing post-sync side effects: if file copying succeeded but an asset
+  registry or catalog update failed, rerun only the external update with
+  `--run-sync-only`.
+
+**Execution modes:**
+
+```bash
+# Copy selected cache files, then run configured post-sync functions
+sync-cache push /path/to/cache /path/to/destination --run-sync-functions
+
+# Copy selected cache files, then run a command-line sync function
+sync-cache push /path/to/cache /path/to/destination \
+    --sync-function module://my_library.sync_utils:sync_provenance
+
+# Retry configured post-sync functions without copying files
+sync-cache push /path/to/cache /path/to/destination --run-sync-only
+
+# Retry a command-line sync function without copying files
+sync-cache push /path/to/cache /path/to/destination \
+    --run-sync-only \
+    --sync-function module://my_library.sync_utils:sync_provenance
+```
+
+For the first implementation, sync functions are supported only for
+local-source push operations to a remote destination:
+
+```bash
+sync-cache push /local/cache gs://bucket/cache --run-sync-functions
+```
+
+If `--run-sync-functions`, `--run-sync-only`, or `--sync-function` is used with
+pull, local-to-local sync, or remote-to-remote sync, the command should fail
+with a clear error. This keeps config loading simple: YAML and cache-local code
+are loaded from the local source cache, and `module://` hooks are loaded from
+the local Python environment.
+
+`--run-sync-functions` runs configured sync functions only after all selected
+cache files have been copied successfully. It does not interleave copying and
+post-sync hooks.
+
+`--run-sync-only` performs no file copying and runs only the configured sync
+functions for the selected datasets and snapshots. It is intended for retrying
+external side effects after a previous sync copied files but a post-sync
+function failed. Before calling a sync function, the command should verify that
+the selected destination snapshot exists:
+
+- For DPDs, the destination metadata pickle, data files referenced by that
+  snapshot, and any convention-named provenance sidecar should exist.
+- For NPDs, the destination snapshot file or snapshot directory should exist.
+
+`--dry-run` is mutually exclusive with both `--run-sync-functions` and
+`--run-sync-only`. `--dry-run` is also mutually exclusive with
+`--sync-function`, because passing a command-line sync function requests an
+external side effect. Sync functions may perform external side effects, so
+dry-run mode must fail fast instead of pretending to simulate them.
+
+**Post-sync ordering and execution:**
+
+Post-sync execution has two phases:
+
+1. Copy all selected cache files.
+2. If all file copies succeeded, run selected sync functions.
+
+Sync functions run serially in deterministic dataset/snapshot order, not in
+the file-copy worker pool. If any sync function fails, remaining sync functions
+are not run and `sync-cache` exits nonzero. Files already copied are not rolled
+back. Use `--run-sync-only` to retry the post-sync phase after fixing the
+underlying problem.
+
+**Command-line sync function override:**
+
+Instead of configuring a sync function in YAML, a caller may provide one at
+sync time:
+
+```bash
+sync-cache push /path/to/cache /path/to/destination \
+    --datasets md.futures_daily \
+    --sync-function module://my_library.sync_utils:SyncProvenance \
+    --sync-function-init-args '{"catalog_url": "https://internal.catalog.io"}'
+```
+
+`--sync-function LOCATION:NAME` identifies the callable to run for every
+selected dataset snapshot. The `LOCATION` part follows the same rules as
+`sync_function_location` in YAML:
+
+- empty/built-in location for built-in functions,
+- cache-local paths such as `code/sync_functions.py`,
+- installed packages such as `module://my_library.sync_utils`.
+
+The callable name after the final `:` is the function name or class name.
+If the callable is a class, `--sync-function-init-args` may provide JSON
+keyword arguments for its constructor. If it is a plain function,
+`--sync-function-init-args` should be omitted.
+
+When `--sync-function` is provided, it is used for all selected datasets and
+snapshots and per-dataset YAML `sync_function_*` settings are ignored for that
+command. This avoids mixed ordering between YAML-configured hooks and an
+operator-supplied one-off hook. To run the command-line hook for only one
+dataset, combine it with `--datasets NAME`.
+
+Providing `--sync-function` implies that sync functions should run after the
+file sync. It does not require `--run-sync-functions`. `--run-sync-only` may be
+combined with `--sync-function` to retry the one-off hook without copying
+files.
+
+**DPD and NPD support:**
+
+Sync functions apply cleanly to both dataset types:
+
+- For DPDs, `snapshot_id` is the DPD snapshot suffix from `_meta_data/`.
+- For NPDs, `snapshot_id` is the NPD snapshot suffix from the snapshot file or
+  directory name under `non-dated/`.
+
+The sync command should call the function once per selected dataset snapshot.
+That means the default current-snapshot sync calls at most one function per
+dataset, while `--snapshot ...` or `--all-snapshots` may call a function
+multiple times for the same dataset.
 
 **Function signature:**
 
-A sync function must accept three parameters and may throw exceptions:
+A sync function must accept the selected source and destination dataset names,
+the dataset type, the snapshot ID, and the source/destination cache locations:
 
 ```python
 def my_sync_function(
-    snapshot_id: str,        # Current snapshot ID being synced
-    source_location: str,    # Source cache path (e.g., /local/cache or gs://bucket/cache)
-    dest_location: str       # Destination cache path
+    source_dataset_name: str,  # Dataset name at the source cache
+    dest_dataset_name: str,    # Dataset name at the destination cache
+    dataset_type: str,         # "dpd" or "npd"
+    snapshot_id: str,          # Selected DPD or NPD snapshot suffix
+    source_location: str,      # Source cache root (/local/cache or gs://bucket/cache)
+    dest_location: str,        # Destination cache root
 ) -> None:
-    """Sync supplemental data for the snapshot."""
-    # Update provenance, replicate metadata, etc.
-    # If an error occurs, raise an exception to fail the sync operation
+    """Sync supplemental data for the selected dataset snapshot."""
+    # Update provenance, replicate metadata, notify catalogs, etc.
+    # Raise an exception to fail the sync operation.
 ```
 
-If the sync function raises an exception, the entire sync operation fails.
+When `--rename OLD:NEW` is used, `source_dataset_name` is `OLD` and
+`dest_dataset_name` is `NEW`. Hooks that only care about the destination name
+should use `dest_dataset_name`.
 
 **Configuration in YAML:**
 
@@ -3712,34 +4320,69 @@ datasets:
       catalog_endpoint: "https://catalog.example.com"
 ```
 
+For NPDs, the same fields may be attached to the NPD's YAML dataset entry.
+
+When sync functions are requested, datasets without a configured sync function
+are skipped and a warning is logged for each skipped dataset. This warning
+applies whether one dataset or many datasets were selected. Missing configured
+sync functions are not errors: if all selected datasets lack configured sync
+functions, the command exits successfully with warnings and a summary such as
+`0 sync functions run`.
+
+For credentials and secret handling in `sync_function_init_args`, see
+[Credentials and Secrets](#credentials-and-secrets).
+
 **Sourcing sync functions:**
 
 Sync functions can come from three locations (same as DataSource):
 
-1. **Built-in** (empty `sync_function_location`) — use a built-in function if available
-2. **Cache-local** (`code/sync_functions.py`) — Python file in the cache's `code/` directory
-3. **Installed package** (`module://my_library.sync`) — function/class from an installed Python package
+1. **Built-in** (empty `sync_function_location`) - use a built-in function if available
+2. **Cache-local** (`code/sync_functions.py`) - Python file in the cache's `code/` directory
+3. **Installed package** (`module://my_library.sync`) - function/class from an installed Python package
+
+Sync-function sourcing follows the supported execution modes described above.
+In those modes, YAML and cache-local hooks are loaded from the local source
+cache, and `module://` hooks are loaded from the local Python environment.
+
+The loader must validate the resolved object:
+
+- If the location or name cannot be loaded, raise `ConfigurationError`.
+- If a class cannot be instantiated with `sync_function_init_args` or
+  `--sync-function-init-args`, raise `ConfigurationError`.
+- If the final object is not callable, raise `ConfigurationError`.
 
 **Examples:**
 
 Local sync function (in `code/sync_functions.py`):
 
 ```python
-def sync_provenance(snapshot_id: str, source_location: str, dest_location: str) -> None:
+def sync_provenance(
+    source_dataset_name: str,
+    dest_dataset_name: str,
+    dataset_type: str,
+    snapshot_id: str,
+    source_location: str,
+    dest_location: str,
+) -> None:
     """Copy provenance metadata from source to destination."""
     import json
     from pathlib import Path
 
-    source_prov = Path(source_location) / "provenance" / f"{snapshot_id}.json"
-    dest_prov = Path(dest_location) / "provenance"
+    source_prov = (
+        Path(source_location)
+        / "provenance"
+        / source_dataset_name
+        / f"{snapshot_id}.json"
+    )
+    dest_prov = Path(dest_location) / "provenance" / dest_dataset_name
 
     if source_prov.exists():
         dest_prov.mkdir(parents=True, exist_ok=True)
         with open(source_prov) as f:
             data = json.load(f)
-        # Update location references if destination is remote (GCS)
-        if dest_location.startswith("gs://"):
-            data["location"] = dest_location
+        data["dataset_name"] = dest_dataset_name
+        data["dataset_type"] = dataset_type
+        data["snapshot_id"] = snapshot_id
         with open(dest_prov / f"{snapshot_id}.json", "w") as f:
             json.dump(data, f)
 ```
@@ -3762,30 +4405,51 @@ In `my_library/sync_utils.py`:
 class SyncProvenance:
     """Syncs provenance data to an external catalog."""
 
-    def __init__(self, dataset, catalog_url: str):
-        self.dataset = dataset
+    def __init__(self, catalog_url: str):
         self.catalog_url = catalog_url
 
-    def __call__(self, snapshot_id: str, source_location: str, dest_location: str) -> None:
+    def __call__(
+        self,
+        source_dataset_name: str,
+        dest_dataset_name: str,
+        dataset_type: str,
+        snapshot_id: str,
+        source_location: str,
+        dest_location: str,
+    ) -> None:
         # Fetch provenance from source, update location, POST to catalog
         import requests
-        prov = self._fetch_provenance(source_location, snapshot_id)
-        prov["dest_location"] = dest_location
-        resp = requests.post(f"{self.catalog_url}/snapshots", json=prov)
-        resp.raise_for_status()  # Raise on HTTP error
 
-    def _fetch_provenance(self, location: str, snapshot_id: str) -> dict:
+        prov = self._fetch_provenance(
+            source_location,
+            source_dataset_name,
+            snapshot_id,
+        )
+        prov["dest_dataset_name"] = dest_dataset_name
+        prov["dest_location"] = dest_location
+        prov["dataset_type"] = dataset_type
+        resp = requests.post(f"{self.catalog_url}/snapshots", json=prov)
+        resp.raise_for_status()
+
+    def _fetch_provenance(
+        self,
+        location: str,
+        dataset_name: str,
+        snapshot_id: str,
+    ) -> dict:
         # Implementation
         pass
 ```
 
 **When sync function errors occur:**
 
-If a sync function raises an exception during `sync-cache push` or `sync-cache pull`,
-the entire sync operation fails immediately. The partial sync state is left as-is
-(files copied so far remain at the destination). This is a safety measure: if
-auxiliary metadata cannot be synced correctly, the snapshot should not be
-considered complete at the destination.
+If a sync function raises after file copying, `sync-cache` exits nonzero. Files
+already copied are not rolled back. Callers should treat the destination
+snapshot as operationally incomplete for any external systems maintained by the
+sync function.
+
+Use `--run-sync-only` to retry the configured sync functions after the file
+sync has already succeeded.
 
 **S3 paths (future release):**
 

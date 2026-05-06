@@ -15,8 +15,16 @@ from ionbus_parquet_cache.dated_dataset import (
     FileMetadata,
     SnapshotMetadata,
 )
-from ionbus_parquet_cache.exceptions import SnapshotNotFoundError, SnapshotPublishError
+from ionbus_parquet_cache.exceptions import (
+    SnapshotNotFoundError,
+    SnapshotPublishError,
+    ValidationError,
+)
 from ionbus_parquet_cache.partition import DATE_PARTITION_GRANULARITIES
+from ionbus_parquet_cache.snapshot_history import (
+    DateRange,
+    SnapshotLineage,
+)
 
 
 @pytest.fixture
@@ -135,17 +143,47 @@ class TestSnapshotMetadata:
         assert loaded.cache_start_date == metadata.cache_start_date
         assert loaded.partition_values == metadata.partition_values
         assert loaded.schema.equals(metadata.schema)
+        assert loaded.lineage is None
+        assert loaded.provenance is None
+
+    def test_legacy_pickle_drops_created_at(self, temp_cache: Path) -> None:
+        """Older metadata pickles should load without created_at."""
+        schema = pa.schema([("Date", pa.date32())])
+        metadata = SnapshotMetadata(
+            name="test",
+            suffix="1GZ5HK0",
+            schema=schema,
+            files=[],
+            yaml_config={},
+        )
+        metadata.created_at = dt.datetime(2024, 1, 1)
+        del metadata.lineage
+        del metadata.provenance
+
+        temp_cache.mkdir(parents=True, exist_ok=True)
+        pickle_path = temp_cache / "legacy.pkl.gz"
+        pd.to_pickle(metadata, pickle_path, compression="gzip")
+
+        loaded = SnapshotMetadata.from_pickle(pickle_path)
+
+        assert not hasattr(loaded, "created_at")
+        assert loaded.lineage is None
+        assert loaded.provenance is None
 
 
 class TestDatedDatasetNoSnapshot:
     """Tests for DatedParquetDataset with no snapshot."""
 
-    def test_no_snapshot_discover_returns_none(self, temp_cache: Path) -> None:
+    def test_no_snapshot_discover_returns_none(
+        self, temp_cache: Path
+    ) -> None:
         """No snapshots should return None."""
         dpd = DatedParquetDataset(cache_dir=temp_cache, name="empty")
         assert dpd._discover_current_suffix() is None
 
-    def test_no_snapshot_pyarrow_dataset_raises(self, temp_cache: Path) -> None:
+    def test_no_snapshot_pyarrow_dataset_raises(
+        self, temp_cache: Path
+    ) -> None:
         """Accessing dataset with no snapshot should raise."""
         dpd = DatedParquetDataset(cache_dir=temp_cache, name="empty")
         with pytest.raises(SnapshotNotFoundError):
@@ -214,7 +252,9 @@ class TestDatedDatasetWithSnapshot:
 
         return dpd
 
-    def test_discover_suffix(self, dpd_with_data: DatedParquetDataset) -> None:
+    def test_discover_suffix(
+        self, dpd_with_data: DatedParquetDataset
+    ) -> None:
         """Should discover the published snapshot."""
         suffix = dpd_with_data._discover_current_suffix()
         assert suffix is not None
@@ -255,6 +295,164 @@ class TestDatedDatasetWithSnapshot:
         assert summary["partition_columns"] == ["year"]
         assert "cache_start_date" in summary
         assert "cache_end_date" in summary
+
+
+class TestDatedDatasetAnnotations:
+    """Tests for watched user annotations."""
+
+    def test_annotations_carry_forward_when_omitted(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Omitted annotations should inherit current metadata annotations."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"annotations": {"flags": {"1": "active"}}},
+            suffix="1GZ5HK0",
+        )
+
+        resolved = dpd._resolve_yaml_config_annotations({"date_col": "Date"})
+
+        assert resolved["annotations"] == {"flags": {"1": "active"}}
+
+    def test_annotations_may_add_but_not_change_or_remove(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Existing annotation keys are append-only."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={
+                "annotations": {
+                    "flags": {"1": "active"},
+                    "unit": "usd",
+                }
+            },
+            suffix="1GZ5HK0",
+        )
+
+        resolved = dpd._resolve_yaml_config_annotations(
+            {
+                "annotations": {
+                    "flags": {"1": "active", "2": "stale"},
+                    "unit": "usd",
+                    "owner": "research",
+                }
+            }
+        )
+        assert resolved["annotations"]["flags"]["2"] == "stale"
+
+        with pytest.raises(ValidationError, match="cannot change"):
+            dpd._resolve_yaml_config_annotations(
+                {"annotations": {"flags": {"1": "inactive"}, "unit": "usd"}}
+            )
+
+        with pytest.raises(ValidationError, match="cannot be removed"):
+            dpd._resolve_yaml_config_annotations(
+                {"annotations": {"flags": {"1": "active"}}}
+            )
+
+
+class TestDatedDatasetProvenanceAndHistory:
+    """Tests for provenance sidecars and lineage history."""
+
+    def test_read_provenance_and_cache_history(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Provenance sidecars are explicit reads and history follows lineage."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        initial_lineage = SnapshotLineage(
+            base_snapshot=None,
+            first_snapshot_id="1GZ5HK0",
+            operation="initial",
+            requested_date_range=DateRange(
+                dt.date(2024, 1, 1),
+                dt.date(2024, 1, 31),
+            ),
+            added_date_ranges=[
+                DateRange(dt.date(2024, 1, 1), dt.date(2024, 1, 31))
+            ],
+        )
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            lineage=initial_lineage,
+            suffix="1GZ5HK0",
+        )
+        provenance = dpd._write_provenance_sidecar(
+            "1GZ5HK1",
+            {"created": dt.datetime(2024, 2, 1), "inputs": ["a", "b"]},
+        )
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            lineage=SnapshotLineage(
+                base_snapshot="1GZ5HK0",
+                first_snapshot_id="1GZ5HK0",
+                operation="update",
+                requested_date_range=DateRange(
+                    dt.date(2024, 2, 1),
+                    dt.date(2024, 2, 29),
+                ),
+                added_date_ranges=[
+                    DateRange(dt.date(2024, 2, 1), dt.date(2024, 2, 29))
+                ],
+            ),
+            provenance=provenance,
+            suffix="1GZ5HK1",
+        )
+
+        assert dpd.read_provenance()["inputs"] == ["a", "b"]
+
+        history = dpd.cache_history()
+        assert [entry.snapshot for entry in history] == ["1GZ5HK1", "1GZ5HK0"]
+        assert [entry.operation for entry in history] == ["update", "initial"]
+        assert all(entry.status == "ok" for entry in history)
+
+    def test_cache_history_broken_link_preserves_first_snapshot_id(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """A missing base snapshot should not erase known first_snapshot_id."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            lineage=SnapshotLineage(
+                base_snapshot=None,
+                first_snapshot_id="1GZ5HK0",
+                operation="initial",
+                requested_date_range=None,
+            ),
+            suffix="1GZ5HK0",
+        )
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            lineage=SnapshotLineage(
+                base_snapshot="1GZ5HK0",
+                first_snapshot_id="1GZ5HK0",
+                operation="update",
+                requested_date_range=None,
+            ),
+            suffix="1GZ5HK1",
+        )
+        (dpd.meta_dir / "test_1GZ5HK0.pkl.gz").unlink()
+
+        history = dpd.cache_history()
+
+        assert [entry.snapshot for entry in history] == ["1GZ5HK1", "1GZ5HK0"]
+        assert history[1].status == "broken_link"
+        assert history[1].first_snapshot_id == "1GZ5HK0"
 
 
 class TestDatedDatasetPublish:
@@ -402,7 +600,9 @@ class TestDatedDatasetRefresh:
         assert result is False
         assert dpd._metadata is not None
 
-    def test_summary_after_refresh_has_all_keys(self, temp_cache: Path) -> None:
+    def test_summary_after_refresh_has_all_keys(
+        self, temp_cache: Path
+    ) -> None:
         """summary() should have all keys even after refresh() clears _metadata."""
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -440,7 +640,6 @@ class TestDatedDatasetRefresh:
         )
 
         # Reset to old suffix to simulate stale state
-        old_suffix = dpd.current_suffix
         dpd.current_suffix = "000000"  # Force refresh to find new snapshot
         dpd._metadata = None  # Clear metadata
 
@@ -615,7 +814,9 @@ class TestBackfillValidation:
                 dates = pd.date_range(
                     partition_spec.start_date, partition_spec.end_date
                 )
-                return pd.DataFrame({"Date": dates, "value": range(len(dates))})
+                return pd.DataFrame(
+                    {"Date": dates, "value": range(len(dates))}
+                )
 
         # Create DPD
         dpd = DatedParquetDataset(
@@ -636,7 +837,9 @@ class TestBackfillValidation:
 
         # Try backfill with start_date AFTER cache_start - should raise
         # (cache_start is 2024-01-01, we're trying 2024-06-01)
-        with pytest.raises(ValidationError, match="backfill start_date.*must be before"):
+        with pytest.raises(
+            ValidationError, match="backfill start_date.*must be before"
+        ):
             dpd.update(
                 source,
                 start_date=dt.date(2024, 6, 1),  # After cache_start
@@ -661,7 +864,9 @@ class TestBackfillValidation:
                 dates = pd.date_range(
                     partition_spec.start_date, partition_spec.end_date
                 )
-                return pd.DataFrame({"Date": dates, "value": range(len(dates))})
+                return pd.DataFrame(
+                    {"Date": dates, "value": range(len(dates))}
+                )
 
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -680,7 +885,9 @@ class TestBackfillValidation:
         )
 
         # Try backfill with start_date EQUAL to cache_start - should raise
-        with pytest.raises(ValidationError, match="backfill start_date.*must be before"):
+        with pytest.raises(
+            ValidationError, match="backfill start_date.*must be before"
+        ):
             dpd.update(
                 source,
                 start_date=dt.date(2024, 1, 1),  # Equal to cache_start
@@ -704,7 +911,9 @@ class TestBackfillValidation:
                 dates = pd.date_range(
                     partition_spec.start_date, partition_spec.end_date
                 )
-                return pd.DataFrame({"Date": dates, "value": range(len(dates))})
+                return pd.DataFrame(
+                    {"Date": dates, "value": range(len(dates))}
+                )
 
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -830,5 +1039,9 @@ class TestSnapshotSuffixCollisionDetection:
             size_bytes=1024,
         )
 
-        with pytest.raises(SnapshotPublishError, match="Snapshot suffix collision"):
-            dpd._publish_snapshot(files=[file2], schema=schema, suffix=suffix1)
+        with pytest.raises(
+            SnapshotPublishError, match="Snapshot suffix collision"
+        ):
+            dpd._publish_snapshot(
+                files=[file2], schema=schema, suffix=suffix1
+            )

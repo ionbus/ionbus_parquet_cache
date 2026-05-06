@@ -118,8 +118,11 @@ class CacheRegistry:
             path: Path or gs:// URL to the cache directory.
         """
         from ionbus_parquet_cache.gcs_utils import is_gcs_path
+
         path_str = str(path)
-        stored: str | Path = path_str.rstrip("/") if is_gcs_path(path_str) else Path(path)
+        stored: str | Path = (
+            path_str.rstrip("/") if is_gcs_path(path_str) else Path(path)
+        )
         if name not in self._caches:
             self._cache_order.append(name)
         self._caches[name] = stored
@@ -147,6 +150,7 @@ class CacheRegistry:
             Dict mapping dataset name to data directory path (str for GCS, Path local).
         """
         from ionbus_parquet_cache.gcs_utils import is_gcs_path
+
         if is_gcs_path(str(cache_path)):
             return self._discover_dpds_gcs(str(cache_path))
 
@@ -166,6 +170,7 @@ class CacheRegistry:
     def _discover_dpds_gcs(self, gcs_root: str) -> dict[str, str]:
         """Discover DPDs in a GCS cache using efficient two-level listing."""
         from ionbus_parquet_cache.gcs_utils import gcs_ls
+
         result: dict[str, str] = {}
         for item_url in gcs_ls(gcs_root):
             name = item_url.rstrip("/").split("/")[-1]
@@ -187,6 +192,7 @@ class CacheRegistry:
             Dict mapping dataset name to NPD directory path (str for GCS, Path local).
         """
         from ionbus_parquet_cache.gcs_utils import is_gcs_path
+
         if is_gcs_path(str(cache_path)):
             return self._discover_npds_gcs(str(cache_path))
 
@@ -210,6 +216,7 @@ class CacheRegistry:
     def _discover_npds_gcs(self, gcs_root: str) -> dict[str, str]:
         """Discover NPDs in a GCS cache using efficient two-level listing."""
         from ionbus_parquet_cache.gcs_utils import gcs_ls
+
         result: dict[str, str] = {}
         non_dated_url = f"{gcs_root}/non-dated"
         for item_url in gcs_ls(non_dated_url):
@@ -223,7 +230,9 @@ class CacheRegistry:
                 result[name] = dataset_url
         return result
 
-    def _get_dpd(self, name: str, cache_name: str) -> DatedParquetDataset | None:
+    def _get_dpd(
+        self, name: str, cache_name: str
+    ) -> DatedParquetDataset | None:
         """
         Get or create a DPD instance.
 
@@ -248,11 +257,13 @@ class CacheRegistry:
 
         # Load metadata to get configuration
         from ionbus_parquet_cache.gcs_utils import is_gcs_path
+
         if is_gcs_path(str(cache_path)):
             # GCS: stream metadata directly; DPD will discover suffix via GCS
             data_dir_str = str(dpds[name])
             meta_prefix = f"{data_dir_str}/_meta_data"
             from ionbus_parquet_cache.gcs_utils import gcs_ls, gcs_open
+
             suffixes_gcs = []
             for blob_url in gcs_ls(meta_prefix):
                 blob_name = blob_url.rstrip("/").split("/")[-1]
@@ -265,11 +276,8 @@ class CacheRegistry:
             if not suffixes_gcs:
                 return None
             current_suffix, meta_url = max(suffixes_gcs, key=lambda x: x[0])
-            import gzip
-            import pickle
             with gcs_open(meta_url) as f:
-                with gzip.open(f) as gz:
-                    metadata = pickle.load(gz)
+                metadata = SnapshotMetadata.from_pickle(f)
         else:
             data_dir = dpds[name]
             meta_dir = data_dir / "_meta_data"  # type: ignore[operator]
@@ -286,13 +294,16 @@ class CacheRegistry:
             if not suffixes_local:
                 return None
 
-            current_suffix, meta_path = max(suffixes_local, key=lambda x: x[0])
+            current_suffix, meta_path = max(
+                suffixes_local, key=lambda x: x[0]
+            )
             metadata = SnapshotMetadata.from_pickle(meta_path)
         config = metadata.yaml_config
 
         # Create DPD with configuration from metadata
         partition_columns = [
-            c for c in config.get("partition_columns", [])
+            c
+            for c in config.get("partition_columns", [])
             if c != INSTRUMENT_BUCKET_COL
         ]
         dpd = DatedParquetDataset(
@@ -316,7 +327,23 @@ class CacheRegistry:
         self._dpd_cache[key] = dpd
         return dpd
 
-    def _get_npd(self, name: str, cache_name: str) -> NonDatedParquetDataset | None:
+    def _require_dpd(
+        self,
+        name: str,
+        cache_name: str | None = None,
+    ) -> DatedParquetDataset:
+        """Return a DPD or raise SnapshotNotFoundError."""
+        dataset = self.get_dataset(name, cache_name, DatasetType.DATED)
+        if dataset is None or not isinstance(dataset, DatedParquetDataset):
+            raise SnapshotNotFoundError(
+                f"DPD dataset '{name}' not found in any cache",
+                dataset_name=name,
+            )
+        return dataset
+
+    def _get_npd(
+        self, name: str, cache_name: str
+    ) -> NonDatedParquetDataset | None:
         """
         Get or create an NPD instance.
 
@@ -418,6 +445,38 @@ class CacheRegistry:
                 dataset_name=name,
             )
         return dataset.current_suffix
+
+    def cache_history(
+        self,
+        name: str,
+        cache_name: str | None = None,
+        snapshot: str | None = None,
+    ):
+        """
+        Return DPD snapshot lineage history.
+
+        Args:
+            name: Dataset name.
+            cache_name: Optional specific cache to search.
+            snapshot: Optional snapshot suffix. If None, uses current.
+        """
+        return self._require_dpd(name, cache_name).cache_history(snapshot)
+
+    def read_provenance(
+        self,
+        name: str,
+        cache_name: str | None = None,
+        snapshot: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Load optional external provenance for a DPD snapshot.
+
+        Args:
+            name: Dataset name.
+            cache_name: Optional specific cache to search.
+            snapshot: Optional snapshot suffix. If None, uses current.
+        """
+        return self._require_dpd(name, cache_name).read_provenance(snapshot)
 
     def read_data(
         self,
@@ -681,8 +740,7 @@ class CacheRegistry:
                                 snapshot_ts, tz=dt.timezone.utc
                             )
                             days_since = (
-                                dt.datetime.now(dt.timezone.utc)
-                                - snapshot_dt
+                                dt.datetime.now(dt.timezone.utc) - snapshot_dt
                             ).total_seconds() / 86400
                             partition_cols = meta.yaml_config.get(
                                 "partition_columns", []
@@ -719,6 +777,7 @@ class CacheRegistry:
                             )
                     except Exception as e:
                         from ionbus_utils.logging_utils import logger
+
                         logger.error(
                             f"Failed to load metadata for {dpd_name}: {e}"
                         )
@@ -755,8 +814,7 @@ class CacheRegistry:
                                 snapshot_ts, tz=dt.timezone.utc
                             )
                             days_since = (
-                                dt.datetime.now(dt.timezone.utc)
-                                - snapshot_dt
+                                dt.datetime.now(dt.timezone.utc) - snapshot_dt
                             ).total_seconds() / 86400
                             rows.append(
                                 {
@@ -778,6 +836,7 @@ class CacheRegistry:
                             )
                     except Exception as e:
                         from ionbus_utils.logging_utils import logger
+
                         logger.error(
                             f"Failed to discover NPD {npd_name}: {e}"
                         )
