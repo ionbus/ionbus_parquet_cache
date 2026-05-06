@@ -1371,8 +1371,9 @@ For DPDs, sync copies the snapshot metadata pickle, every parquet file
 referenced by that metadata, and any provenance sidecar that follows the
 expected naming convention for the selected snapshot:
 `_provenance/{dataset_name}_{snapshot_id}.provenance.pkl.gz`. No extra flag is
-required for provenance sidecars. Files outside that convention are not part of
-the sync contract.
+required for provenance sidecars. Only sidecars with that exact name and
+location are synced automatically; custom provenance files elsewhere in the
+cache tree are not part of the sync contract and must be managed separately.
 
 ### rename-cache
 
