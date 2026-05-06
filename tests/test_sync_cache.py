@@ -29,6 +29,100 @@ def _gcs_urls(*relative_paths: str) -> list[str]:
     return [f"{GCS_CACHE}/{rel}" for rel in relative_paths]
 
 
+def _write_sync_hooks(cache: Path) -> Path:
+    """Create a cache-local sync function module used by tests."""
+    code_dir = cache / "code"
+    code_dir.mkdir(exist_ok=True)
+    hook_file = code_dir / "sync_functions.py"
+    hook_file.write_text("""
+from pathlib import Path
+
+
+def _append(path, line):
+    existing = path.read_text() if path.exists() else ""
+    path.write_text(existing + line + "\\n")
+
+
+def record_sync(
+    source_dataset_name,
+    dest_dataset_name,
+    dataset_type,
+    snapshot_id,
+    source_location,
+    dest_location,
+):
+    marker = Path(dest_location) / "_sync_function_calls.txt"
+    _append(
+        marker,
+        "|".join([
+            dataset_type,
+            source_dataset_name,
+            dest_dataset_name,
+            snapshot_id,
+            source_location,
+            dest_location,
+        ]),
+    )
+
+
+def record_to_source(
+    source_dataset_name,
+    dest_dataset_name,
+    dataset_type,
+    snapshot_id,
+    source_location,
+    dest_location,
+):
+    marker = Path(source_location) / "_gcs_sync_function_calls.txt"
+    _append(marker, f"{dataset_type}|{dest_location}|{snapshot_id}")
+
+
+def failing_sync(
+    source_dataset_name,
+    dest_dataset_name,
+    dataset_type,
+    snapshot_id,
+    source_location,
+    dest_location,
+):
+    raise RuntimeError("sync hook failed")
+
+
+class ClassRecorder:
+    def __init__(self, marker):
+        self.marker = marker
+
+    def __call__(
+        self,
+        source_dataset_name,
+        dest_dataset_name,
+        dataset_type,
+        snapshot_id,
+        source_location,
+        dest_location,
+    ):
+        marker = Path(dest_location) / self.marker
+        _append(marker, f"{dataset_type}|{dest_dataset_name}|{snapshot_id}")
+""")
+    return hook_file
+
+
+def _write_yaml_sync_config(
+    cache: Path,
+    dataset_name: str,
+    function_name: str = "record_sync",
+) -> None:
+    """Create YAML sync-function config for a dataset."""
+    yaml_dir = cache / "yaml"
+    yaml_dir.mkdir(exist_ok=True)
+    (yaml_dir / "sync_function.yaml").write_text(f"""
+datasets:
+    {dataset_name}:
+        sync_function_location: code/sync_functions.py
+        sync_function_name: {function_name}
+""")
+
+
 @pytest.fixture
 def source_cache(tmp_path: Path) -> Path:
     """Create a source cache with test data."""
@@ -1019,3 +1113,329 @@ class TestRename:
         assert (dest_cache / "renamed_dataset").exists()
         # other_dataset should NOT be synced (filtered out)
         assert not (dest_cache / "other_dataset").exists()
+
+
+class TestPostSyncFunctions:
+    """Tests for sync-cache post-sync function execution."""
+
+    def test_cli_sync_function_runs_after_local_push(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """A command-line sync function should run after file copying."""
+        hook_file = _write_sync_hooks(source_with_dpd)
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--sync-function",
+                f"{hook_file}:record_sync",
+            ]
+        )
+
+        assert result == 0
+        assert (dest_cache / "test_dataset").exists()
+        calls = (dest_cache / "_sync_function_calls.txt").read_text()
+        assert "dpd|test_dataset|test_dataset|" in calls
+        assert str(source_with_dpd) in calls
+        assert str(dest_cache) in calls
+
+    def test_cli_class_sync_function_receives_init_args(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """CLI init args should instantiate class-based sync functions."""
+        hook_file = _write_sync_hooks(source_with_dpd)
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--sync-function",
+                f"{hook_file}:ClassRecorder",
+                "--sync-function-init-args",
+                '{"marker": "_class_sync_function_calls.txt"}',
+            ]
+        )
+
+        assert result == 0
+        calls = (dest_cache / "_class_sync_function_calls.txt").read_text()
+        assert "dpd|test_dataset|" in calls
+
+    def test_run_sync_only_runs_without_copying(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """--run-sync-only should verify existing files then run hooks."""
+        hook_file = _write_sync_hooks(source_with_dpd)
+        assert (
+            sync_cache_main(["push", str(source_with_dpd), str(dest_cache)])
+            == 0
+        )
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--run-sync-only",
+                "--sync-function",
+                f"{hook_file}:record_sync",
+            ]
+        )
+
+        assert result == 0
+        calls = (dest_cache / "_sync_function_calls.txt").read_text()
+        assert "dpd|test_dataset|test_dataset|" in calls
+
+    def test_run_sync_only_fails_when_destination_snapshot_missing(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """--run-sync-only should fail before hooks if files are missing."""
+        hook_file = _write_sync_hooks(source_with_dpd)
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--run-sync-only",
+                "--sync-function",
+                f"{hook_file}:record_sync",
+            ]
+        )
+
+        assert result == 1
+        assert not (dest_cache / "_sync_function_calls.txt").exists()
+
+    def test_yaml_configured_sync_function_runs(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """--run-sync-functions should use per-dataset YAML config."""
+        _write_sync_hooks(source_with_dpd)
+        _write_yaml_sync_config(source_with_dpd, "test_dataset")
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--run-sync-functions",
+            ]
+        )
+
+        assert result == 0
+        calls = (dest_cache / "_sync_function_calls.txt").read_text()
+        assert "dpd|test_dataset|test_dataset|" in calls
+
+    def test_yaml_sync_function_missing_config_logs_clear_warning(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Missing YAML hooks should produce a clear zero-run warning."""
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--run-sync-functions",
+            ]
+        )
+
+        assert result == 0
+        assert (
+            "No datasets with configured sync functions found" in caplog.text
+        )
+        assert "sync_function_name is set in YAML" in caplog.text
+
+    def test_cli_sync_function_overrides_yaml(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """A CLI sync function should ignore per-dataset YAML hooks."""
+        hook_file = _write_sync_hooks(source_with_dpd)
+        _write_yaml_sync_config(
+            source_with_dpd,
+            "test_dataset",
+            function_name="failing_sync",
+        )
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--sync-function",
+                f"{hook_file}:record_sync",
+            ]
+        )
+
+        assert result == 0
+        calls = (dest_cache / "_sync_function_calls.txt").read_text()
+        assert "dpd|test_dataset|test_dataset|" in calls
+
+    @pytest.mark.parametrize(
+        "extra_args",
+        [
+            ["--run-sync-functions"],
+            ["--run-sync-only"],
+            ["--sync-function", "module://hooks:record_sync"],
+        ],
+    )
+    def test_dry_run_rejects_sync_functions(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+        extra_args: list[str],
+    ) -> None:
+        """Dry runs cannot request external sync-function side effects."""
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--dry-run",
+                *extra_args,
+            ]
+        )
+
+        assert result == 1
+
+    def test_pull_rejects_sync_functions(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """Post-sync functions are supported only for push."""
+        _write_sync_hooks(source_with_dpd)
+
+        result = sync_cache_main(
+            [
+                "pull",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--run-sync-functions",
+            ]
+        )
+
+        assert result == 1
+
+    def test_rename_passes_source_and_dest_names(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """Sync functions should receive both source and renamed dest names."""
+        hook_file = _write_sync_hooks(source_with_dpd)
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--rename",
+                "test_dataset:renamed_dataset",
+                "--sync-function",
+                f"{hook_file}:record_sync",
+            ]
+        )
+
+        assert result == 0
+        calls = (dest_cache / "_sync_function_calls.txt").read_text()
+        assert "dpd|test_dataset|renamed_dataset|" in calls
+
+    def test_cli_sync_function_runs_for_npd(
+        self,
+        source_cache: Path,
+        dest_cache: Path,
+    ) -> None:
+        """Sync functions should run for selected NPD snapshots."""
+        hook_file = _write_sync_hooks(source_cache)
+        npd_dir = source_cache / "non-dated" / "ref"
+        npd_dir.mkdir(parents=True)
+        suffix = "1BBBBB0"
+        pq.write_table(
+            pa.Table.from_pandas(pd.DataFrame({"value": [1, 2, 3]})),
+            npd_dir / f"ref_{suffix}.parquet",
+        )
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_cache),
+                str(dest_cache),
+                "--sync-function",
+                f"{hook_file}:record_sync",
+            ]
+        )
+
+        assert result == 0
+        calls = (dest_cache / "_sync_function_calls.txt").read_text()
+        assert f"npd|ref|ref|{suffix}" in calls
+
+    def test_gcs_push_runs_cli_sync_function(
+        self,
+        source_with_dpd: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Local-to-GCS push should copy files then run sync functions."""
+        hook_file = _write_sync_hooks(source_with_dpd)
+        uploads: list[str] = []
+
+        monkeypatch.setattr(
+            "ionbus_parquet_cache.gcs_utils.should_upload",
+            lambda _local_file, _dest_url: True,
+        )
+        monkeypatch.setattr(
+            "ionbus_parquet_cache.gcs_utils.gcs_upload",
+            lambda _local_file, dest_url: uploads.append(dest_url),
+        )
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                GCS_CACHE,
+                "--sync-function",
+                f"{hook_file}:record_to_source",
+            ]
+        )
+
+        assert result == 0
+        assert uploads
+        calls = (source_with_dpd / "_gcs_sync_function_calls.txt").read_text()
+        assert f"dpd|{GCS_CACHE}|" in calls
+
+    def test_sync_function_failure_returns_nonzero_after_copy(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """A hook failure should not roll back already copied files."""
+        hook_file = _write_sync_hooks(source_with_dpd)
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--sync-function",
+                f"{hook_file}:failing_sync",
+            ]
+        )
+
+        assert result == 1
+        assert (dest_cache / "test_dataset").exists()

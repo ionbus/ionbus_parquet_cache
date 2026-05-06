@@ -57,6 +57,11 @@ class DatasetConfig:
     source_class_name: str = ""
     source_init_args: dict[str, Any] = field(default_factory=dict)
 
+    # Optional post-sync function settings
+    sync_function_location: str | None = None
+    sync_function_name: str | None = None
+    sync_function_init_args: dict[str, Any] = field(default_factory=dict)
+
     # YAML transformation settings
     columns_to_drop: list[str] = field(default_factory=list)
     columns_to_rename: dict[str, str] = field(default_factory=dict)
@@ -123,6 +128,10 @@ class DatasetConfig:
             "source_location": self.source_location,
             "source_class_name": self.source_class_name,
             "source_init_args": self.source_init_args,
+            # Post-sync function settings
+            "sync_function_location": self.sync_function_location,
+            "sync_function_name": self.sync_function_name,
+            "sync_function_init_args": self.sync_function_init_args,
             # Transform settings
             "columns_to_drop": self.columns_to_drop,
             "columns_to_rename": self.columns_to_rename,
@@ -295,6 +304,15 @@ def load_yaml_file(
                 config_file=str(yaml_path),
             )
 
+        sync_function_init_args = settings.get("sync_function_init_args", {})
+        if sync_function_init_args is None:
+            sync_function_init_args = {}
+        if not isinstance(sync_function_init_args, dict):
+            raise ConfigurationError(
+                f"Dataset '{name}' sync_function_init_args must be a mapping",
+                config_file=str(yaml_path),
+            )
+
         configs[name] = DatasetConfig(
             name=name,
             cache_dir=cache_dir,
@@ -314,6 +332,9 @@ def load_yaml_file(
             source_location=settings.get("source_location", ""),
             source_class_name=settings.get("source_class_name", ""),
             source_init_args=settings.get("source_init_args", {}),
+            sync_function_location=settings.get("sync_function_location"),
+            sync_function_name=settings.get("sync_function_name"),
+            sync_function_init_args=sync_function_init_args,
             columns_to_drop=settings.get("columns_to_drop", []),
             columns_to_rename=settings.get("columns_to_rename", {}),
             dropna_columns=settings.get("dropna_columns", []),
