@@ -67,6 +67,11 @@ from ionbus_parquet_cache.bucketing import (
     bucket_instruments,
 )
 
+try:
+    from ionbus_parquet_cache._version import __version__  # type: ignore
+except ImportError:
+    __version__ = "unknown"
+
 __all__ = [
     # Exceptions
     "ParquetCacheError",
@@ -122,5 +127,3 @@ __all__ = [
     "instrument_bucket",
     "bucket_instruments",
 ]
-
-__version__ = "0.1.0"
