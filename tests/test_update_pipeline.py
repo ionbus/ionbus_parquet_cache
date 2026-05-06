@@ -40,7 +40,9 @@ class MockDataSource(DataSource):
 
     def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
         """Return test data for the partition."""
-        dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
+        dates = pd.date_range(
+            partition_spec.start_date, partition_spec.end_date
+        )
         return pd.DataFrame(
             {
                 "Date": dates,
@@ -48,6 +50,32 @@ class MockDataSource(DataSource):
                 "price": [100.0 + i * 0.1 for i in range(len(dates))],
             }
         )
+
+
+class ProvenanceMockSource(MockDataSource):
+    """Mock source that returns snapshot provenance."""
+
+    def get_provenance(
+        self,
+        suffix: str,
+        previous_suffix: str | None,
+    ) -> dict[str, object]:
+        return {
+            "suffix": suffix,
+            "previous_suffix": previous_suffix,
+            "collected_at": dt.datetime(2024, 1, 31, 12, 0),
+        }
+
+
+class InvalidProvenanceMockSource(MockDataSource):
+    """Mock source that violates the provenance hook contract."""
+
+    def get_provenance(
+        self,
+        suffix: str,
+        previous_suffix: str | None,
+    ) -> object:
+        return ["not", "a", "dict"]
 
 
 class InstrumentMockSource(DataSource):
@@ -60,8 +88,12 @@ class InstrumentMockSource(DataSource):
 
     def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
         """Return test data for the partition."""
-        dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
-        instrument = partition_spec.partition_values.get("FutureRoot", "UNKNOWN")
+        dates = pd.date_range(
+            partition_spec.start_date, partition_spec.end_date
+        )
+        instrument = partition_spec.partition_values.get(
+            "FutureRoot", "UNKNOWN"
+        )
         return pd.DataFrame(
             {
                 "Date": dates,
@@ -139,7 +171,9 @@ class TestComputeUpdateWindow:
         assert start == dt.date(2024, 1, 1)
         assert end == dt.date(2024, 12, 31)
 
-    def test_explicit_dates_override(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_explicit_dates_override(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Explicit dates should override automatic computation."""
         source = MockDataSource(simple_dpd)
 
@@ -323,7 +357,9 @@ class TestConvertToArrow:
 
         # Create a LazyFrame with pending operations
         lf = (
-            pl.DataFrame({"a": [1, 2, 3, 4, 5], "b": ["x", "y", "z", "w", "v"]})
+            pl.DataFrame(
+                {"a": [1, 2, 3, 4, 5], "b": ["x", "y", "z", "w", "v"]}
+            )
             .lazy()
             .filter(pl.col("a") > 2)
             .select(["a", "b"])
@@ -553,12 +589,56 @@ class TestExecuteUpdate:
         meta_files = list(simple_dpd.meta_dir.glob("*.pkl.gz"))
         assert len(meta_files) == 1
         assert suffix in meta_files[0].name
+        metadata = simple_dpd._load_metadata()
+        assert metadata.lineage is not None
+        assert metadata.lineage.operation == "initial"
+        assert metadata.lineage.first_snapshot_id == suffix
+        assert metadata.provenance is None
+
+    def test_writes_provenance_sidecar(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
+        """Non-empty provenance dict should be stored outside metadata."""
+        source = ProvenanceMockSource(simple_dpd)
+
+        suffix = simple_dpd.update(
+            source,
+            start_date=dt.date(2024, 1, 1),
+            end_date=dt.date(2024, 1, 31),
+        )
+
+        assert suffix is not None
+        metadata = simple_dpd._load_metadata()
+        assert metadata.provenance is not None
+        assert metadata.provenance.path.startswith("_provenance/")
+        assert simple_dpd.read_provenance()["collected_at"] == dt.datetime(
+            2024,
+            1,
+            31,
+            12,
+            0,
+        )
+
+    def test_invalid_provenance_raises(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
+        """The provenance hook must return a dict."""
+        source = InvalidProvenanceMockSource(simple_dpd)
+
+        with pytest.raises(ValidationError, match="get_provenance"):
+            simple_dpd.update(
+                source,
+                start_date=dt.date(2024, 1, 1),
+                end_date=dt.date(2024, 1, 31),
+            )
 
 
 class TestDPDUpdate:
     """Integration tests for DatedParquetDataset.update()."""
 
-    def test_update_creates_snapshot(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_update_creates_snapshot(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Update should create a new snapshot."""
         source = MockDataSource(simple_dpd)
 
@@ -579,6 +659,38 @@ class TestDPDUpdate:
         )
         assert len(df) > 0
 
+    def test_second_update_tracks_lineage(
+        self,
+        simple_dpd: DatedParquetDataset,
+    ) -> None:
+        """Lineage should point from an update back to its base snapshot."""
+        source = MockDataSource(simple_dpd)
+        first = simple_dpd.update(
+            source,
+            start_date=dt.date(2024, 1, 1),
+            end_date=dt.date(2024, 1, 31),
+        )
+        assert first is not None
+
+        time.sleep(1.1)
+        second = simple_dpd.update(
+            source,
+            start_date=dt.date(2024, 2, 1),
+            end_date=dt.date(2024, 2, 29),
+        )
+        assert second is not None
+
+        metadata = simple_dpd._load_metadata()
+        assert metadata.lineage is not None
+        assert metadata.lineage.operation == "update"
+        assert metadata.lineage.base_snapshot == first
+        assert metadata.lineage.first_snapshot_id == first
+        assert metadata.lineage.added_date_ranges[0].start_date == dt.date(
+            2024,
+            2,
+            1,
+        )
+
     def test_update_dry_run(self, simple_dpd: DatedParquetDataset) -> None:
         """Dry run should not create files."""
         source = MockDataSource(simple_dpd)
@@ -597,7 +709,9 @@ class TestDPDUpdate:
             simple_dpd.meta_dir.glob("*.pkl.gz")
         )
 
-    def test_update_with_cleaner(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_update_with_cleaner(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Update should apply cleaner to data."""
 
         class FilterCleaner(DataCleaner):
@@ -626,7 +740,9 @@ class TestDPDUpdate:
         )
         assert (df["value"] >= 10).all()
 
-    def test_update_with_instruments(self, instrument_dpd: DatedParquetDataset) -> None:
+    def test_update_with_instruments(
+        self, instrument_dpd: DatedParquetDataset
+    ) -> None:
         """Update with instruments filter should limit partitions."""
         source = InstrumentMockSource(instrument_dpd)
 
@@ -647,7 +763,9 @@ class TestDPDUpdate:
         )
         assert set(df["FutureRoot"].unique()) == {"ES"}
 
-    def test_update_no_data_returns_none(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_update_no_data_returns_none(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Update with impossible date range returns None."""
         source = MockDataSource(simple_dpd)
 
@@ -718,7 +836,9 @@ class TestBackfillRestateValidation:
                 backfill=True,
             )
 
-    def test_restate_requires_both_dates(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_restate_requires_both_dates(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Should raise when restate=True without both dates."""
         source = MockDataSource(simple_dpd)
 
@@ -729,7 +849,9 @@ class TestBackfillRestateValidation:
                 restate=True,
             )
 
-    def test_backfill_auto_sets_end_date(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_backfill_auto_sets_end_date(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Backfill should auto-set end_date to cache_start - 1."""
         source = MockDataSource(simple_dpd)
 
@@ -769,7 +891,9 @@ class TestBackfillRestateValidation:
 class TestYamlTransformsInPipeline:
     """Tests for YAML transforms in update pipeline."""
 
-    def test_transforms_rename_columns(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_transforms_rename_columns(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Should rename columns via transforms dict."""
         source = MockDataSource(simple_dpd)
 
@@ -795,7 +919,9 @@ class TestYamlTransformsInPipeline:
         assert "renamed_value" in df.columns
         assert "value" not in df.columns
 
-    def test_transforms_drop_columns(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_transforms_drop_columns(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Should drop columns via transforms dict."""
         source = MockDataSource(simple_dpd)
 
@@ -1090,7 +1216,9 @@ class TestNavigationDirectories:
             # Should have: 2024 / month=M2024-01 / filename.parquet
             assert "2024" in parts, f"Missing year nav dir in {rel_path}"
 
-    def test_day_partition_has_year_month_nav_dirs(self, temp_cache: Path) -> None:
+    def test_day_partition_has_year_month_nav_dirs(
+        self, temp_cache: Path
+    ) -> None:
         """Day partition should create YYYY/MM/ navigation directories."""
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -1146,7 +1274,9 @@ class TestNavigationDirectories:
             parts = rel_path.parts
             # Should be: year=Y2024 / filename.parquet (no extra "2024" nav dir)
             # The first part should be the partition dir, not a nav dir
-            assert parts[0].startswith("year="), f"Unexpected structure: {rel_path}"
+            assert parts[0].startswith(
+                "year="
+            ), f"Unexpected structure: {rel_path}"
 
 
 class TestDateStrClamping:
@@ -1232,7 +1362,9 @@ class TestDateStrClamping:
 class TestPartitionColumnStripping:
     """Tests for partition column stripping before writing parquet files."""
 
-    def test_partition_columns_not_in_final_file(self, temp_cache: Path) -> None:
+    def test_partition_columns_not_in_final_file(
+        self, temp_cache: Path
+    ) -> None:
         """Partition columns should be stripped from the final parquet file."""
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -1255,8 +1387,12 @@ class TestPartitionColumnStripping:
                 dates = pd.date_range(
                     partition_spec.start_date, partition_spec.end_date
                 )
-                instrument = partition_spec.partition_values.get("FutureRoot", "ES")
-                month = partition_spec.partition_values.get("month", "M2024-01")
+                instrument = partition_spec.partition_values.get(
+                    "FutureRoot", "ES"
+                )
+                month = partition_spec.partition_values.get(
+                    "month", "M2024-01"
+                )
                 return pd.DataFrame(
                     {
                         "Date": dates,
@@ -1297,7 +1433,9 @@ class TestPartitionColumnStripping:
             assert "Date" in column_names
             assert "price" in column_names
 
-    def test_data_read_correctly_after_stripping(self, temp_cache: Path) -> None:
+    def test_data_read_correctly_after_stripping(
+        self, temp_cache: Path
+    ) -> None:
         """Data should be readable correctly after partition columns are stripped."""
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
@@ -1319,7 +1457,9 @@ class TestPartitionColumnStripping:
                 dates = pd.date_range(
                     partition_spec.start_date, partition_spec.end_date
                 )
-                category = partition_spec.partition_values.get("category", "A")
+                category = partition_spec.partition_values.get(
+                    "category", "A"
+                )
                 return pd.DataFrame(
                     {
                         "Date": dates,
@@ -1385,9 +1525,16 @@ class TestPerChunkSorting:
                             dt.date(2024, 1, 3),  # Out of order
                             dt.date(2024, 1, 1),
                             dt.date(2024, 1, 2),
-                            dt.date(2024, 1, 2),  # Same date, different symbol
+                            dt.date(
+                                2024, 1, 2
+                            ),  # Same date, different symbol
                         ],
-                        "symbol": ["AAPL", "MSFT", "GOOGL", "AAPL"],  # Out of order
+                        "symbol": [
+                            "AAPL",
+                            "MSFT",
+                            "GOOGL",
+                            "AAPL",
+                        ],  # Out of order
                         "price": [150.0, 350.0, 140.0, 145.0],
                     }
                 )
@@ -1420,14 +1567,19 @@ class TestPerChunkSorting:
         # The data should already be in sorted order
         pd.testing.assert_frame_equal(df_actual, df_sorted)
 
-    def test_sort_columns_only_uses_existing_columns(self, temp_cache: Path) -> None:
+    def test_sort_columns_only_uses_existing_columns(
+        self, temp_cache: Path
+    ) -> None:
         """Sorting should only use columns that exist in the data."""
         dpd = DatedParquetDataset(
             cache_dir=temp_cache,
             name="sort_missing_test",
             date_col="Date",
             date_partition="month",
-            sort_columns=["Date", "nonexistent_col"],  # One column doesn't exist
+            sort_columns=[
+                "Date",
+                "nonexistent_col",
+            ],  # One column doesn't exist
         )
 
         class SimpleSource(DataSource):
@@ -1649,7 +1801,10 @@ class TestArrowNativeWritePath:
                         ),
                         TestArrowNativeWritePath.verifier_col: pl.Series(
                             TestArrowNativeWritePath.verifier_col,
-                            [None if i % 2 else 1 for i in range(len(timestamps))],
+                            [
+                                None if i % 2 else 1
+                                for i in range(len(timestamps))
+                            ],
                             dtype=pl.UInt8,
                         ),
                         "value": values,
@@ -1812,7 +1967,9 @@ class TestNoneFromGetData:
         # Must not raise — previously raised ValidationError("Cannot convert NoneType")
         execute_update(simple_dpd, source, plan)
 
-    def test_none_mixed_with_data_in_chunked_group(self, temp_cache: Path) -> None:
+    def test_none_mixed_with_data_in_chunked_group(
+        self, temp_cache: Path
+    ) -> None:
         """
         When a group has multiple chunks and some return None, the non-None
         chunks are still consolidated into the final file correctly.

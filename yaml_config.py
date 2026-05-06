@@ -50,6 +50,7 @@ class DatasetConfig:
     use_update_lock: bool = True
     lock_dir: Path | None = None
     row_group_size: int | None = None
+    annotations: dict[str, Any] | None = None
 
     # Data source settings
     source_location: str = ""
@@ -104,7 +105,7 @@ class DatasetConfig:
         Returns:
             Dict with all configuration fields.
         """
-        return {
+        config = {
             # Core DPD settings
             "date_col": self.date_col,
             "date_partition": self.date_partition,
@@ -133,6 +134,9 @@ class DatasetConfig:
             "cleaning_class_name": self.cleaning_class_name,
             "cleaning_init_args": self.cleaning_init_args,
         }
+        if self.annotations is not None:
+            config["annotations"] = self.annotations
+        return config
 
     def load_source_class(self) -> type["DataSource"]:
         """
@@ -195,7 +199,9 @@ class DatasetConfig:
                 config_file=str(self.cache_dir / "yaml"),
             )
 
-        cleaner_path = _resolve_path(self.cache_dir, self.cleaning_class_location)
+        cleaner_path = _resolve_path(
+            self.cache_dir, self.cleaning_class_location
+        )
         return _load_class_from_file(
             cleaner_path,
             self.cleaning_class_name,
@@ -203,7 +209,9 @@ class DatasetConfig:
             f"Dataset '{self.name}'",
         )
 
-    def create_cleaner(self, dataset: "DatedParquetDataset") -> "DataCleaner | None":
+    def create_cleaner(
+        self, dataset: "DatedParquetDataset"
+    ) -> "DataCleaner | None":
         """
         Create a configured DataCleaner instance if configured.
 
@@ -228,7 +236,9 @@ class DatasetConfig:
         )
 
 
-def load_yaml_file(yaml_path: Path, cache_dir: Path) -> dict[str, DatasetConfig]:
+def load_yaml_file(
+    yaml_path: Path, cache_dir: Path
+) -> dict[str, DatasetConfig]:
     """
     Load dataset configurations from a single YAML file.
 
@@ -278,6 +288,13 @@ def load_yaml_file(yaml_path: Path, cache_dir: Path) -> dict[str, DatasetConfig]
                 config_file=str(yaml_path),
             )
 
+        annotations = settings.get("annotations")
+        if "annotations" in settings and not isinstance(annotations, dict):
+            raise ConfigurationError(
+                f"Dataset '{name}' annotations must be a mapping",
+                config_file=str(yaml_path),
+            )
+
         configs[name] = DatasetConfig(
             name=name,
             cache_dir=cache_dir,
@@ -293,6 +310,7 @@ def load_yaml_file(yaml_path: Path, cache_dir: Path) -> dict[str, DatasetConfig]
             instruments=settings.get("instruments"),
             num_instrument_buckets=settings.get("num_instrument_buckets"),
             row_group_size=settings.get("row_group_size"),
+            annotations=annotations,
             source_location=settings.get("source_location", ""),
             source_class_name=settings.get("source_class_name", ""),
             source_init_args=settings.get("source_init_args", {}),
@@ -486,13 +504,15 @@ def _load_installed_module_source(
     cls = getattr(module, class_name, None)
     if cls is None:
         raise ConfigurationError(
-            f"{context}: Class '{class_name}' not found in module " f"'{module_path}'",
+            f"{context}: Class '{class_name}' not found in module "
+            f"'{module_path}'",
         )
 
     # Validate: must be a class
     if not inspect.isclass(cls):
         raise ConfigurationError(
-            f"{context}: '{class_name}' in module '{module_path}' is not a " f"class",
+            f"{context}: '{class_name}' in module '{module_path}' is not a "
+            f"class",
         )
 
     # Validate: must inherit from DataSource or BucketedDataSource
@@ -599,26 +619,35 @@ def apply_yaml_transforms(
     # 1. Rename columns
     if config.columns_to_rename:
         renames = ", ".join(
-            f'"{old}" AS "{new}"' for old, new in config.columns_to_rename.items()
+            f'"{old}" AS "{new}"'
+            for old, new in config.columns_to_rename.items()
         )
         # Get columns that aren't being renamed
         current_cols = rel.columns
         other_cols = [
-            f'"{c}"' for c in current_cols if c not in config.columns_to_rename
+            f'"{c}"'
+            for c in current_cols
+            if c not in config.columns_to_rename
         ]
-        select_clause = ", ".join(other_cols + [renames]) if other_cols else renames
+        select_clause = (
+            ", ".join(other_cols + [renames]) if other_cols else renames
+        )
         rel = duckdb.sql(f"SELECT {select_clause} FROM rel")
 
     # 2. Drop columns
     if config.columns_to_drop:
         current_cols = rel.columns
-        keep_cols = [c for c in current_cols if c not in config.columns_to_drop]
+        keep_cols = [
+            c for c in current_cols if c not in config.columns_to_drop
+        ]
         select_clause = ", ".join(f'"{c}"' for c in keep_cols)
         rel = duckdb.sql(f"SELECT {select_clause} FROM rel")
 
     # 3. Drop rows with nulls
     if config.dropna_columns:
-        conditions = " AND ".join(f'"{c}" IS NOT NULL' for c in config.dropna_columns)
+        conditions = " AND ".join(
+            f'"{c}" IS NOT NULL' for c in config.dropna_columns
+        )
         rel = duckdb.sql(f"SELECT * FROM rel WHERE {conditions}")
 
     # 4. Deduplicate
@@ -629,7 +658,9 @@ def apply_yaml_transforms(
         key_cols = ", ".join(f'"{c}"' for c in config.dedup_columns)
 
         # Add row number to track input order
-        rel = duckdb.sql("SELECT *, ROW_NUMBER() OVER () AS _input_order FROM rel")
+        rel = duckdb.sql(
+            "SELECT *, ROW_NUMBER() OVER () AS _input_order FROM rel"
+        )
 
         if config.dedup_keep == "first":
             rel = duckdb.sql(

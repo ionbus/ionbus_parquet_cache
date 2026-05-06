@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
-from unittest.mock import patch
 
 import pandas as pd
 import pyarrow as pa
@@ -16,8 +15,10 @@ from ionbus_parquet_cache.sync_cache import (
     _should_copy_file,
     sync_cache_main,
 )
-from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, FileMetadata
-
+from ionbus_parquet_cache.dated_dataset import (
+    DatedParquetDataset,
+    FileMetadata,
+)
 
 GCS_CACHE = "gs://bucket/cache"
 
@@ -57,10 +58,12 @@ def source_with_dpd(source_cache: Path) -> Path:
     )
 
     # Create test data
-    df = pd.DataFrame({
-        "Date": pd.date_range("2024-01-01", "2024-01-31"),
-        "value": range(31),
-    })
+    df = pd.DataFrame(
+        {
+            "Date": pd.date_range("2024-01-01", "2024-01-31"),
+            "value": range(31),
+        }
+    )
     table = pa.Table.from_pandas(df)
 
     # Generate a snapshot suffix (sync discovers files by suffix pattern)
@@ -97,77 +100,93 @@ class TestSyncCacheMain:
 
     def test_push_missing_source(self, tmp_path: Path) -> None:
         """Push with missing source should fail."""
-        result = sync_cache_main([
-            "push",
-            str(tmp_path / "nonexistent"),
-            str(tmp_path / "dest"),
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(tmp_path / "nonexistent"),
+                str(tmp_path / "dest"),
+            ]
+        )
         assert result == 1
 
     def test_pull_missing_source(self, tmp_path: Path) -> None:
         """Pull with missing source should fail."""
-        result = sync_cache_main([
-            "pull",
-            str(tmp_path / "nonexistent"),
-            str(tmp_path / "dest"),
-        ])
+        result = sync_cache_main(
+            [
+                "pull",
+                str(tmp_path / "nonexistent"),
+                str(tmp_path / "dest"),
+            ]
+        )
         assert result == 1
 
     def test_s3_source_not_implemented(self, tmp_path: Path) -> None:
         """S3 source path should fail with not implemented."""
-        result = sync_cache_main([
-            "push",
-            "s3://bucket/cache",
-            str(tmp_path / "dest"),
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                "s3://bucket/cache",
+                str(tmp_path / "dest"),
+            ]
+        )
         assert result == 1
 
     def test_s3_destination_not_implemented(self, source_cache: Path) -> None:
         """S3 destination path should fail with not implemented."""
-        result = sync_cache_main([
-            "push",
-            str(source_cache),
-            "s3://bucket/cache",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_cache),
+                "s3://bucket/cache",
+            ]
+        )
         assert result == 1
 
     def test_mutually_exclusive_dataset_dpd_only(
         self, source_cache: Path, dest_cache: Path
     ) -> None:
         """--dataset and --dpd-only are mutually exclusive."""
-        result = sync_cache_main([
-            "push",
-            str(source_cache),
-            str(dest_cache),
-            "--dataset", "foo",
-            "--dpd-only",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_cache),
+                str(dest_cache),
+                "--dataset",
+                "foo",
+                "--dpd-only",
+            ]
+        )
         assert result == 1
 
     def test_mutually_exclusive_dataset_npd_only(
         self, source_cache: Path, dest_cache: Path
     ) -> None:
         """--dataset and --npd-only are mutually exclusive."""
-        result = sync_cache_main([
-            "push",
-            str(source_cache),
-            str(dest_cache),
-            "--dataset", "foo",
-            "--npd-only",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_cache),
+                str(dest_cache),
+                "--dataset",
+                "foo",
+                "--npd-only",
+            ]
+        )
         assert result == 1
 
     def test_mutually_exclusive_dpd_npd_only(
         self, source_cache: Path, dest_cache: Path
     ) -> None:
         """--dpd-only and --npd-only are mutually exclusive."""
-        result = sync_cache_main([
-            "push",
-            str(source_cache),
-            str(dest_cache),
-            "--dpd-only",
-            "--npd-only",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_cache),
+                str(dest_cache),
+                "--dpd-only",
+                "--npd-only",
+            ]
+        )
         assert result == 1
 
 
@@ -178,11 +197,13 @@ class TestSyncPush:
         self, source_cache: Path, dest_cache: Path
     ) -> None:
         """Push from empty cache should succeed."""
-        result = sync_cache_main([
-            "push",
-            str(source_cache),
-            str(dest_cache),
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_cache),
+                str(dest_cache),
+            ]
+        )
         assert result == 0
 
     def test_push_creates_destination(
@@ -192,11 +213,13 @@ class TestSyncPush:
         dest = tmp_path / "new_dest"
         assert not dest.exists()
 
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest),
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest),
+            ]
+        )
         assert result == 0
         assert dest.exists()
 
@@ -204,11 +227,13 @@ class TestSyncPush:
         self, source_with_dpd: Path, dest_cache: Path
     ) -> None:
         """Push should copy DPD data and metadata files."""
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+            ]
+        )
         assert result == 0
 
         # Check metadata was copied
@@ -223,16 +248,55 @@ class TestSyncPush:
         data_files = list(data_dir.glob("*.parquet"))
         assert len(data_files) == 1
 
+    def test_push_copies_dpd_provenance_sidecar(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+    ) -> None:
+        """Push should copy provenance sidecars referenced by metadata."""
+        dpd = DatedParquetDataset(
+            cache_dir=source_with_dpd,
+            name="test_dataset",
+            date_col="Date",
+            date_partition="month",
+        )
+        metadata = dpd._load_metadata()
+        provenance = dpd._write_provenance_sidecar(
+            metadata.suffix,
+            {"inputs": ["raw_a", "raw_b"]},
+        )
+        metadata.provenance = provenance
+        meta_path = dpd.meta_dir / f"test_dataset_{metadata.suffix}.pkl.gz"
+        metadata.to_pickle(meta_path)
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+            ]
+        )
+
+        assert result == 0
+        sidecars = list(
+            (dest_cache / "test_dataset" / "_provenance").glob(
+                "*.provenance.pkl.gz"
+            )
+        )
+        assert len(sidecars) == 1
+
     def test_push_dry_run_no_copy(
         self, source_with_dpd: Path, dest_cache: Path
     ) -> None:
         """Push --dry-run should not copy files."""
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--dry-run",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--dry-run",
+            ]
+        )
         assert result == 0
 
         # Nothing should be copied
@@ -243,20 +307,24 @@ class TestSyncPush:
     ) -> None:
         """Push should skip files that haven't changed."""
         # First sync
-        result1 = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-        ])
+        result1 = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+            ]
+        )
         assert result1 == 0
 
         # Second sync should skip all files (unchanged)
-        result2 = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--verbose",
-        ])
+        result2 = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--verbose",
+            ]
+        )
         assert result2 == 0
 
     def test_push_dataset_filter(
@@ -264,12 +332,15 @@ class TestSyncPush:
     ) -> None:
         """Push --dataset should only sync matching datasets."""
         # Try to sync non-existent dataset
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--dataset", "nonexistent",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--dataset",
+                "nonexistent",
+            ]
+        )
         assert result == 0
 
         # Nothing should be synced
@@ -289,12 +360,14 @@ class TestSyncPush:
         df = pd.DataFrame({"col": [1, 2, 3]})
         pq.write_table(pa.Table.from_pandas(df), npd_file)
 
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--dpd-only",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--dpd-only",
+            ]
+        )
         assert result == 0
 
         # DPD should be synced
@@ -316,12 +389,14 @@ class TestSyncPush:
         df = pd.DataFrame({"col": [1, 2, 3]})
         pq.write_table(pa.Table.from_pandas(df), npd_file)
 
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--npd-only",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--npd-only",
+            ]
+        )
         assert result == 0
 
         # DPD should NOT be synced
@@ -334,11 +409,13 @@ class TestSyncPush:
     ) -> None:
         """Push --delete should remove files at dest not in source."""
         # First sync
-        result1 = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-        ])
+        result1 = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+            ]
+        )
         assert result1 == 0
 
         # Create extra file at destination
@@ -347,12 +424,14 @@ class TestSyncPush:
         assert extra_file.exists()
 
         # Sync with --delete
-        result2 = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--delete",
-        ])
+        result2 = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--delete",
+            ]
+        )
         assert result2 == 0
 
         # Extra file should be deleted
@@ -363,24 +442,28 @@ class TestSyncPush:
     ) -> None:
         """Push --delete --dry-run should not delete files."""
         # First sync
-        sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-        ])
+        sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+            ]
+        )
 
         # Create extra file at destination
         extra_file = dest_cache / "test_dataset" / "extra.parquet"
         extra_file.write_bytes(b"extra data")
 
         # Dry run with --delete
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--delete",
-            "--dry-run",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--delete",
+                "--dry-run",
+            ]
+        )
         assert result == 0
 
         # Extra file should NOT be deleted
@@ -391,11 +474,13 @@ class TestSyncPush:
     ) -> None:
         """Push --delete should preserve yaml/ and code/ directories."""
         # First sync
-        sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-        ])
+        sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+            ]
+        )
 
         # Create files in yaml/ and code/ at destination
         yaml_dir = dest_cache / "yaml"
@@ -409,12 +494,14 @@ class TestSyncPush:
         code_file.write_text("# custom source")
 
         # Sync with --delete
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--delete",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--delete",
+            ]
+        )
         assert result == 0
 
         # yaml/ and code/ should be preserved
@@ -429,14 +516,16 @@ class TestSyncPush:
         ignored_file.parent.mkdir(parents=True)
         ignored_file.write_bytes(b"ignored data")
 
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--ignore-datasets",
-            "ignored_dataset",
-            "--delete",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--ignore-datasets",
+                "ignored_dataset",
+                "--delete",
+            ]
+        )
 
         assert result == 0
         assert ignored_file.exists()
@@ -449,11 +538,13 @@ class TestSyncPull:
         self, source_with_dpd: Path, dest_cache: Path
     ) -> None:
         """Pull should copy files from source to destination."""
-        result = sync_cache_main([
-            "pull",
-            str(source_with_dpd),
-            str(dest_cache),
-        ])
+        result = sync_cache_main(
+            [
+                "pull",
+                str(source_with_dpd),
+                str(dest_cache),
+            ]
+        )
         assert result == 0
 
         # Check data was copied
@@ -470,6 +561,7 @@ class TestGcsBlobSelection:
             "dpd/month=M2024-01/data_1AAAAAA.parquet",
             "dpd/_meta_data/dpd_1BBBBB0.pkl.gz",
             "dpd/month=M2024-01/data_1BBBBB0.parquet",
+            "dpd/_provenance/dpd_1BBBBB0.provenance.pkl.gz",
             "non-dated/ref/ref_1AAAAAA/data.parquet",
             "non-dated/ref/ref_1BBBBB0/data.parquet",
         ]
@@ -488,6 +580,7 @@ class TestGcsBlobSelection:
         assert {rel for _, rel in selected} == {
             "dpd/_meta_data/dpd_1BBBBB0.pkl.gz",
             "dpd/month=M2024-01/data_1BBBBB0.parquet",
+            "dpd/_provenance/dpd_1BBBBB0.provenance.pkl.gz",
             "non-dated/ref/ref_1BBBBB0/data.parquet",
         }
 
@@ -602,8 +695,6 @@ class TestAllSnapshots:
         self, source_cache: Path, dest_cache: Path
     ) -> None:
         """--all-snapshots should sync all snapshots, not just current."""
-        import time
-
         # Create DPD with multiple snapshots
         dpd = DatedParquetDataset(
             cache_dir=source_cache,
@@ -617,10 +708,12 @@ class TestAllSnapshots:
         suffix2 = "1BBBBB0"
 
         # Create first snapshot
-        df1 = pd.DataFrame({
-            "Date": pd.date_range("2024-01-01", "2024-01-15"),
-            "value": range(15),
-        })
+        df1 = pd.DataFrame(
+            {
+                "Date": pd.date_range("2024-01-01", "2024-01-15"),
+                "value": range(15),
+            }
+        )
         table1 = pa.Table.from_pandas(df1)
 
         data_dir = source_cache / "multi_snap"
@@ -646,10 +739,12 @@ class TestAllSnapshots:
         )
 
         # Create second snapshot with different suffix
-        df2 = pd.DataFrame({
-            "Date": pd.date_range("2024-01-01", "2024-01-31"),
-            "value": range(31),
-        })
+        df2 = pd.DataFrame(
+            {
+                "Date": pd.date_range("2024-01-01", "2024-01-31"),
+                "value": range(31),
+            }
+        )
         table2 = pa.Table.from_pandas(df2)
 
         data_file2 = data_dir / "month=M2024-01" / f"data_{suffix2}.parquet"
@@ -671,12 +766,14 @@ class TestAllSnapshots:
         )
 
         # Sync with --all-snapshots
-        result = sync_cache_main([
-            "push",
-            str(source_cache),
-            str(dest_cache),
-            "--all-snapshots",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_cache),
+                str(dest_cache),
+                "--all-snapshots",
+            ]
+        )
         assert result == 0
 
         # Both metadata files should be synced
@@ -700,10 +797,12 @@ class TestAllSnapshots:
         suffix1 = "1AAAAAA"  # older
         suffix2 = "1BBBBB0"  # newer (current)
 
-        df1 = pd.DataFrame({
-            "Date": pd.date_range("2024-01-01", "2024-01-15"),
-            "value": range(15),
-        })
+        df1 = pd.DataFrame(
+            {
+                "Date": pd.date_range("2024-01-01", "2024-01-15"),
+                "value": range(15),
+            }
+        )
         table1 = pa.Table.from_pandas(df1)
 
         data_dir = source_cache / "multi_snap"
@@ -729,10 +828,12 @@ class TestAllSnapshots:
         )
 
         # Create second snapshot (newer)
-        df2 = pd.DataFrame({
-            "Date": pd.date_range("2024-01-01", "2024-01-31"),
-            "value": range(31),
-        })
+        df2 = pd.DataFrame(
+            {
+                "Date": pd.date_range("2024-01-01", "2024-01-31"),
+                "value": range(31),
+            }
+        )
         table2 = pa.Table.from_pandas(df2)
 
         data_file2 = data_dir / "month=M2024-01" / f"data_{suffix2}.parquet"
@@ -754,11 +855,13 @@ class TestAllSnapshots:
         )
 
         # Sync WITHOUT --all-snapshots
-        result = sync_cache_main([
-            "push",
-            str(source_cache),
-            str(dest_cache),
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_cache),
+                str(dest_cache),
+            ]
+        )
         assert result == 0
 
         # Only one metadata file (current) should be synced
@@ -774,24 +877,30 @@ class TestRename:
         self, source_with_dpd: Path, dest_cache: Path
     ) -> None:
         """--rename without colon should fail."""
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--rename", "invalid_format",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--rename",
+                "invalid_format",
+            ]
+        )
         assert result == 1
 
     def test_rename_copies_to_new_name(
         self, source_with_dpd: Path, dest_cache: Path
     ) -> None:
         """--rename should copy dataset with new name."""
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--rename", "test_dataset:renamed_dataset",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--rename",
+                "test_dataset:renamed_dataset",
+            ]
+        )
         assert result == 0
 
         # Source name should NOT exist at destination
@@ -820,10 +929,12 @@ class TestRename:
             date_col="Date",
             date_partition="month",
         )
-        df = pd.DataFrame({
-            "Date": pd.date_range("2024-02-01", "2024-02-28"),
-            "value": range(28),
-        })
+        df = pd.DataFrame(
+            {
+                "Date": pd.date_range("2024-02-01", "2024-02-28"),
+                "value": range(28),
+            }
+        )
         table = pa.Table.from_pandas(df)
         suffix = "1CCC000"
 
@@ -849,12 +960,15 @@ class TestRename:
         )
 
         # Rename only test_dataset
-        result = sync_cache_main([
-            "push",
-            str(source_with_dpd),
-            str(dest_cache),
-            "--rename", "test_dataset:renamed_dataset",
-        ])
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--rename",
+                "test_dataset:renamed_dataset",
+            ]
+        )
         assert result == 0
 
         # Only the renamed dataset should be at destination

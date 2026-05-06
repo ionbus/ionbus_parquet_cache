@@ -367,6 +367,11 @@ datasets:
 
 ## testing patterns
 
+agent environment note: run Python and pytest through the managed environment
+script described in the project instructions. `ruff` and `black` are installed
+in the global environment on this machine, so use the global commands directly
+when they are missing from the managed Python environment.
+
 to test code that reads/writes to ionbus_parquet_cache:
 
 ```python
