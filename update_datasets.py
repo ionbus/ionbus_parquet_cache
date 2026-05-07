@@ -16,7 +16,10 @@ import datetime as dt
 import sys
 from pathlib import Path
 
-from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, SnapshotMetadata
+from ionbus_parquet_cache.dated_dataset import (
+    DatedParquetDataset,
+    SnapshotMetadata,
+)
 from ionbus_parquet_cache.exceptions import (
     ConfigurationError,
     DataSourceError,
@@ -83,7 +86,8 @@ def update_cache_main(args: list[str] | None = None) -> int:
         help="Show what would be updated without writing",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Verbose output",
     )
@@ -92,9 +96,7 @@ def update_cache_main(args: list[str] | None = None) -> int:
 
     # Validate arguments
     if parsed.backfill and parsed.restate:
-        logger.error(
-            "Error: --backfill and --restate are mutually exclusive"
-        )
+        logger.error("Error: --backfill and --restate are mutually exclusive")
         return 1
 
     if parsed.backfill and parsed.end_date:
@@ -114,9 +116,7 @@ def update_cache_main(args: list[str] | None = None) -> int:
         try:
             start_date = dt.date.fromisoformat(parsed.start_date)
         except ValueError:
-            logger.error(
-                f"Error: Invalid start date: {parsed.start_date}"
-            )
+            logger.error(f"Error: Invalid start date: {parsed.start_date}")
             return 1
 
     if parsed.end_date:
@@ -169,9 +169,7 @@ def _run_update(
     # Discover datasets from disk
     datasets = _discover_datasets_from_disk(cache_path)
     if not datasets:
-        logger.error(
-            f"Error: No datasets with metadata found in {cache_dir}"
-        )
+        logger.error(f"Error: No datasets with metadata found in {cache_dir}")
         logger.error(
             "Hint: Use yaml-create-datasets to create datasets from "
             "YAML configuration."
@@ -255,7 +253,11 @@ def _discover_datasets_from_disk(
     for item in cache_path.iterdir():
         if not item.is_dir():
             continue
-        if item.name.startswith("_") or item.name == "yaml" or item.name == "non-dated":
+        if (
+            item.name.startswith("_")
+            or item.name == "yaml"
+            or item.name == "non-dated"
+        ):
             continue
         if item.name == "code":
             continue
@@ -266,7 +268,11 @@ def _discover_datasets_from_disk(
 
         # Find latest metadata file (excluding trimmed files)
         meta_files = sorted(
-            [f for f in meta_dir.glob("*.pkl.gz") if "_trimmed" not in f.name],
+            [
+                f
+                for f in meta_dir.glob("*.pkl.gz")
+                if "_trimmed" not in f.name
+            ],
             reverse=True,
         )
         if not meta_files:
@@ -284,11 +290,13 @@ def _discover_datasets_from_disk(
             partition_cols = config.get("partition_columns", [])
             num_buckets = config.get("num_instrument_buckets")
             if num_buckets is not None:
-                from ionbus_parquet_cache.bucketing import INSTRUMENT_BUCKET_COL
+                from ionbus_parquet_cache.bucketing import (
+                    INSTRUMENT_BUCKET_COL,
+                )
+
                 # Remove auto-injected bucket column for reconstruction
                 partition_cols = [
-                    c for c in partition_cols
-                    if c != INSTRUMENT_BUCKET_COL
+                    c for c in partition_cols if c != INSTRUMENT_BUCKET_COL
                 ]
 
             # Create DPD from stored config

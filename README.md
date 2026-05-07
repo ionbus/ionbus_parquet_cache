@@ -40,6 +40,7 @@
    * [Basic example](#basic-example)
    * [With data transformations](#with-data-transformations)
    * [Annotations](#annotations)
+   * [Column descriptions](#column-descriptions)
    * [Configuration reference](#configuration-reference)
 - [Data Cleaning](#data-cleaning)
 - [Instrument Hash Bucketing](#instrument-hash-bucketing)
@@ -54,6 +55,7 @@
 - [CLI Tools](#cli-tools)
    * [yaml-create-datasets](#yaml-create-datasets)
    * [update-cache](#update-cache)
+   * [import-npd](#import-npd)
    * [cleanup-cache](#cleanup-cache)
    * [sync-cache](#sync-cache)
    * [Sync Functions](#sync-functions)
@@ -478,6 +480,13 @@ npd = registry.get_dataset("ref.instrument_master")
 df = npd.read_data()
 ```
 
+Import externally produced NPD snapshots from a parquet file or directory:
+
+```bash
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet
+```
+
 ### Search order and naming conventions
 
 When you call `get_dataset("name")`, the registry searches:
@@ -584,12 +593,13 @@ Authentication uses [Application Default Credentials](https://cloud.google.com/d
 
 Use the CLI tools to update datasets. This keeps updates separate from your reading code.
 
-There are two CLI tools for updating:
+There are three common CLI tools for creating or updating cache data:
 
 | Tool | Purpose |
 |------|---------|
-| `yaml-create-datasets` | Create new datasets or update from YAML config |
-| `update-cache` | Routine updates using stored metadata (no YAML needed) |
+| `yaml-create-datasets` | Create new DPDs or update DPDs from YAML config |
+| `update-cache` | Routine DPD updates using stored metadata (no YAML needed) |
+| `import-npd` | Import a parquet file or directory as an NPD snapshot |
 
 ### Creating a new dataset (from YAML)
 
@@ -831,12 +841,13 @@ Do not store credentials, API keys, passwords, tokens, or private key material
 in YAML files. YAML configuration is saved into snapshot metadata and may be
 copied when caches are synced.
 
-Treat `source_init_args`, `cleaning_init_args`, and
-`sync_function_init_args` as non-secret configuration only: endpoint URLs,
-timeouts, project names, table names, and other values that are safe to keep in
-metadata. DataSources, DataCleaners, and sync functions that need secrets
-should read them from environment variables or an external credential provider
-and fail clearly if a required value is missing.
+Treat `source_init_args`, `cleaning_init_args`,
+`sync_function_init_args`, and `column_descriptions` as non-secret
+configuration only: endpoint URLs, timeouts, project names, table names,
+column blurbs, and other values that are safe to keep in metadata.
+DataSources, DataCleaners, and sync functions that need secrets should read
+them from environment variables or an external credential provider and fail
+clearly if a required value is missing.
 
 Treat `annotations` and snapshot provenance sidecars as non-secret cache
 artifacts too. They are copied with snapshots and may be readable anywhere the
@@ -887,6 +898,12 @@ datasets:
           1: active
           2: stale
           4: manually_verified
+
+    # Optional human-readable column blurbs stored with snapshot metadata
+    column_descriptions:
+      Date: Trading date.
+      FutureRoot: Futures root symbol.
+      StatusFlags: Bitmask of quote state flags.
 
     # Where to get data
     source_location: code/futures_source.py
@@ -945,6 +962,40 @@ when the previous snapshot also has no annotations.
 Keep annotations small. Large audit records, source manifests, request logs, or
 process graphs belong in snapshot provenance via `DataSource.get_provenance()`.
 
+### Column descriptions
+
+Use optional `column_descriptions` for short human-readable blurbs keyed by
+public column name. They are stored in the captured YAML configuration inside
+snapshot metadata so downstream users can inspect what columns mean.
+
+```yaml
+datasets:
+  ref.vendor_instruments:
+    column_descriptions:
+      instrument_id: Quiet symbology_v2 listing-level UUID.
+      vendor_instrument_id: Vendor-native instrument identifier.
+      vendor_symbol: Vendor ticker-like symbol.
+```
+
+Column descriptions are optional and may be partial. If omitted on a later
+snapshot, the previous dictionary is carried forward. Explicit updates may add
+new column descriptions and may change existing text. Text is only validated as
+a string; shortening, rewording, or correcting a description is allowed.
+Existing description keys may not be removed within the same cache lineage.
+The removal rule is per key: `column_descriptions: {}` is allowed only when the
+previous dictionary was empty, because otherwise it removes every existing key.
+
+Read stored DPD column descriptions from snapshot metadata:
+
+```python
+descriptions = dpd.get_column_descriptions()
+old_descriptions = dpd.get_column_descriptions(snapshot="1H4DW00")
+```
+
+The method returns a copy of the current or requested snapshot dictionary.
+NPDs currently do not have YAML-backed snapshot metadata, so this accessor is
+DPD-only.
+
 ### Configuration reference
 
 | Field | Type | Default | Description |
@@ -958,6 +1009,7 @@ process graphs belong in snapshot provenance via `DataSource.get_provenance()`.
 | `repull_n_days` | `int` | `0` | Re-fetch this many recent business days on each update |
 | `row_group_size` | `int` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values enable row-group-level predicate pushdown at the cost of more file metadata. |
 | `annotations` | `dict` | `None` | Small user-owned notes stored in the captured YAML configuration. Append-only across snapshots: additions are allowed, removals and changes are rejected. |
+| `column_descriptions` | `dict[str, str]` | `None` | Optional human-readable descriptions keyed by column name. Omitted values carry forward; explicit updates may add or change text but may not remove existing keys. |
 | `instrument_column` | `str` | `None` | Column name holding instrument identifiers (e.g., `"ticker"`). Required when `num_instrument_buckets` is set. |
 | `num_instrument_buckets` | `int` | `None` | Enable hash bucketing: group tickers into this many bucket directories instead of one directory per ticker. Must be set together with `instrument_column`. |
 | `instruments` | `list[str]` | `None` | List of instruments to filter on (uses `instrument_column`) |
@@ -1285,6 +1337,38 @@ python -m ionbus_parquet_cache.update_datasets /path/to/cache \
 python -m ionbus_parquet_cache.update_datasets /path/to/cache --dry-run --verbose
 ```
 
+### import-npd
+
+Import a parquet file or directory as a complete `NonDatedParquetDataset`
+snapshot. Use this when reference/static data has already been produced outside
+the parquet cache and should be stored under a cache-managed NPD name.
+
+```bash
+# Import one parquet file
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet
+
+# Import a directory containing parquet files
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.exchange_calendar /source/exchange_calendar/
+
+# Preview without copying
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet \
+    --dry-run
+
+# Skip the PyArrow dataset-open validation for trusted/already validated data
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet \
+    --skip-validation
+```
+
+By default, the command validates that the source can be opened as a PyArrow
+parquet dataset before copying. `--skip-validation` still requires the source
+to exist; single-file sources must end in `.parquet`, and directory sources
+must contain at least one `.parquet` file. Direct imports into `gs://` caches
+are not supported; import locally and use `sync-cache push`.
+
 ### cleanup-cache
 
 Analyze disk usage and generate cleanup scripts. Snapshot cleanup generates scripts
@@ -1433,6 +1517,10 @@ datasets:
     sync_function_init_args:
       catalog_url: https://catalog.example.com
 ```
+
+Configured per-dataset sync functions currently come from DPD YAML entries.
+NPD sync targets are supported, but NPDs do not yet have a YAML configuration
+contract; use the CLI `--sync-function` override for NPD sync hooks.
 
 Function example:
 

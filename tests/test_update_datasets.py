@@ -29,10 +29,12 @@ class MockDataSource(DataSource):
             partition_spec.start_date, partition_spec.end_date
         )
         n = len(dates)
-        return pd.DataFrame({
-            "Date": dates,
-            "price": [100.0 + i * 0.1 for i in range(n)],
-        })
+        return pd.DataFrame(
+            {
+                "Date": dates,
+                "price": [100.0 + i * 0.1 for i in range(n)],
+            }
+        )
 
 
 class BucketedInstrumentSource(BucketedDataSource):
@@ -59,14 +61,18 @@ class BucketedInstrumentSource(BucketedDataSource):
         tables = []
         for ticker in instruments:
             dates = pd.date_range(start_date, end_date)
-            table = pa.table({
-                "Date": pa.array(dates.date, type=pa.date32()),
-                "ticker": pa.array([ticker] * len(dates), type=pa.string()),
-                "price": pa.array(
-                    [100.0 + i * 0.1 for i in range(len(dates))],
-                    type=pa.float64(),
-                ),
-            })
+            table = pa.table(
+                {
+                    "Date": pa.array(dates.date, type=pa.date32()),
+                    "ticker": pa.array(
+                        [ticker] * len(dates), type=pa.string()
+                    ),
+                    "price": pa.array(
+                        [100.0 + i * 0.1 for i in range(len(dates))],
+                        type=pa.float64(),
+                    ),
+                }
+            )
             tables.append(table)
 
         if not tables:
@@ -83,9 +89,7 @@ def temp_cache(tmp_path: Path) -> Path:
 class TestUpdateCacheReconstruction:
     """Tests for dataset reconstruction from stored metadata."""
 
-    def test_bucketed_dataset_reconstruction(
-        self, temp_cache: Path
-    ) -> None:
+    def test_bucketed_dataset_reconstruction(self, temp_cache: Path) -> None:
         """
         Bucketed DPD via update-cache: verify that num_instrument_buckets,
         instrument_column, and __instrument_bucket__ in partition_columns
@@ -144,9 +148,7 @@ class TestUpdateCacheReconstruction:
         assert reconstructed._metadata is not None
         assert reconstructed._metadata.suffix == suffix
 
-    def test_row_group_size_preserved(
-        self, temp_cache: Path
-    ) -> None:
+    def test_row_group_size_preserved(self, temp_cache: Path) -> None:
         """
         row_group_size preserved through update-cache: verify that
         row_group_size=5000 is stored in metadata and reconstructed.

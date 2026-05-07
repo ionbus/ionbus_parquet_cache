@@ -13,13 +13,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as pds
 
 from ionbus_parquet_cache.data_source import DataSource
 from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
-from ionbus_parquet_cache.exceptions import ConfigurationError, DataSourceError
+from ionbus_parquet_cache.exceptions import (
+    ConfigurationError,
+    DataSourceError,
+)
 from ionbus_parquet_cache.partition import (
     PartitionSpec,
     date_partition_column_name,
@@ -114,7 +116,9 @@ class HiveParquetSource(DataSource):
             return
 
         # Scan directory structure for Hive partition directories
-        discovered: dict[str, set[str]] = {col: set() for col in partition_cols}
+        discovered: dict[str, set[str]] = {
+            col: set() for col in partition_cols
+        }
 
         for item in self.source_path.rglob("*"):
             if item.is_dir() and "=" in item.name:
@@ -235,8 +239,11 @@ class HiveParquetSource(DataSource):
             # Filter to only files inside Hive partition directories
             # (exclude loose parquet files at root)
             hive_files = [
-                f for f in files
-                if any("=" in p for p in f.relative_to(self.source_path).parts)
+                f
+                for f in files
+                if any(
+                    "=" in p for p in f.relative_to(self.source_path).parts
+                )
             ]
             if not hive_files:
                 # Fall back to all files if no Hive structure detected
@@ -271,7 +278,9 @@ class HiveParquetSource(DataSource):
 
         # Get partition columns that need normalization
         partition_cols = set(self.dataset.partition_columns or [])
-        date_part_col = date_partition_column_name(self.dataset.date_partition)
+        date_part_col = date_partition_column_name(
+            self.dataset.date_partition
+        )
         if date_part_col:
             partition_cols.add(date_part_col)
 
@@ -327,9 +336,8 @@ class HiveParquetSource(DataSource):
             elif pa.types.is_date(date_type):
                 start = pa.scalar(start, type=date_type)
                 end = pa.scalar(end, type=date_type)
-            elif (
-                pa.types.is_string(date_type)
-                or pa.types.is_large_string(date_type)
+            elif pa.types.is_string(date_type) or pa.types.is_large_string(
+                date_type
             ):
                 # String dates in ISO format (YYYY-MM-DD) sort correctly
                 start = start.isoformat()
@@ -351,7 +359,9 @@ class HiveParquetSource(DataSource):
         # Partition columns are short identifiers, so string type is sufficient.
         partition_cols = set(self.dataset.partition_columns or [])
         # Add date partition column if present
-        date_part_col = date_partition_column_name(self.dataset.date_partition)
+        date_part_col = date_partition_column_name(
+            self.dataset.date_partition
+        )
         if date_part_col:
             partition_cols.add(date_part_col)
 
@@ -509,7 +519,9 @@ class DPDSource(DataSource):
         if meta_dir.exists():
             # Find latest metadata file (exclude trimmed)
             meta_files = sorted(
-                f for f in meta_dir.glob("*.pkl.gz") if "_trimmed" not in f.name
+                f
+                for f in meta_dir.glob("*.pkl.gz")
+                if "_trimmed" not in f.name
             )
             if meta_files:
                 metadata = SnapshotMetadata.from_pickle(meta_files[-1])

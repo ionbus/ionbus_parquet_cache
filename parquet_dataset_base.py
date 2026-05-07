@@ -16,9 +16,11 @@ import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pyarrow.dataset as pds
+from ionbus_utils.yaml_utils.pdyaml import PDYaml
 from pydantic import BeforeValidator, PrivateAttr
 
 from ionbus_parquet_cache.exceptions import SnapshotNotFoundError
+from ionbus_parquet_cache.filter_utils import build_dataset_filter
 
 
 def _parse_cache_dir(v: Any) -> str | Path:
@@ -30,8 +32,6 @@ def _parse_cache_dir(v: Any) -> str | Path:
 
 
 CacheDirField = Annotated[str | Path, BeforeValidator(_parse_cache_dir)]
-from ionbus_parquet_cache.filter_utils import build_dataset_filter
-from ionbus_utils.yaml_utils.pdyaml import PDYaml
 
 
 class ParquetDataset(PDYaml, ABC):

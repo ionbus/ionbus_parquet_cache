@@ -40,6 +40,7 @@ avoid_regexes = [
     ]
 ]
 
+
 def ok_dir(name: str) -> bool:
     """Returns ok if we should keep."""
     for regex in avoid_regexes:
@@ -53,7 +54,9 @@ if latest_tag := get_latest_tag():
         ver_file.write(f'__version__ = "{latest_tag}"\n')
 
 all_dirs = [x for x in glob("*") if os.path.isdir(x) and ok_dir(x)]
-packages = ["ionbus_parquet_cache"] + [f"ionbus_parquet_cache/{x}" for x in all_dirs]
+packages = ["ionbus_parquet_cache"] + [
+    f"ionbus_parquet_cache/{x}" for x in all_dirs
+]
 package_dirs = {
     "ionbus_parquet_cache": ".",
 }

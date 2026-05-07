@@ -1,8 +1,8 @@
 # ionbus_parquet_cache
 
 Python tools for managing versioned Parquet datasets with date partitioning,
-snapshot versioning, multi-cache lookup, YAML-driven dataset creation, and
-CLI workflows for update, cleanup, and synchronization.
+snapshot versioning, multi-cache lookup, YAML-driven dataset creation, NPD
+snapshot imports, and CLI workflows for update, cleanup, and synchronization.
 
 ## Installation
 
@@ -23,10 +23,10 @@ pip install -e .
 - `NonDatedParquetDataset` for full-refresh reference datasets
 - `DataSource` and `DataCleaner` extension points
 - YAML configuration helpers for declarative dataset setup
-- Snapshot lineage, cache history, YAML annotations, and optional external
-  provenance sidecars
-- CLI modules for dataset creation, updating, cleanup, cache sync, and
-  post-sync hooks
+- Snapshot lineage, cache history, YAML annotations, column descriptions, and
+  optional external provenance sidecars
+- CLI modules for dataset creation, NPD imports, updating, cleanup, cache sync,
+  and post-sync hooks
 
 Full [documentation on GitHub](https://github.com/ionbus/ionbus_parquet_cache).
 

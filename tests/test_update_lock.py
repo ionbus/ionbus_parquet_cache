@@ -23,7 +23,9 @@ def dpd(tmp_path: Path) -> DatedParquetDataset:
 
 
 class TestLockPath:
-    def test_lock_path_inside_dataset_dir(self, dpd: DatedParquetDataset) -> None:
+    def test_lock_path_inside_dataset_dir(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         assert dpd._lock_path == dpd.dataset_dir / "test_ds_update.lock"
 
     def test_lock_path_uses_lock_dir_when_set(self, tmp_path: Path) -> None:
@@ -37,7 +39,9 @@ class TestLockPath:
         )
         assert dpd._lock_path == lock_dir / "test_ds_update.lock"
 
-    def test_use_update_lock_false_default_is_true(self, dpd: DatedParquetDataset) -> None:
+    def test_use_update_lock_false_default_is_true(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         assert dpd.use_update_lock is True
 
     def test_use_update_lock_false_can_be_set(self, tmp_path: Path) -> None:
@@ -57,7 +61,9 @@ class TestAcquireLock:
         dpd._acquire_lock()
         assert dpd._lock_path.exists()
 
-    def test_lock_file_contains_expected_fields(self, dpd: DatedParquetDataset) -> None:
+    def test_lock_file_contains_expected_fields(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         dpd.dataset_dir.mkdir(parents=True, exist_ok=True)
         dpd._acquire_lock()
         info = json.loads(dpd._lock_path.read_text())
@@ -76,7 +82,9 @@ class TestAcquireLock:
         assert err.lock_path is not None
         assert err.locked_by_pid == os.getpid()
 
-    def test_error_message_includes_clear_instructions(self, dpd: DatedParquetDataset) -> None:
+    def test_error_message_includes_clear_instructions(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         dpd.dataset_dir.mkdir(parents=True, exist_ok=True)
         dpd._acquire_lock()
         with pytest.raises(UpdateLockedError) as exc_info:
@@ -85,7 +93,9 @@ class TestAcquireLock:
         assert "clear_update_lock" in msg
         assert "rm " in msg
 
-    def test_creates_parent_dir_if_missing(self, dpd: DatedParquetDataset) -> None:
+    def test_creates_parent_dir_if_missing(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         assert not dpd.dataset_dir.exists()
         dpd._acquire_lock()
         assert dpd._lock_path.exists()
@@ -102,7 +112,9 @@ class TestReleaseLock:
     def test_no_error_if_lock_missing(self, dpd: DatedParquetDataset) -> None:
         dpd._release_lock()  # Should not raise
 
-    def test_can_reacquire_after_release(self, dpd: DatedParquetDataset) -> None:
+    def test_can_reacquire_after_release(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         dpd.dataset_dir.mkdir(parents=True, exist_ok=True)
         dpd._acquire_lock()
         dpd._release_lock()
@@ -121,10 +133,13 @@ class TestClearUpdateLock:
         with pytest.raises(FileNotFoundError):
             dpd.clear_update_lock(force=True)
 
-    def test_force_false_clears_dead_pid(self, dpd: DatedParquetDataset) -> None:
+    def test_force_false_clears_dead_pid(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         dpd.dataset_dir.mkdir(parents=True, exist_ok=True)
         # Write a lock with a PID that definitely doesn't exist
         import socket
+
         payload = {
             "dataset": "test_ds",
             "hostname": socket.gethostname(),
@@ -136,9 +151,12 @@ class TestClearUpdateLock:
         dpd.clear_update_lock(force=False)
         assert not dpd._lock_path.exists()
 
-    def test_force_false_raises_for_live_pid(self, dpd: DatedParquetDataset) -> None:
+    def test_force_false_raises_for_live_pid(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         dpd.dataset_dir.mkdir(parents=True, exist_ok=True)
         import socket
+
         payload = {
             "dataset": "test_ds",
             "hostname": socket.gethostname(),
@@ -150,9 +168,12 @@ class TestClearUpdateLock:
             dpd.clear_update_lock(force=False)
         assert dpd._lock_path.exists()
 
-    def test_force_true_clears_regardless_of_pid(self, dpd: DatedParquetDataset) -> None:
+    def test_force_true_clears_regardless_of_pid(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         dpd.dataset_dir.mkdir(parents=True, exist_ok=True)
         import socket
+
         payload = {
             "dataset": "test_ds",
             "hostname": socket.gethostname(),
@@ -163,7 +184,9 @@ class TestClearUpdateLock:
         dpd.clear_update_lock(force=True)
         assert not dpd._lock_path.exists()
 
-    def test_force_false_clears_foreign_host_lock(self, dpd: DatedParquetDataset) -> None:
+    def test_force_false_clears_foreign_host_lock(
+        self, dpd: DatedParquetDataset
+    ) -> None:
         dpd.dataset_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "dataset": "test_ds",

@@ -129,7 +129,9 @@ class TestPandasFilterListToExpression:
 
     def test_single_tuple_not_in(self):
         """Single tuple with not in operator."""
-        result = pandas_filter_list_to_expression(("col", "not in", ["A", "B"]))
+        result = pandas_filter_list_to_expression(
+            ("col", "not in", ["A", "B"])
+        )
         assert result is not None
 
     def test_list_of_tuples_anded(self):

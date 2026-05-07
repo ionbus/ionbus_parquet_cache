@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import shutil
-import tempfile
 import time
 from pathlib import Path
 
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
-from ionbus_parquet_cache.exceptions import SnapshotNotFoundError, SnapshotPublishError
+from ionbus_parquet_cache.exceptions import (
+    SnapshotNotFoundError,
+    SnapshotPublishError,
+)
 from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
 from ionbus_parquet_cache.snapshot import generate_snapshot_suffix
 
@@ -67,14 +67,18 @@ class TestNonDatedDatasetBasic:
 
     def test_init(self, temp_cache: Path) -> None:
         """Test initialization."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         assert npd.name == "instrument_master"
         assert npd.cache_dir == temp_cache
         assert npd.npd_dir == temp_cache / "non-dated" / "instrument_master"
 
     def test_no_snapshot_raises(self, temp_cache: Path) -> None:
         """Accessing data with no snapshot should raise."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="empty_dataset")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="empty_dataset"
+        )
         with pytest.raises(SnapshotNotFoundError):
             npd.pyarrow_dataset()
 
@@ -86,7 +90,9 @@ class TestNonDatedDatasetImport:
         self, temp_cache: Path, sample_parquet: Path, sample_df: pd.DataFrame
     ) -> None:
         """Import a single parquet file as snapshot."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
 
         suffix = npd.import_snapshot(sample_parquet)
 
@@ -96,13 +102,17 @@ class TestNonDatedDatasetImport:
 
         # Should be able to read data
         result = npd.read_data()
-        pd.testing.assert_frame_equal(result.reset_index(drop=True), sample_df)
+        pd.testing.assert_frame_equal(
+            result.reset_index(drop=True), sample_df
+        )
 
     def test_import_hive_directory(
         self, temp_cache: Path, sample_hive_dir: Path
     ) -> None:
         """Import a hive-partitioned directory as snapshot."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="calendar_data")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="calendar_data"
+        )
 
         suffix = npd.import_snapshot(sample_hive_dir)
 
@@ -114,10 +124,16 @@ class TestNonDatedDatasetImport:
         assert len(result) == 4  # 2 exchanges * 2 symbols each
 
     def test_import_multiple_snapshots(
-        self, temp_cache: Path, sample_parquet: Path, tmp_path: Path, sample_df: pd.DataFrame
+        self,
+        temp_cache: Path,
+        sample_parquet: Path,
+        tmp_path: Path,
+        sample_df: pd.DataFrame,
     ) -> None:
         """Importing multiple times creates multiple snapshots."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
 
         suffix1 = npd.import_snapshot(sample_parquet)
 
@@ -154,7 +170,9 @@ class TestNonDatedDatasetRead:
         self, temp_cache: Path, sample_parquet: Path
     ) -> None:
         """Read data with filters."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         npd.import_snapshot(sample_parquet)
 
         result = npd.read_data(filters=[("symbol", "=", "AAPL")])
@@ -166,7 +184,9 @@ class TestNonDatedDatasetRead:
         self, temp_cache: Path, sample_parquet: Path
     ) -> None:
         """Read data with column selection."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         npd.import_snapshot(sample_parquet)
 
         result = npd.read_data(columns=["symbol", "name"])
@@ -177,7 +197,9 @@ class TestNonDatedDatasetRead:
         self, temp_cache: Path, sample_parquet: Path
     ) -> None:
         """Passing date parameters should raise ValueError."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         npd.import_snapshot(sample_parquet)
 
         with pytest.raises(ValueError, match="do not support date filtering"):
@@ -190,7 +212,9 @@ class TestNonDatedDatasetRead:
         self, temp_cache: Path, sample_parquet: Path
     ) -> None:
         """Passing date parameters to read_data_pl should raise ValueError."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         npd.import_snapshot(sample_parquet)
 
         with pytest.raises(ValueError, match="do not support date filtering"):
@@ -204,10 +228,16 @@ class TestNonDatedDatasetRefresh:
     """Tests for refresh functionality."""
 
     def test_is_update_available(
-        self, temp_cache: Path, sample_parquet: Path, tmp_path: Path, sample_df: pd.DataFrame
+        self,
+        temp_cache: Path,
+        sample_parquet: Path,
+        tmp_path: Path,
+        sample_df: pd.DataFrame,
     ) -> None:
         """Test detecting new snapshots."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         npd.import_snapshot(sample_parquet)
 
         # No update available initially
@@ -223,7 +253,9 @@ class TestNonDatedDatasetRefresh:
         npd.import_snapshot(path2)
 
         # Create a new instance that doesn't know about the update
-        npd2 = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd2 = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         npd2.current_suffix = npd._discover_current_suffix()
         # Force it to think it's on an old suffix
         time.sleep(0.01)  # Ensure different timestamp
@@ -236,7 +268,9 @@ class TestNonDatedDatasetRefresh:
         self, temp_cache: Path, sample_parquet: Path
     ) -> None:
         """Test refresh is no-op when already on latest snapshot."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         npd.import_snapshot(sample_parquet)
 
         # Access dataset to cache it
@@ -250,15 +284,20 @@ class TestNonDatedDatasetRefresh:
         assert npd._dataset is not None
 
     def test_refresh_clears_on_new_snapshot(
-        self, temp_cache: Path, sample_parquet: Path, tmp_path: Path, sample_df: pd.DataFrame
+        self,
+        temp_cache: Path,
+        sample_parquet: Path,
+        tmp_path: Path,
+        sample_df: pd.DataFrame,
     ) -> None:
         """Test refresh clears cache when new snapshot exists."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         npd.import_snapshot(sample_parquet)
 
         # Access dataset to cache it
         _ = npd.pyarrow_dataset()
-        old_suffix = npd.current_suffix
 
         # Simulate external process adding a new snapshot
         time.sleep(1.1)
@@ -282,11 +321,11 @@ class TestNonDatedDatasetRefresh:
 class TestNonDatedDatasetSummary:
     """Tests for summary functionality."""
 
-    def test_summary(
-        self, temp_cache: Path, sample_parquet: Path
-    ) -> None:
+    def test_summary(self, temp_cache: Path, sample_parquet: Path) -> None:
         """Test summary returns expected info."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="instrument_master")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="instrument_master"
+        )
         npd.import_snapshot(sample_parquet)
 
         summary = npd.summary()
@@ -304,7 +343,9 @@ class TestSnapshotSuffixCollisionDetection:
         self, temp_cache: Path, sample_parquet: Path
     ) -> None:
         """When current_suffix is None, no error should be raised."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="collision_test")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="collision_test"
+        )
 
         # current_suffix is None (no previous snapshot)
         assert npd.current_suffix is None
@@ -315,10 +356,16 @@ class TestSnapshotSuffixCollisionDetection:
         assert len(suffix) == 7
 
     def test_import_when_new_suffix_greater_no_error(
-        self, temp_cache: Path, sample_parquet: Path, tmp_path: Path, sample_df: pd.DataFrame
+        self,
+        temp_cache: Path,
+        sample_parquet: Path,
+        tmp_path: Path,
+        sample_df: pd.DataFrame,
     ) -> None:
         """When new_suffix > current_suffix, no error should be raised."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="collision_test")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="collision_test"
+        )
 
         # First import
         suffix1 = npd.import_snapshot(sample_parquet)
@@ -336,13 +383,19 @@ class TestSnapshotSuffixCollisionDetection:
         assert suffix2 > suffix1
 
     def test_import_collision_when_too_fast(
-        self, temp_cache: Path, sample_parquet: Path, tmp_path: Path, sample_df: pd.DataFrame
+        self,
+        temp_cache: Path,
+        sample_parquet: Path,
+        tmp_path: Path,
+        sample_df: pd.DataFrame,
     ) -> None:
         """When imports are too fast (within same second), SnapshotPublishError should be raised."""
-        npd = NonDatedParquetDataset(cache_dir=temp_cache, name="collision_test")
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="collision_test"
+        )
 
         # First import
-        suffix1 = npd.import_snapshot(sample_parquet)
+        npd.import_snapshot(sample_parquet)
 
         # Mock the suffix generation to return the same value
         # by manually setting current_suffix to a value that would cause collision
@@ -360,5 +413,40 @@ class TestSnapshotSuffixCollisionDetection:
         # the current_suffix to be far in the future.
         npd.current_suffix = "zzzzzz"  # Artificially high suffix
 
-        with pytest.raises(SnapshotPublishError, match="Snapshot suffix collision"):
+        with pytest.raises(
+            SnapshotPublishError, match="Snapshot suffix collision"
+        ):
             npd.import_snapshot(path2)
+
+    def test_fresh_instance_discovers_existing_suffix_before_import(
+        self,
+        temp_cache: Path,
+        sample_parquet: Path,
+        tmp_path: Path,
+        sample_df: pd.DataFrame,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fresh instance should not reuse an existing on-disk suffix."""
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache, name="collision_test"
+        )
+        suffix = npd.import_snapshot(sample_parquet)
+
+        path2 = tmp_path / "sample2.parquet"
+        sample_df.to_parquet(path2, index=False)
+
+        fresh_npd = NonDatedParquetDataset(
+            cache_dir=temp_cache,
+            name="collision_test",
+        )
+        assert fresh_npd.current_suffix is None
+
+        monkeypatch.setattr(
+            "ionbus_parquet_cache.non_dated_dataset.generate_snapshot_suffix",
+            lambda: suffix,
+        )
+
+        with pytest.raises(
+            SnapshotPublishError, match="Snapshot suffix collision"
+        ):
+            fresh_npd.import_snapshot(path2)

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import gzip
-import pickle
 from pathlib import Path
 
 import pyarrow as pa
@@ -15,12 +13,14 @@ from ionbus_parquet_cache.rename_cache import rename_cache
 
 def _make_snapshot_metadata(name: str, suffix: str):
     """Build a minimal SnapshotMetadata for testing without importing DPD."""
-    from ionbus_parquet_cache.dated_dataset import SnapshotMetadata, FileMetadata
+    from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
 
     return SnapshotMetadata(
         name=name,
         suffix=suffix,
-        schema=pa.schema([pa.field("date", pa.date32()), pa.field("value", pa.float64())]),
+        schema=pa.schema(
+            [pa.field("date", pa.date32()), pa.field("value", pa.float64())]
+        ),
         files=[],
         yaml_config={},
         cache_start_date=dt.date(2024, 1, 1),
@@ -29,7 +29,9 @@ def _make_snapshot_metadata(name: str, suffix: str):
     )
 
 
-def _create_fake_dataset(cache_dir: Path, name: str, suffixes: list[str]) -> None:
+def _create_fake_dataset(
+    cache_dir: Path, name: str, suffixes: list[str]
+) -> None:
     """Create a fake DPD directory structure with metadata files."""
     dataset_dir = cache_dir / name
     meta_dir = dataset_dir / "_meta_data"
@@ -105,14 +107,19 @@ class TestRenameSuccess:
         _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name")
         from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
-        pkl_path = tmp_path / "new_name" / "_meta_data" / "new_name_1H4DW00.pkl.gz"
+
+        pkl_path = (
+            tmp_path / "new_name" / "_meta_data" / "new_name_1H4DW00.pkl.gz"
+        )
         meta = SnapshotMetadata.from_pickle(pkl_path)
         assert meta.name == "new_name"
 
     def test_data_files_preserved(self, tmp_path):
         _create_fake_dataset(tmp_path, "old_name", ["1H4DW00"])
         rename_cache(tmp_path, "old_name", "new_name")
-        assert (tmp_path / "new_name" / "year=Y2024" / "part-0.parquet").exists()
+        assert (
+            tmp_path / "new_name" / "year=Y2024" / "part-0.parquet"
+        ).exists()
 
     def test_multiple_snapshots(self, tmp_path):
         suffixes = ["1AAA000", "1BBB000", "1CCC000"]
@@ -128,9 +135,12 @@ class TestRenameSuccess:
         _create_fake_dataset(tmp_path, "old_name", suffixes)
         rename_cache(tmp_path, "old_name", "new_name")
         from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
+
         new_meta_dir = tmp_path / "new_name" / "_meta_data"
         for s in suffixes:
-            meta = SnapshotMetadata.from_pickle(new_meta_dir / f"new_name_{s}.pkl.gz")
+            meta = SnapshotMetadata.from_pickle(
+                new_meta_dir / f"new_name_{s}.pkl.gz"
+            )
             assert meta.name == "new_name"
 
 

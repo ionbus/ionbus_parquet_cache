@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 
-import pyarrow.compute as pc
 import pytest
 
 from ionbus_parquet_cache.filter_utils import (
@@ -25,26 +24,32 @@ class TestBuildFilterExpression:
 
     def test_multiple_filters_and(self) -> None:
         """Multiple filters should be AND-ed together."""
-        expr = build_filter_expression([
-            ("a", "=", 1),
-            ("b", ">", 2),
-        ])
+        expr = build_filter_expression(
+            [
+                ("a", "=", 1),
+                ("b", ">", 2),
+            ]
+        )
 
         assert expr is not None
 
     def test_in_filter(self) -> None:
         """Should handle 'in' operator."""
-        expr = build_filter_expression([
-            ("col", "in", ["a", "b", "c"]),
-        ])
+        expr = build_filter_expression(
+            [
+                ("col", "in", ["a", "b", "c"]),
+            ]
+        )
 
         assert expr is not None
 
     def test_not_in_filter(self) -> None:
         """Should handle 'not in' operator."""
-        expr = build_filter_expression([
-            ("col", "not in", ["x", "y", "z"]),
-        ])
+        expr = build_filter_expression(
+            [
+                ("col", "not in", ["x", "y", "z"]),
+            ]
+        )
 
         assert expr is not None
 
@@ -56,9 +61,11 @@ class TestBuildFilterExpression:
         table = pa.table({"col": ["a", "b", "c", "x", "y", "z"]})
 
         # Build filter to exclude x, y, z
-        expr = build_filter_expression([
-            ("col", "not in", ["x", "y", "z"]),
-        ])
+        expr = build_filter_expression(
+            [
+                ("col", "not in", ["x", "y", "z"]),
+            ]
+        )
 
         # Apply filter
         filtered = table.filter(expr)
@@ -198,7 +205,9 @@ class TestBuildDatasetFilter:
             date_col="Date",
             is_dated_dataset=True,
             date_partition="day",
-            partition_columns=["Date"],  # Even if Date is in partition_columns
+            partition_columns=[
+                "Date"
+            ],  # Even if Date is in partition_columns
         )
 
         assert expr is not None

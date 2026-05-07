@@ -41,6 +41,7 @@ def get_gcs_filesystem() -> "_gcsfs_t.GCSFileSystem":
 def gcs_pa_filesystem() -> "pafs_t.FileSystem":
     """Return a PyArrow-compatible filesystem backed by gcsfs."""
     import pyarrow.fs as pafs
+
     fs = get_gcs_filesystem()
     return pafs.PyFileSystem(pafs.FSSpecHandler(fs))
 

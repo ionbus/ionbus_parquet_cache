@@ -358,6 +358,151 @@ class TestDatedDatasetAnnotations:
                 {"annotations": {"flags": {"1": "active"}}}
             )
 
+    def test_column_descriptions_carry_forward_when_omitted(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Omitted column descriptions should inherit current metadata."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        descriptions = {"instrument_id": "Quiet symbology UUID."}
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"column_descriptions": descriptions},
+            suffix="1GZ5HK0",
+        )
+
+        resolved = dpd._resolve_yaml_config_annotations({"date_col": "Date"})
+
+        assert resolved["column_descriptions"] == descriptions
+
+    def test_column_descriptions_may_add_and_change_but_not_remove(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Column descriptions may be edited, but not removed."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={
+                "column_descriptions": {
+                    "instrument_id": "Old description.",
+                    "vendor_symbol": "Vendor symbol.",
+                }
+            },
+            suffix="1GZ5HK0",
+        )
+
+        resolved = dpd._resolve_yaml_config_annotations(
+            {
+                "column_descriptions": {
+                    "instrument_id": "Quiet symbology_v2 listing-level UUID.",
+                    "vendor_symbol": "Vendor ticker-like symbol.",
+                    "vendor_instrument_id": (
+                        "Vendor-native instrument identifier."
+                    ),
+                }
+            }
+        )
+
+        assert resolved["column_descriptions"]["instrument_id"] == (
+            "Quiet symbology_v2 listing-level UUID."
+        )
+        assert "vendor_instrument_id" in resolved["column_descriptions"]
+
+        with pytest.raises(ValidationError, match="cannot be removed"):
+            dpd._resolve_yaml_config_annotations(
+                {
+                    "column_descriptions": {
+                        "instrument_id": "Quiet symbology UUID."
+                    }
+                }
+            )
+
+    def test_column_descriptions_must_be_string_mapping(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Programmatic column descriptions must be dict[str, str]."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+
+        with pytest.raises(ValidationError, match="keys and values"):
+            dpd._resolve_yaml_config_annotations(
+                {"column_descriptions": {"instrument_id": 123}}
+            )
+
+    def test_get_column_descriptions_current_and_historical(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Column descriptions should be readable from snapshot metadata."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        first_descriptions = {
+            "instrument_id": "Original instrument identifier."
+        }
+        second_descriptions = {
+            "instrument_id": "Quiet symbology_v2 listing-level UUID.",
+            "vendor_symbol": "Vendor ticker-like symbol.",
+        }
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"column_descriptions": first_descriptions},
+            suffix="1GZ5HK0",
+        )
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"column_descriptions": second_descriptions},
+            suffix="1GZ5HK1",
+        )
+
+        current = dpd.get_column_descriptions()
+        historical = dpd.get_column_descriptions(snapshot="1GZ5HK0")
+
+        assert current == second_descriptions
+        assert historical == first_descriptions
+
+        current["instrument_id"] = "mutated locally"
+        assert dpd.get_column_descriptions() == second_descriptions
+
+    def test_get_column_descriptions_returns_empty_dict_when_missing(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Snapshots without column descriptions should return an empty dict."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"date_col": "Date"},
+            suffix="1GZ5HK0",
+        )
+
+        assert dpd.get_column_descriptions() == {}
+
+    def test_get_column_descriptions_validates_stored_metadata(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Malformed stored column descriptions should raise clearly."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"column_descriptions": {"instrument_id": 123}},
+            suffix="1GZ5HK0",
+        )
+
+        with pytest.raises(ValidationError, match="keys and values"):
+            dpd.get_column_descriptions()
+
 
 class TestDatedDatasetProvenanceAndHistory:
     """Tests for provenance sidecars and lineage history."""

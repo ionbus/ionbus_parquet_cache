@@ -117,7 +117,9 @@ class TestDatePartitionColumnName:
 
     def test_day_with_custom_date_col(self) -> None:
         """Day partition should use custom date_col when provided."""
-        assert date_partition_column_name("day", "PricingDate") == "PricingDate"
+        assert (
+            date_partition_column_name("day", "PricingDate") == "PricingDate"
+        )
         assert date_partition_column_name("day", "TradeDate") == "TradeDate"
 
     def test_other_partitions(self) -> None:
@@ -143,16 +145,22 @@ class TestDatePartitionValue:
 
     def test_day_partition(self) -> None:
         """Day partition returns ISO date."""
-        assert date_partition_value(dt.date(2024, 1, 15), "day") == "2024-01-15"
+        assert (
+            date_partition_value(dt.date(2024, 1, 15), "day") == "2024-01-15"
+        )
 
     def test_week_partition(self) -> None:
         """Week partition returns ISO week."""
         # 2024-01-15 is in week 3
-        assert date_partition_value(dt.date(2024, 1, 15), "week") == "W2024-03"
+        assert (
+            date_partition_value(dt.date(2024, 1, 15), "week") == "W2024-03"
+        )
 
     def test_month_partition(self) -> None:
         """Month partition returns month identifier."""
-        assert date_partition_value(dt.date(2024, 1, 15), "month") == "M2024-01"
+        assert (
+            date_partition_value(dt.date(2024, 1, 15), "month") == "M2024-01"
+        )
         assert (
             date_partition_value(dt.date(2024, 12, 25), "month") == "M2024-12"
         )
@@ -169,7 +177,8 @@ class TestDatePartitionValue:
             date_partition_value(dt.date(2024, 7, 15), "quarter") == "Q2024-3"
         )
         assert (
-            date_partition_value(dt.date(2024, 10, 15), "quarter") == "Q2024-4"
+            date_partition_value(dt.date(2024, 10, 15), "quarter")
+            == "Q2024-4"
         )
 
     def test_year_partition(self) -> None:

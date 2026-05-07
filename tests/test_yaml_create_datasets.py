@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import datetime as dt
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from ionbus_parquet_cache.yaml_create_datasets import (
     check_config_consistency,
     create_cache_main,
-    IMMUTABLE_FIELDS,
 )
 
 
@@ -99,30 +96,38 @@ class TestArgumentParsing:
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should accept a valid YAML file argument."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 0
 
     def test_date_arguments(
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should parse --start-date and --end-date correctly."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 0
 
     def test_instruments_argument(self, temp_cache: Path) -> None:
         """Should parse --instruments argument."""
         # Create source file
-        source_content = '''
+        source_content = """
 from __future__ import annotations
 import datetime as dt
 import pandas as pd
@@ -141,8 +146,10 @@ class InstrumentSource(DataSource):
             "symbol": ["AAPL"] * len(dates),
             "value": range(len(dates)),
         })
-'''
-        (temp_cache / "code" / "instrument_source.py").write_text(source_content)
+"""
+        (temp_cache / "code" / "instrument_source.py").write_text(
+            source_content
+        )
 
         # Create YAML with instrument_column set as a partition column
         yaml_content = """
@@ -158,39 +165,50 @@ datasets:
         yaml_path = temp_cache / "yaml" / "instrument.yaml"
         yaml_path.write_text(yaml_content)
 
-        result = create_cache_main([
-            str(yaml_path),
-            "instrument_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-            "--instruments", "AAPL,MSFT,GOOG",
-        ])
+        result = create_cache_main(
+            [
+                str(yaml_path),
+                "instrument_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+                "--instruments",
+                "AAPL,MSFT,GOOG",
+            ]
+        )
         assert result == 0
 
-    def test_verbose_flag(
-        self, temp_cache: Path, sample_yaml: Path
-    ) -> None:
+    def test_verbose_flag(self, temp_cache: Path, sample_yaml: Path) -> None:
         """Should accept --verbose or -v flag."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-            "--verbose",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+                "--verbose",
+            ]
+        )
         assert result == 0
 
     def test_verbose_short_flag(
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should accept -v short flag."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-            "-v",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+                "-v",
+            ]
+        )
         assert result == 0
 
 
@@ -217,7 +235,9 @@ datasets:
         result = create_cache_main([str(tmp_path / "nonexistent.yaml")])
         assert result == 1
 
-    def test_missing_parent_dir_for_default_cache(self, tmp_path: Path) -> None:
+    def test_missing_parent_dir_for_default_cache(
+        self, tmp_path: Path
+    ) -> None:
         """Should fail when default cache location doesn't exist."""
         # Create a deeply nested YAML file where parent.parent doesn't exist
         nested_path = tmp_path / "deep" / "nested" / "yaml" / "test.yaml"
@@ -237,12 +257,16 @@ class TestCreateDatasetsFromYaml:
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should create a dataset from YAML configuration."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 0
 
         # Verify metadata was created
@@ -254,11 +278,15 @@ class TestCreateDatasetsFromYaml:
         self, temp_cache: Path, multi_dataset_yaml: Path
     ) -> None:
         """Should create all datasets when no dataset_name specified."""
-        result = create_cache_main([
-            str(multi_dataset_yaml),
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(multi_dataset_yaml),
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 0
 
         # Both datasets should have metadata
@@ -271,12 +299,16 @@ class TestCreateDatasetsFromYaml:
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should create parquet data files."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 0
 
         # Should have parquet files
@@ -291,12 +323,16 @@ class TestDatasetFiltering:
         self, temp_cache: Path, multi_dataset_yaml: Path
     ) -> None:
         """Should only create the specified dataset."""
-        result = create_cache_main([
-            str(multi_dataset_yaml),
-            "dataset_one",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(multi_dataset_yaml),
+                "dataset_one",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 0
 
         # Only dataset_one should have metadata
@@ -309,10 +345,12 @@ class TestDatasetFiltering:
         self, temp_cache: Path, multi_dataset_yaml: Path
     ) -> None:
         """Should fail when filtering to a nonexistent dataset."""
-        result = create_cache_main([
-            str(multi_dataset_yaml),
-            "nonexistent_dataset",
-        ])
+        result = create_cache_main(
+            [
+                str(multi_dataset_yaml),
+                "nonexistent_dataset",
+            ]
+        )
         assert result == 1
 
 
@@ -323,13 +361,17 @@ class TestDryRunFlag:
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Dry run should not create any files."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-            "--dry-run",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+                "--dry-run",
+            ]
+        )
         assert result == 0
 
         # No metadata should be created
@@ -340,13 +382,17 @@ class TestDryRunFlag:
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Dry run should not create any parquet files."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-            "--dry-run",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+                "--dry-run",
+            ]
+        )
         assert result == 0
 
         # No parquet files should be created
@@ -354,20 +400,30 @@ class TestDryRunFlag:
         assert len(parquet_files) == 0
 
     def test_dry_run_with_verbose(
-        self, temp_cache: Path, sample_yaml: Path, caplog: pytest.LogCaptureFixture
+        self,
+        temp_cache: Path,
+        sample_yaml: Path,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Dry run with verbose should show what would happen."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-            "--dry-run",
-            "--verbose",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+                "--dry-run",
+                "--verbose",
+            ]
+        )
         assert result == 0
 
-        assert "would create" in caplog.text.lower() or "test_dataset" in caplog.text
+        assert (
+            "would create" in caplog.text.lower()
+            or "test_dataset" in caplog.text
+        )
 
 
 class TestErrorHandlingInvalidYaml:
@@ -409,11 +465,15 @@ datasets:
         yaml_path = temp_cache / "yaml" / "bad.yaml"
         yaml_path.write_text(yaml_content)
 
-        result = create_cache_main([
-            str(yaml_path),
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(yaml_path),
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 1
 
 
@@ -424,46 +484,59 @@ class TestModeFlags:
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should fail when both --backfill and --restate are specified."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "--backfill",
-            "--restate",
-            "--start-date", "2024-01-01",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "--backfill",
+                "--restate",
+                "--start-date",
+                "2024-01-01",
+            ]
+        )
         assert result == 1
 
     def test_backfill_with_end_date(
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should fail when --backfill is used with --end-date."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "--backfill",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-06-30",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "--backfill",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-06-30",
+            ]
+        )
         assert result == 1
 
     def test_restate_requires_both_dates(
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should fail when --restate is used without both dates."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "--restate",
-            "--start-date", "2024-01-01",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "--restate",
+                "--start-date",
+                "2024-01-01",
+            ]
+        )
         assert result == 1
 
     def test_restate_requires_start_date(
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should fail when --restate is used without start date."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "--restate",
-            "--end-date", "2024-06-30",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "--restate",
+                "--end-date",
+                "2024-06-30",
+            ]
+        )
         assert result == 1
 
 
@@ -474,33 +547,44 @@ class TestDateParsing:
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should fail with invalid start date format."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "--start-date", "01-01-2024",  # Wrong format
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "--start-date",
+                "01-01-2024",  # Wrong format
+            ]
+        )
         assert result == 1
 
     def test_invalid_end_date_format(
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should fail with invalid end date format."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "--start-date", "2024-01-01",
-            "--end-date", "January 31 2024",  # Wrong format
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "January 31 2024",  # Wrong format
+            ]
+        )
         assert result == 1
 
     def test_valid_iso_dates(
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
         """Should accept valid ISO format dates."""
-        result = create_cache_main([
-            str(sample_yaml),
-            "test_dataset",
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-12-31",
-        ])
+        result = create_cache_main(
+            [
+                str(sample_yaml),
+                "test_dataset",
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-12-31",
+            ]
+        )
         assert result == 0
 
 
@@ -524,7 +608,10 @@ class TestCheckConfigConsistency:
     def test_mismatched_date_col(self) -> None:
         """Should detect mismatched date_col."""
         yaml_config = {"date_col": "Date", "sort_columns": ["Date"]}
-        stored_config = {"date_col": "TradeDate", "sort_columns": ["TradeDate"]}
+        stored_config = {
+            "date_col": "TradeDate",
+            "sort_columns": ["TradeDate"],
+        }
 
         errors = check_config_consistency(yaml_config, stored_config, "test")
         # date_col and sort_columns both mismatch
@@ -585,7 +672,7 @@ class TestCacheDirResolution:
         (cache / "code").mkdir()
 
         # Create source file
-        source_content = '''
+        source_content = """
 from __future__ import annotations
 import datetime as dt
 import pandas as pd
@@ -600,7 +687,7 @@ class TestSource(DataSource):
     def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
         dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
         return pd.DataFrame({"Date": dates, "value": range(len(dates))})
-'''
+"""
         (cache / "code" / "test_source.py").write_text(source_content)
 
         # Put YAML in a different location
@@ -617,11 +704,15 @@ datasets:
         yaml_path = yaml_dir / "test.yaml"
         yaml_path.write_text(yaml_content)
 
-        result = create_cache_main([
-            str(yaml_path),
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(yaml_path),
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 0
 
         # Dataset should be in specified cache_dir
@@ -638,7 +729,7 @@ datasets:
         (cache / "code").mkdir()
 
         # Create source file
-        source_content = '''
+        source_content = """
 from __future__ import annotations
 import datetime as dt
 import pandas as pd
@@ -653,7 +744,7 @@ class TestSource(DataSource):
     def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
         dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
         return pd.DataFrame({"Date": dates, "value": range(len(dates))})
-'''
+"""
         (cache / "code" / "test_source.py").write_text(source_content)
 
         yaml_content = """
@@ -667,11 +758,15 @@ datasets:
         yaml_path = yaml_dir / "test.yaml"
         yaml_path.write_text(yaml_content)
 
-        result = create_cache_main([
-            str(yaml_path),
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(yaml_path),
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 0
 
         # Dataset should be in resolved cache location
@@ -691,7 +786,7 @@ class TestPreserveConfig:
         (cache / "yaml").mkdir()
         (cache / "code").mkdir()
 
-        source_content = '''
+        source_content = """
 from __future__ import annotations
 import datetime as dt
 import pandas as pd
@@ -706,7 +801,7 @@ class TestSource(DataSource):
     def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
         dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
         return pd.DataFrame({"Date": dates, "value": range(len(dates))})
-'''
+"""
         (cache / "code" / "test_source.py").write_text(source_content)
 
         yaml_content = """
@@ -721,12 +816,16 @@ datasets:
         yaml_path.write_text(yaml_content)
 
         # --preserve-config on non-existent dataset should fail
-        result = create_cache_main([
-            str(yaml_path),
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-            "--preserve-config",
-        ])
+        result = create_cache_main(
+            [
+                str(yaml_path),
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+                "--preserve-config",
+            ]
+        )
         assert result == 1  # Error: requires existing metadata
 
     def test_preserve_config_allows_different_yaml_settings(
@@ -740,7 +839,7 @@ datasets:
         (cache / "yaml").mkdir()
         (cache / "code").mkdir()
 
-        source_content = '''
+        source_content = """
 from __future__ import annotations
 import datetime as dt
 import pandas as pd
@@ -755,7 +854,7 @@ class TestSource(DataSource):
     def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
         dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
         return pd.DataFrame({"Date": dates, "value": range(len(dates))})
-'''
+"""
         (cache / "code" / "test_source.py").write_text(source_content)
 
         # Create initial dataset with month partition
@@ -771,11 +870,15 @@ datasets:
         yaml_path = cache / "yaml" / "test.yaml"
         yaml_path.write_text(yaml_content1)
 
-        result = create_cache_main([
-            str(yaml_path),
-            "--start-date", "2024-01-01",
-            "--end-date", "2024-01-31",
-        ])
+        result = create_cache_main(
+            [
+                str(yaml_path),
+                "--start-date",
+                "2024-01-01",
+                "--end-date",
+                "2024-01-31",
+            ]
+        )
         assert result == 0
 
         # Wait for different snapshot suffix
@@ -794,24 +897,33 @@ datasets:
         yaml_path.write_text(yaml_content2)
 
         # Without --preserve-config, this would fail
-        result_without = create_cache_main([
-            str(yaml_path),
-            "--start-date", "2024-02-01",
-            "--end-date", "2024-02-28",
-        ])
+        result_without = create_cache_main(
+            [
+                str(yaml_path),
+                "--start-date",
+                "2024-02-01",
+                "--end-date",
+                "2024-02-28",
+            ]
+        )
         assert result_without == 1  # Config mismatch error
 
         # With --preserve-config, it should succeed
-        result_with = create_cache_main([
-            str(yaml_path),
-            "--start-date", "2024-02-01",
-            "--end-date", "2024-02-28",
-            "--preserve-config",
-        ])
+        result_with = create_cache_main(
+            [
+                str(yaml_path),
+                "--start-date",
+                "2024-02-01",
+                "--end-date",
+                "2024-02-28",
+                "--preserve-config",
+            ]
+        )
         assert result_with == 0
 
         # Verify dataset still uses month partition (from stored config)
         from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
+
         dpd = DatedParquetDataset(
             cache_dir=cache, name="test_dataset", date_col="Date"
         )

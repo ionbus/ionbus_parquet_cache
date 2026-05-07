@@ -32,6 +32,7 @@
 - [Partition Structure on Disk](#partition-structure-on-disk)
 - [CLI Tools](#cli-tools)
     * [`update-cache`](#update-cache)
+    * [`import-npd`](#import-npd)
     * [`cleanup-cache`](#cleanup-cache)
         * [Trimming (Dangerous Operation)](#trimming-dangerous-operation)
         * [Finding orphaned files](#finding-orphaned-files)
@@ -50,7 +51,8 @@ This system manages local parquet files for time-series data. It will
 become the `ionbus_parquet_cache` pip/conda package. This system also
 provides snapshot access to non-dated data (NPDs). For NPDs, this package
 manages storage and snapshots; source data is produced externally and
-imported via `import_snapshot()`. 
+imported via `python -m ionbus_parquet_cache.import_npd` or
+`import_snapshot()`.
 
 It is a recreation of `core_utils/parquet_cache` adapted to use
 `ionbus_utils`. Any `core_utils` functions not yet in `ionbus_utils`
@@ -137,6 +139,10 @@ Failure behavior:
 - Additive columns succeed without full dataset rebuild.
 - Incompatible type changes fail with clear error showing column and old/new types.
 - Snapshot is not advanced when schema validation fails.
+- Optional `column_descriptions` are stored in snapshot metadata as part of the
+  captured YAML configuration. They carry forward when omitted, and explicit
+  updates may add or change description text. They are readable through
+  `DatedParquetDataset.get_column_descriptions()`.
 
 ### Snapshot/cleanup/sync
 
@@ -145,6 +151,10 @@ Failure behavior:
 - `sync-cache` transfers data, snapshot metadata, and referenced snapshot
   provenance sidecars only (not `yaml/`, not `code/`). Supports DPDs only,
   NPDs only, or both.
+- `python -m ionbus_parquet_cache.import_npd` imports a parquet file or
+  parquet directory as a complete `NonDatedParquetDataset` snapshot. The
+  imported snapshot becomes the current NPD snapshot and is discoverable by
+  `CacheRegistry`.
 
 ## Implementation Readiness Checklist
 
@@ -529,6 +539,10 @@ by date (and optionally by additional columns).
   from the stored metadata. Returns a dict with keys `columns_to_rename`,
   `columns_to_drop`, `dropna_columns`, `dedup_columns`, `dedup_keep`, or
   `None` if no transforms are configured.
+- `get_column_descriptions(snapshot=None)` -- retrieves the optional
+  `column_descriptions` dictionary from the current snapshot metadata, or from
+  the requested snapshot suffix. Returns a copy and returns `{}` when no
+  column descriptions are stored.
 - `cache_history(snapshot=None)` -- returns snapshot lineage history,
   walking backward from the current snapshot or the specified snapshot.
 - `read_provenance(snapshot=None)` -- explicitly load the optional external
@@ -585,6 +599,20 @@ non-dated/
 
 **Importing snapshots:**
 
+From the command line:
+
+```bash
+# Import from a single parquet file
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/path/instruments.parquet
+
+# Import from a directory containing parquet files
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.exchange_calendar /source/path/calendar_data/
+```
+
+From Python:
+
 ```python
 npd = NonDatedParquetDataset("/path/to/cache", "instrument_master")
 
@@ -600,6 +628,11 @@ The `import_snapshot()` method:
 - Assigns a new snapshot suffix (base-36 timestamp)
 - For directories, performs a recursive copy preserving structure
 - The new snapshot becomes the current snapshot
+
+The `python -m ionbus_parquet_cache.import_npd` command is the CLI wrapper
+around this same operation. It is intended for externally produced reference
+data where the parquet cache should manage versioning but should not fetch or
+transform the source.
 
 **NPD discovery and structure:**
 
@@ -919,7 +952,8 @@ class FuturesDataCleaner(DataCleaner):
 | `end_date_str` | `str` | `None` | **Debugging/testing only.** Optional override for latest date (ISO format). If set, the DPD guarantees that `get_data()` will never be called with an end date later than this value. Rarely used in production YAML files. |
 | `repull_n_days` | `int` | `0` | Number of trailing business days to re-fetch each update |
 | `row_group_size` | `int \| None` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values allow row-group-level predicate pushdown within a file at the cost of more metadata overhead. Only relevant when files are large enough to contain multiple row groups. |
-| `annotations` | `dict \| None` | `None` | Small user-owned annotations stored as part of the captured YAML configuration in every snapshot metadata pickle. Intended for compact notes that make user code easier to understand or use, such as bitmask definitions, enum labels, units, or column notes. Existing entries are append-only: later snapshots may add new keys, but may not remove keys or change values already present in the previous snapshot. |
+| `annotations` | `dict \| None` | `None` | Small user-owned annotations stored as part of the captured YAML configuration in every snapshot metadata pickle. Intended for compact structured notes that make user code easier to understand or use, such as bitmask definitions, enum labels, units, or dataset-specific notes. Existing entries are append-only: later snapshots may add new keys, but may not remove keys or change values already present in the previous snapshot. Use `column_descriptions` for plain per-column blurbs. |
+| `column_descriptions` | `dict[str, str] \| None` | `None` | Optional human-readable descriptions keyed by column name. Stored as part of the captured YAML configuration in every snapshot metadata pickle so users can inspect metadata to understand what each column means. |
 | `instrument_column` | `str` | `None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Can be used for filtering at read time and does not need to be a partition column. |
 | `instruments` | `list[str]` | `None` | Instruments to include in updates. If `None`, fetches all instruments. Can be expanded over time using backfill (see below). |
 | `source_location` | `str` | `""` | Location of the `DataSource` subclass. Resolution order: (1) if empty/blank, uses a built-in source from `ionbus_parquet_cache` (see [Built-in Data Sources](#built-in-data-sources)); (2) if starts with `module://`, loads from an installed Python package (e.g., `module://my_library.data_sources`) — must use the importable module path, not the distribution name (see [Installed Module Data Sources](#installed-module-data-sources)); (3) otherwise treated as a filesystem path relative to cache root or absolute. If the module cannot be imported, the class is missing, or the class does not inherit from `DataSource`, dataset creation/update fails with a configuration error. |
@@ -988,6 +1022,53 @@ previous dictionary was empty; otherwise it attempts to remove existing fields
 and raises `ValidationError`. To remove or redefine entries, create a new
 dataset or perform an explicit rebuild whose lineage starts a new cache.
 
+**Column descriptions:**
+
+The optional `column_descriptions` YAML field is a small dictionary of
+`{column_name: description}` strings. It is copied into the captured YAML
+configuration stored in each snapshot metadata pickle. This gives downstream
+users a standard place to discover what columns mean without scanning source
+code or external notes.
+
+Example:
+
+```yaml
+datasets:
+  ref.vendor_instruments:
+    column_descriptions:
+      instrument_id: Quiet symbology_v2 listing-level UUID.
+      vendor_instrument_id: Vendor-native instrument identifier.
+      vendor_symbol: Vendor ticker-like symbol.
+```
+
+Column descriptions should describe the public column names after YAML
+renames, YAML transforms, and custom cleaners have run. The dictionary may be
+partial; datasets are not required to document every column. Values must be
+human-readable strings and should stay short enough to belong in snapshot
+metadata. Text is only validated as a string; users may shorten, reword, or
+correct existing descriptions. Do not store secrets or large documentation
+payloads here.
+
+For an existing cache, omitting `column_descriptions` carries forward the
+previous snapshot's dictionary. Supplying `column_descriptions: {}` is allowed
+only when the previous dictionary was empty; otherwise it attempts to remove
+every existing key and raises `ValidationError`. The removal rule is per key:
+later snapshots may add descriptions for new columns and may change text for
+existing columns, but every existing column description key from the previous
+snapshot must still be present. To remove descriptions, create a new dataset
+or perform an explicit rebuild whose lineage starts a new cache.
+
+Read stored DPD column descriptions from snapshot metadata:
+
+```python
+descriptions = dpd.get_column_descriptions()
+old_descriptions = dpd.get_column_descriptions(snapshot="1H4DW00")
+```
+
+The method returns a copy of the current or requested snapshot dictionary.
+NPDs currently do not have YAML-backed snapshot metadata, so this accessor is
+DPD-only.
+
 **Instrument filtering:**
 
 The `instrument_column` and `instruments` fields work together to control
@@ -1039,12 +1120,13 @@ in YAML files. YAML configuration is stored in snapshot metadata and may be
 copied when caches are synced.
 
 Treat `annotations`, provenance sidecar contents, `source_init_args`,
-`cleaning_init_args`, and `sync_function_init_args` as non-secret information:
-endpoint URLs, timeouts, project names, table names, bitmask definitions,
-source manifests, process graphs, and other values that are safe to sync with
-the cache. DataSources, DataCleaners, and sync functions that need secrets
-should read them from environment variables or an external credential provider
-and fail clearly if a required value is missing.
+`column_descriptions`, `cleaning_init_args`, and `sync_function_init_args` as
+non-secret information: endpoint URLs, timeouts, project names, table names,
+bitmask definitions, column blurbs, source manifests, process graphs, and
+other values that are safe to sync with the cache. DataSources, DataCleaners,
+and sync functions that need secrets should read them from environment
+variables or an external credential provider and fail clearly if a required
+value is missing.
 
 ```python
 import os
@@ -3637,7 +3719,7 @@ Quarter-partitioned with a `FutureRoot` partition column:
 
 ## CLI Tools
 
-Four command-line tools are provided for managing the cache:
+Five command-line tools are provided for managing the cache:
 
 ### `update-cache`
 
@@ -3735,6 +3817,107 @@ update-cache /path/to/cache md.futures_daily \
                       # (--backfill and --restate are mutually exclusive)
 --dry-run             # Show what would be updated without writing
 ```
+
+### `import-npd`
+
+Imports a parquet file or parquet directory as a complete
+`NonDatedParquetDataset` snapshot.
+
+The canonical invocation is:
+
+```bash
+python -m ionbus_parquet_cache.import_npd CACHE_DIR NAME SOURCE_PATH
+```
+
+Use this when reference/static data has already been produced outside the
+parquet cache and should be stored under a cache-managed NPD name. Unlike
+`update-cache`, this command does not use a `DataSource`, date range,
+instrument filter, YAML transforms, or DPD metadata. Each successful import is
+a full replacement snapshot for the NPD.
+
+**Basic usage:**
+
+```bash
+# Import a single parquet file as an NPD snapshot
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet
+
+# Import a directory of parquet files as an NPD snapshot
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.exchange_calendar /source/exchange_calendar/
+
+# Preview the destination path and suffix without copying
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet \
+    --dry-run
+```
+
+**Arguments:**
+
+```bash
+cache_dir      # Existing local cache root
+name           # NPD name to create or update
+source_path    # Parquet file or directory containing parquet files
+```
+
+**Options:**
+
+```bash
+--dry-run          # Validate inputs and show planned import without writing
+--skip-validation  # Skip PyArrow dataset validation before copying
+--verbose          # Print source, destination, and snapshot details
+```
+
+**Source rules:**
+
+- `source_path` must exist.
+- A file source must be a parquet file and is copied to
+  `non-dated/{name}/{name}_{suffix}.parquet`.
+- A directory source must contain at least one `.parquet` file, recursively.
+  The directory is copied to `non-dated/{name}/{name}_{suffix}/`, preserving
+  its internal structure. Hive partition directories are preserved, but a flat
+  directory of parquet files is also valid.
+- By default, before publishing, the command validates that the source can be
+  opened as a PyArrow parquet dataset. If validation fails, no cache files are
+  written.
+- With `--skip-validation`, the command skips the PyArrow dataset-open check.
+  The source must still exist, single-file sources must still end in
+  `.parquet`, and directory sources must still contain at least one `.parquet`
+  file. Use this only for trusted or already validated parquet, such as
+  multi-hop cache sync workflows where validation has already happened
+  upstream.
+- PyArrow validation can take noticeable time for large directory trees because
+  it performs dataset discovery before copying.
+
+**Name and destination rules:**
+
+- `cache_dir` must be an existing local cache directory. Direct imports into
+  `gs://` caches are not supported; import locally and use `sync-cache push`.
+- If `name` does not already exist as an NPD, the command creates
+  `non-dated/{name}/`.
+- If `name` already exists as an NPD, the command creates a new snapshot under
+  the existing NPD directory. Older snapshots remain available.
+- If a DPD with the same name already exists in the same cache, the command
+  fails by default. DPD/NPD name collisions are confusing because registry
+  lookup prefers DPDs.
+- The new snapshot suffix must be lexicographically greater than the current
+  NPD suffix. If the generated suffix would collide or move backward, the
+  command fails without changing the current snapshot. Timestamp suffixes have
+  one-second granularity, so two imports of the same NPD in quick succession
+  can collide. If this happens, wait at least one second and retry.
+
+**Output:**
+
+On success, the command prints the dataset name, new suffix, and destination
+snapshot path:
+
+```text
+ref.instrument_master: imported snapshot 1H4DW01
+path: /path/to/cache/non-dated/ref.instrument_master/ref.instrument_master_1H4DW01.parquet
+```
+
+On dry run, the command prints the same planned destination but performs no
+copy and does not create directories.
 
 ### `cleanup-cache`
 
@@ -4330,7 +4513,12 @@ datasets:
       catalog_endpoint: "https://catalog.example.com"
 ```
 
-For NPDs, the same fields may be attached to the NPD's YAML dataset entry.
+Configured per-dataset sync functions currently come from DPD YAML entries.
+NPD sync targets are supported by the sync function runner, but NPDs do not
+yet have a YAML metadata/configuration contract because they are imported with
+`python -m ionbus_parquet_cache.import_npd` rather than created from YAML. Use
+the CLI `--sync-function` override for NPD sync hooks until an NPD configuration
+contract exists.
 
 When sync functions are requested, datasets without a configured sync function
 are skipped and a warning is logged for each skipped dataset. This warning
@@ -4539,8 +4727,12 @@ Trimmed snapshots (`*_trimmed.pkl.gz`) are left in place without renaming.
 ### `yaml-create-datasets`
 
 Creates or updates datasets based on YAML configuration files. This tool
-reads YAML files from the `yaml/` subdirectory and creates the corresponding
-`DatedParquetDataset` or `NonDatedParquetDataset` entries in the cache.
+reads YAML files from the `yaml/` subdirectory and creates or updates
+`DatedParquetDataset` entries in the cache.
+
+NPD snapshots are not created by YAML. Use
+`python -m ionbus_parquet_cache.import_npd` to import a parquet file or
+directory as a `NonDatedParquetDataset` snapshot.
 
 **Basic usage:**
 
@@ -4622,16 +4814,20 @@ is to maintain and update the cache locally, then push it to GCS using
   or updating data directly to a GCS-backed DPD is not supported.
   Atomic metadata writes and locking rely on local filesystem semantics
   that are not yet adapted for GCS.
-- **`NonDatedParquetDataset.import_snapshot()`:** Importing a new snapshot
-  directly into a GCS-backed NPD is not supported. Write locally and
-  sync to GCS instead.
+- **`python -m ionbus_parquet_cache.import_npd` /
+  `NonDatedParquetDataset.import_snapshot()`:** Importing a new snapshot
+  directly into a GCS-backed NPD is not supported. Write locally and sync to
+  GCS instead.
 
 **Recommended workflow:**
 
 ```python
-# 1. Update the cache locally
+# 1. Update or import into the cache locally
 dpd = registry.get_dataset("md.futures_daily", cache_name="local")
 dpd.update()
+
+# For an NPD:
+# python -m ionbus_parquet_cache.import_npd /local/cache ref.instrument_master /source/instruments.parquet
 
 # 2. Push the updated cache to GCS (via CLI or Python)
 # sync-cache push /local/cache gs://bucket-name/cache
@@ -4759,6 +4955,7 @@ When implementing auto-partitioning, the main additions will be:
 | Feature | `core_utils/parquet_cache` | `ionbus_parquet_cache` |
 |---|---|---|
 | Update cache CLI | [x] `refresh_cache_from_*` | [x] `update-cache` |
+| Import NPD CLI | [ ] | [x] `python -m ionbus_parquet_cache.import_npd` |
 | Disk sync | [x] `refresh_cache_from_disk` (pull only) | [x] `sync-cache` (push/pull) |
 | S3 support | [ ] | [ ] (planned for future release) |
 | Daemon sync mode | [x] `update_interval`, `shutdown_time` | [x] `--daemon`, `--update-interval` |
@@ -4783,8 +4980,9 @@ When implementing auto-partitioning, the main additions will be:
 
 3. **`NonDatedParquetDataset` uses snapshot imports.** Unlike DPDs which
    support incremental date-based updates, NPDs are updated by importing
-   complete snapshots via `import_snapshot()`. Each import creates a new
-   versioned snapshot (file or directory with base-36 suffix).
+   complete snapshots via `python -m ionbus_parquet_cache.import_npd` or
+   `import_snapshot()`. Each import creates a new versioned snapshot (file or
+   directory with base-36 suffix).
 
 4. **Always PyArrow dataset.** There is no `PyarrowReadMode` enum or
    toggle. Reading always uses a `pyarrow.dataset.Dataset`. The

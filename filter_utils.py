@@ -128,7 +128,9 @@ def _get_filter_operator(
     return op_lower
 
 
-def _tuple_to_expression(filter_tuple: tuple | list, op: str) -> pds.Expression:
+def _tuple_to_expression(
+    filter_tuple: tuple | list, op: str
+) -> pds.Expression:
     """Convert a single filter tuple to PyArrow expression."""
     col, _, value = filter_tuple
     field = pds.field(col)
@@ -328,9 +330,7 @@ def build_dataset_filter(
                 parsed_start, parsed_end, date_partition
             )
             if partition_values:
-                all_filters.append(
-                    (part_col, "in", partition_values)
-                )
+                all_filters.append((part_col, "in", partition_values))
 
     # Return expression or None
     if not all_filters:

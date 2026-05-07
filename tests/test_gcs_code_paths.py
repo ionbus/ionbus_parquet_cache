@@ -34,11 +34,14 @@ class TestNonDatedDatasetGCSSnapshotPathResolution:
         Test that _get_current_snapshot_path() correctly handles GCS file-based
         snapshots.
         """
-        with mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_exists"
-        ) as mock_gcs_exists, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_join"
-        ) as mock_gcs_join:
+        with (
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_exists"
+            ) as mock_gcs_exists,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_join"
+            ) as mock_gcs_join,
+        ):
             # Setup mocks
             mock_gcs_join.side_effect = lambda base, *parts: (
                 f"{base}/{'/'.join(parts)}"
@@ -62,7 +65,10 @@ class TestNonDatedDatasetGCSSnapshotPathResolution:
             result = npd._get_current_snapshot_path()
 
             # Verify it returns correct GCS URL
-            assert result == "gs://bucket/cache/non-dated/test_dataset/test_dataset_1H4DW01.parquet"
+            assert (
+                result
+                == "gs://bucket/cache/non-dated/test_dataset/test_dataset_1H4DW01.parquet"
+            )
             assert npd._is_directory_snapshot is False
 
             # Verify mocks were called correctly
@@ -74,11 +80,14 @@ class TestNonDatedDatasetGCSSnapshotPathResolution:
         Test that _get_current_snapshot_path() correctly handles GCS
         directory-based snapshots.
         """
-        with mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_exists"
-        ) as mock_gcs_exists, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_join"
-        ) as mock_gcs_join:
+        with (
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_exists"
+            ) as mock_gcs_exists,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_join"
+            ) as mock_gcs_join,
+        ):
             # Setup mocks
             mock_gcs_join.side_effect = lambda base, *parts: (
                 f"{base}/{'/'.join(parts)}"
@@ -102,7 +111,10 @@ class TestNonDatedDatasetGCSSnapshotPathResolution:
             result = npd._get_current_snapshot_path()
 
             # Verify it returns correct GCS URL for directory
-            assert result == "gs://bucket/cache/non-dated/calendar_data/calendar_data_1H4DW01"
+            assert (
+                result
+                == "gs://bucket/cache/non-dated/calendar_data/calendar_data_1H4DW01"
+            )
             assert npd._is_directory_snapshot is True
 
     def test_get_current_snapshot_path_not_found(self) -> None:
@@ -110,11 +122,14 @@ class TestNonDatedDatasetGCSSnapshotPathResolution:
         Test that _get_current_snapshot_path() returns None when no snapshot
         exists in GCS.
         """
-        with mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_exists"
-        ) as mock_gcs_exists, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_join"
-        ) as mock_gcs_join:
+        with (
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_exists"
+            ) as mock_gcs_exists,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_join"
+            ) as mock_gcs_join,
+        ):
             # Setup mocks - neither file nor directory exists
             mock_gcs_exists.return_value = False
             mock_gcs_join.side_effect = lambda base, *parts: (
@@ -140,13 +155,17 @@ class TestNonDatedDatasetGCSSnapshotPathResolution:
         Test that _get_current_snapshot_path() discovers the current suffix
         when not set.
         """
-        with mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_ls"
-        ) as mock_gcs_ls, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_exists"
-        ) as mock_gcs_exists, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_join"
-        ) as mock_gcs_join:
+        with (
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_ls"
+            ) as mock_gcs_ls,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_exists"
+            ) as mock_gcs_exists,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_join"
+            ) as mock_gcs_join,
+        ):
             # Setup mocks
             mock_gcs_ls.return_value = [
                 "gs://bucket/cache/non-dated/test_dataset/test_dataset_1H4DW00.parquet",
@@ -208,13 +227,17 @@ class TestCacheRegistryGCSMetadataLoading:
             gz.write(pickled)
         gzip_buffer.seek(0)
 
-        with mock.patch.object(
-            CacheRegistry, "discover_dpds"
-        ) as mock_discover, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_ls"
-        ) as mock_gcs_ls, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_open"
-        ) as mock_gcs_open:
+        with (
+            mock.patch.object(
+                CacheRegistry, "discover_dpds"
+            ) as mock_discover,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_ls"
+            ) as mock_gcs_ls,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_open"
+            ) as mock_gcs_open,
+        ):
             # Setup mocks
             mock_discover.return_value = {
                 "test.dataset": "gs://bucket/cache/test.dataset"
@@ -267,13 +290,17 @@ class TestCacheRegistryGCSMetadataLoading:
             gz.write(pickled)
         gzip_buffer.seek(0)
 
-        with mock.patch.object(
-            CacheRegistry, "discover_dpds"
-        ) as mock_discover, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_ls"
-        ) as mock_gcs_ls, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_open"
-        ) as mock_gcs_open:
+        with (
+            mock.patch.object(
+                CacheRegistry, "discover_dpds"
+            ) as mock_discover,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_ls"
+            ) as mock_gcs_ls,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_open"
+            ) as mock_gcs_open,
+        ):
             # Setup mocks - list includes a _trimmed file but it should be ignored
             mock_discover.return_value = {
                 "test.dataset": "gs://bucket/cache/test.dataset"
@@ -293,8 +320,7 @@ class TestCacheRegistryGCSMetadataLoading:
             assert dpd.current_suffix == "1H4DW01"
             # Verify gcs_open was called with the non-trimmed file
             gcs_open_calls = [
-                call[0][0]
-                for call in mock_gcs_open.call_args_list
+                call[0][0] for call in mock_gcs_open.call_args_list
             ]
             assert any("1H4DW01" in call for call in gcs_open_calls)
 
@@ -319,11 +345,14 @@ class TestCacheRegistryGCSMetadataLoading:
         """
         Test that _get_dpd() returns None when no metadata is found in GCS.
         """
-        with mock.patch.object(
-            CacheRegistry, "discover_dpds"
-        ) as mock_discover, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_ls"
-        ) as mock_gcs_ls:
+        with (
+            mock.patch.object(
+                CacheRegistry, "discover_dpds"
+            ) as mock_discover,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_ls"
+            ) as mock_gcs_ls,
+        ):
             # Setup mocks - dataset exists but no metadata
             mock_discover.return_value = {
                 "test.dataset": "gs://bucket/cache/test.dataset"
@@ -346,12 +375,14 @@ class TestCacheRegistryGCSMetadataLoading:
         mock_metadata = SnapshotMetadata(
             name="futures.prices",
             suffix="1H4DW05",
-            schema=pa.schema([
-                ("Date", pa.timestamp("ns")),
-                ("FutureRoot", pa.string()),
-                ("price", pa.float64()),
-                ("year", pa.string()),
-            ]),
+            schema=pa.schema(
+                [
+                    ("Date", pa.timestamp("ns")),
+                    ("FutureRoot", pa.string()),
+                    ("price", pa.float64()),
+                    ("year", pa.string()),
+                ]
+            ),
             files=[],
             yaml_config={
                 "date_col": "Date",
@@ -374,13 +405,17 @@ class TestCacheRegistryGCSMetadataLoading:
             gz.write(pickled)
         gzip_buffer.seek(0)
 
-        with mock.patch.object(
-            CacheRegistry, "discover_dpds"
-        ) as mock_discover, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_ls"
-        ) as mock_gcs_ls, mock.patch(
-            "ionbus_parquet_cache.gcs_utils.gcs_open"
-        ) as mock_gcs_open:
+        with (
+            mock.patch.object(
+                CacheRegistry, "discover_dpds"
+            ) as mock_discover,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_ls"
+            ) as mock_gcs_ls,
+            mock.patch(
+                "ionbus_parquet_cache.gcs_utils.gcs_open"
+            ) as mock_gcs_open,
+        ):
             # Setup mocks
             mock_discover.return_value = {
                 "futures.prices": "gs://bucket/cache/futures.prices"

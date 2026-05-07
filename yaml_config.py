@@ -51,6 +51,7 @@ class DatasetConfig:
     lock_dir: Path | None = None
     row_group_size: int | None = None
     annotations: dict[str, Any] | None = None
+    column_descriptions: dict[str, str] | None = None
 
     # Data source settings
     source_location: str = ""
@@ -145,6 +146,8 @@ class DatasetConfig:
         }
         if self.annotations is not None:
             config["annotations"] = self.annotations
+        if self.column_descriptions is not None:
+            config["column_descriptions"] = self.column_descriptions
         return config
 
     def load_source_class(self) -> type["DataSource"]:
@@ -304,6 +307,24 @@ def load_yaml_file(
                 config_file=str(yaml_path),
             )
 
+        column_descriptions = settings.get("column_descriptions")
+        if "column_descriptions" in settings:
+            if not isinstance(column_descriptions, dict):
+                raise ConfigurationError(
+                    f"Dataset '{name}' column_descriptions must be a mapping",
+                    config_file=str(yaml_path),
+                )
+            for column_name, description in column_descriptions.items():
+                if not isinstance(column_name, str) or not isinstance(
+                    description,
+                    str,
+                ):
+                    raise ConfigurationError(
+                        f"Dataset '{name}' column_descriptions keys and "
+                        "values must be strings",
+                        config_file=str(yaml_path),
+                    )
+
         sync_function_init_args = settings.get("sync_function_init_args", {})
         if sync_function_init_args is None:
             sync_function_init_args = {}
@@ -329,6 +350,7 @@ def load_yaml_file(
             num_instrument_buckets=settings.get("num_instrument_buckets"),
             row_group_size=settings.get("row_group_size"),
             annotations=annotations,
+            column_descriptions=column_descriptions,
             source_location=settings.get("source_location", ""),
             source_class_name=settings.get("source_class_name", ""),
             source_init_args=settings.get("source_init_args", {}),

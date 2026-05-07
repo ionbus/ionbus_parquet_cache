@@ -101,7 +101,8 @@ def cleanup_cache_main(args: list[str] | None = None) -> int:
         help="TRIM: Remove data before this date (dangerous)",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Verbose output",
     )
@@ -109,11 +110,13 @@ def cleanup_cache_main(args: list[str] | None = None) -> int:
     parsed = parser.parse_args(args)
 
     # Validate mutually exclusive options
-    mode_count = sum([
-        bool(parsed.dataset),
-        parsed.dpd_only,
-        parsed.npd_only,
-    ])
+    mode_count = sum(
+        [
+            bool(parsed.dataset),
+            parsed.dpd_only,
+            parsed.npd_only,
+        ]
+    )
     if mode_count > 1:
         logger.error(
             "Error: --dataset, --dpd-only, and --npd-only are mutually exclusive"
@@ -208,7 +211,10 @@ def _run_cleanup(
 
             if snapshot_suffix and suffix == snapshot_suffix:
                 should_delete = True
-            elif keep_last and snapshots.index(snap) < len(snapshots) - keep_last:
+            elif (
+                keep_last
+                and snapshots.index(snap) < len(snapshots) - keep_last
+            ):
                 should_delete = True
             elif cutoff_date and snap.get("created_at"):
                 if snap["created_at"] < cutoff_date:
@@ -235,7 +241,9 @@ def _run_cleanup(
     # Process NPDs
     for name, snapshots in npd_snapshots.items():
         if len(snapshots) <= 1:
-            logger.info(f"{name} (NPD): only current snapshot, nothing to clean")
+            logger.info(
+                f"{name} (NPD): only current snapshot, nothing to clean"
+            )
             continue
 
         snapshots = sorted(snapshots, key=lambda s: s["suffix"])
@@ -249,7 +257,10 @@ def _run_cleanup(
             should_delete = False
             if snapshot_suffix and suffix == snapshot_suffix:
                 should_delete = True
-            elif keep_last and snapshots.index(snap) < len(snapshots) - keep_last:
+            elif (
+                keep_last
+                and snapshots.index(snap) < len(snapshots) - keep_last
+            ):
                 should_delete = True
             elif cutoff_date and snap.get("created_at"):
                 if snap["created_at"] < cutoff_date:
@@ -274,7 +285,9 @@ def _run_cleanup(
 
         # Generate cleanup script
         if older_than_days or keep_last or snapshot_suffix:
-            script_path = _generate_cleanup_script(cache_path, files_to_delete)
+            script_path = _generate_cleanup_script(
+                cache_path, files_to_delete
+            )
             logger.info(
                 f"\nWrote cleanup script: {script_path}\n"
                 "Review the script, then run it to delete files."
@@ -284,7 +297,9 @@ def _run_cleanup(
 
     # Find orphans if requested
     if find_orphans:
-        orphans = _find_orphaned_files(cache_path, dpd_snapshots, npd_snapshots)
+        orphans = _find_orphaned_files(
+            cache_path, dpd_snapshots, npd_snapshots
+        )
         if orphans:
             total_size = sum(f.stat().st_size for f in orphans if f.exists())
             logger.info(
@@ -385,7 +400,10 @@ def _run_trim(
             should_trim = False
 
             # Check date_col in partition_values if it's a day partition
-            if dpd.date_partition == "day" and dpd.date_col in fm.partition_values:
+            if (
+                dpd.date_partition == "day"
+                and dpd.date_col in fm.partition_values
+            ):
                 file_date = fm.partition_values[dpd.date_col]
                 if isinstance(file_date, str):
                     file_date = dt.date.fromisoformat(file_date)
@@ -463,7 +481,9 @@ def _run_trim(
                 continue
             if meta_file.name == new_meta_path.name:
                 continue
-            trimmed_name = meta_file.stem.replace(".pkl", "") + "_trimmed.pkl.gz"
+            trimmed_name = (
+                meta_file.stem.replace(".pkl", "") + "_trimmed.pkl.gz"
+            )
             trimmed_path = meta_file.parent / trimmed_name
             meta_file.rename(trimmed_path)
             trimmed_meta_files.append(trimmed_path)
@@ -489,7 +509,9 @@ def _run_trim(
     suffix = generate_snapshot_suffix()
 
     # Delete script
-    delete_script = _generate_trim_delete_script(cache_path, all_trimmed, suffix)
+    delete_script = _generate_trim_delete_script(
+        cache_path, all_trimmed, suffix
+    )
     # Undo script (needs new_meta_files to delete them on undo)
     undo_script = _generate_trim_undo_script(
         cache_path, all_trimmed, new_meta_files, suffix
@@ -627,13 +649,15 @@ def _discover_dpd_snapshots(
             files = list(item.rglob(f"*_{suffix}.parquet"))
             size = sum(f.stat().st_size for f in files if f.exists())
 
-            snapshots.append({
-                "suffix": suffix,
-                "meta_file": meta_file,
-                "files": files,
-                "size": size,
-                "created_at": created_at,
-            })
+            snapshots.append(
+                {
+                    "suffix": suffix,
+                    "meta_file": meta_file,
+                    "files": files,
+                    "size": size,
+                    "created_at": created_at,
+                }
+            )
 
         if snapshots:
             result[name] = snapshots
@@ -688,12 +712,14 @@ def _discover_npd_snapshots(
                     f.stat().st_size for f in item.rglob("*") if f.is_file()
                 )
 
-            snapshots.append({
-                "suffix": suffix,
-                "path": item,
-                "size": size,
-                "created_at": created_at,
-            })
+            snapshots.append(
+                {
+                    "suffix": suffix,
+                    "path": item,
+                    "size": size,
+                    "created_at": created_at,
+                }
+            )
 
         if snapshots:
             result[name] = snapshots

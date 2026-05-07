@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
-import pyarrow as pa
 import pytest
 
 from ionbus_parquet_cache.data_source import DataSource
 from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
-from ionbus_parquet_cache.exceptions import DataSourceError, ValidationError
+from ionbus_parquet_cache.exceptions import DataSourceError
 from ionbus_parquet_cache.partition import PartitionSpec
 
 
@@ -24,7 +22,9 @@ class SimpleTestSource(DataSource):
 
     def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
         # Return simple test data
-        dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
+        dates = pd.date_range(
+            partition_spec.start_date, partition_spec.end_date
+        )
         return pd.DataFrame({"Date": dates, "value": range(len(dates))})
 
 
@@ -37,13 +37,19 @@ class InstrumentTestSource(DataSource):
         return (dt.date(2024, 1, 1), dt.date(2024, 12, 31))
 
     def get_data(self, partition_spec: PartitionSpec) -> pd.DataFrame:
-        dates = pd.date_range(partition_spec.start_date, partition_spec.end_date)
-        instrument = partition_spec.partition_values.get("FutureRoot", "UNKNOWN")
-        return pd.DataFrame({
-            "Date": dates,
-            "FutureRoot": instrument,
-            "value": range(len(dates)),
-        })
+        dates = pd.date_range(
+            partition_spec.start_date, partition_spec.end_date
+        )
+        instrument = partition_spec.partition_values.get(
+            "FutureRoot", "UNKNOWN"
+        )
+        return pd.DataFrame(
+            {
+                "Date": dates,
+                "FutureRoot": instrument,
+                "value": range(len(dates)),
+            }
+        )
 
 
 @pytest.fixture
@@ -86,14 +92,18 @@ class TestDataSourceInit:
 
     def test_init_sets_kwargs(self, simple_dpd: DatedParquetDataset) -> None:
         """Init should set kwargs as attributes."""
-        source = SimpleTestSource(simple_dpd, api_endpoint="https://api.test.com")
+        source = SimpleTestSource(
+            simple_dpd, api_endpoint="https://api.test.com"
+        )
         assert source.api_endpoint == "https://api.test.com"
 
 
 class TestDataSourceAvailableDates:
     """Tests for available_dates()."""
 
-    def test_returns_date_range(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_returns_date_range(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Should return start and end dates."""
         source = SimpleTestSource(simple_dpd)
         start, end = source.available_dates()
@@ -105,7 +115,9 @@ class TestDataSourceAvailableDates:
 class TestDataSourcePrepare:
     """Tests for prepare()."""
 
-    def test_prepare_sets_state(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_prepare_sets_state(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """_do_prepare should set internal state."""
         source = SimpleTestSource(simple_dpd)
         source._do_prepare(dt.date(2024, 1, 1), dt.date(2024, 3, 31))
@@ -138,7 +150,9 @@ class TestDataSourceGetPartitions:
         with pytest.raises(DataSourceError, match="prepare.*must be called"):
             source.get_partitions()
 
-    def test_returns_partition_specs(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_returns_partition_specs(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Should return list of PartitionSpec objects."""
         source = SimpleTestSource(simple_dpd)
         source._do_prepare(dt.date(2024, 1, 15), dt.date(2024, 3, 15))
@@ -221,7 +235,9 @@ class TestDataSourceGetPartitionColumnValues:
 
         assert values == ["ES", "NQ", "YM"]
 
-    def test_unknown_column_raises(self, simple_dpd: DatedParquetDataset) -> None:
+    def test_unknown_column_raises(
+        self, simple_dpd: DatedParquetDataset
+    ) -> None:
         """Should raise for unknown column with no values."""
         source = SimpleTestSource(simple_dpd)
         source._do_prepare(dt.date(2024, 1, 1), dt.date(2024, 1, 31))
@@ -366,7 +382,9 @@ class TestChunkValues:
         # All should have same partition_values
         assert all(s.partition_values["month"] == "M2024-01" for s in specs)
         # Check all combinations exist
-        combos = [(s.chunk_info["exchange"], s.chunk_info["batch"]) for s in specs]
+        combos = [
+            (s.chunk_info["exchange"], s.chunk_info["batch"]) for s in specs
+        ]
         assert ("NYSE", 0) in combos
         assert ("NYSE", 1) in combos
         assert ("NASDAQ", 0) in combos
@@ -498,8 +516,12 @@ class TestChunkExpander:
 
         # January: 2 chunks, February: 1 chunk = 3 total
         assert len(specs) == 3
-        jan_specs = [s for s in specs if s.partition_values["month"] == "M2024-01"]
-        feb_specs = [s for s in specs if s.partition_values["month"] == "M2024-02"]
+        jan_specs = [
+            s for s in specs if s.partition_values["month"] == "M2024-01"
+        ]
+        feb_specs = [
+            s for s in specs if s.partition_values["month"] == "M2024-02"
+        ]
         assert len(jan_specs) == 2
         assert len(feb_specs) == 1
 

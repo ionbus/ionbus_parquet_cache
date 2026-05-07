@@ -237,6 +237,73 @@ datasets:
         with pytest.raises(ConfigurationError, match="annotations"):
             load_yaml_file(yaml_path, temp_cache)
 
+    def test_load_column_descriptions(self, temp_cache: Path) -> None:
+        """Column descriptions should be preserved when supplied."""
+        yaml_path = temp_cache / "yaml" / "column_descriptions.yaml"
+        yaml_path.write_text("""
+datasets:
+    annotated:
+        column_descriptions:
+            instrument_id: Quiet symbology_v2 listing-level UUID.
+            vendor_symbol: Vendor ticker-like symbol.
+        source_class_name: TestSource
+""")
+
+        configs = load_yaml_file(yaml_path, temp_cache)
+        config = configs["annotated"]
+
+        assert config.column_descriptions == {
+            "instrument_id": "Quiet symbology_v2 listing-level UUID.",
+            "vendor_symbol": "Vendor ticker-like symbol.",
+        }
+        assert (
+            config.to_yaml_config()["column_descriptions"]
+            == config.column_descriptions
+        )
+
+    def test_omitted_column_descriptions_stay_omitted(
+        self,
+        temp_cache: Path,
+        sample_yaml: Path,
+    ) -> None:
+        """Omitted column descriptions should not be added by to_yaml_config()."""
+        config = load_yaml_file(sample_yaml, temp_cache)["md.test_dataset"]
+
+        assert config.column_descriptions is None
+        assert "column_descriptions" not in config.to_yaml_config()
+
+    def test_column_descriptions_must_be_mapping(
+        self, temp_cache: Path
+    ) -> None:
+        """Column descriptions must be a YAML mapping when present."""
+        yaml_path = temp_cache / "yaml" / "bad_column_descriptions.yaml"
+        yaml_path.write_text("""
+datasets:
+    bad:
+        column_descriptions:
+            - nope
+        source_class_name: TestSource
+""")
+
+        with pytest.raises(ConfigurationError, match="column_descriptions"):
+            load_yaml_file(yaml_path, temp_cache)
+
+    def test_column_descriptions_must_have_string_values(
+        self, temp_cache: Path
+    ) -> None:
+        """Column description keys and values must be strings."""
+        yaml_path = temp_cache / "yaml" / "bad_column_description_value.yaml"
+        yaml_path.write_text("""
+datasets:
+    bad:
+        column_descriptions:
+            instrument_id: 123
+        source_class_name: TestSource
+""")
+
+        with pytest.raises(ConfigurationError, match="keys and values"):
+            load_yaml_file(yaml_path, temp_cache)
+
     def test_load_multiple_datasets(self, temp_cache: Path) -> None:
         """Should load multiple datasets from one file."""
         yaml_content = """

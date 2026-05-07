@@ -11,8 +11,14 @@ import pyarrow.parquet as pq
 import pytest
 
 from ionbus_parquet_cache.builtin_sources import DPDSource, HiveParquetSource
-from ionbus_parquet_cache.dated_dataset import DatedParquetDataset, FileMetadata
-from ionbus_parquet_cache.exceptions import ConfigurationError, DataSourceError
+from ionbus_parquet_cache.dated_dataset import (
+    DatedParquetDataset,
+    FileMetadata,
+)
+from ionbus_parquet_cache.exceptions import (
+    ConfigurationError,
+    DataSourceError,
+)
 from ionbus_parquet_cache.partition import PartitionSpec
 from ionbus_parquet_cache.yaml_config import get_dataset_config
 
@@ -43,11 +49,13 @@ def parquet_source_dir(tmp_path: Path) -> Path:
     source_dir.mkdir()
 
     # Create test data for January 2024
-    df_jan = pd.DataFrame({
-        "Date": pd.date_range("2024-01-01", "2024-01-31"),
-        "value": range(31),
-        "symbol": ["TEST"] * 31,
-    })
+    df_jan = pd.DataFrame(
+        {
+            "Date": pd.date_range("2024-01-01", "2024-01-31"),
+            "value": range(31),
+            "symbol": ["TEST"] * 31,
+        }
+    )
     pq.write_table(
         pa.Table.from_pandas(df_jan),
         source_dir / "2024-01" / "data.parquet",
@@ -59,11 +67,13 @@ def parquet_source_dir(tmp_path: Path) -> Path:
     )
 
     # Create test data for February 2024
-    df_feb = pd.DataFrame({
-        "Date": pd.date_range("2024-02-01", "2024-02-29"),
-        "value": range(29),
-        "symbol": ["TEST"] * 29,
-    })
+    df_feb = pd.DataFrame(
+        {
+            "Date": pd.date_range("2024-02-01", "2024-02-29"),
+            "value": range(29),
+            "symbol": ["TEST"] * 29,
+        }
+    )
     (source_dir / "2024-02").mkdir(parents=True, exist_ok=True)
     pq.write_table(
         pa.Table.from_pandas(df_feb),
@@ -76,11 +86,13 @@ def parquet_source_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def single_parquet_file(tmp_path: Path) -> Path:
     """Create a single test Parquet file."""
-    df = pd.DataFrame({
-        "Date": pd.date_range("2024-01-01", "2024-03-31"),
-        "value": range(91),
-        "symbol": ["TEST"] * 91,
-    })
+    df = pd.DataFrame(
+        {
+            "Date": pd.date_range("2024-01-01", "2024-03-31"),
+            "value": range(91),
+            "symbol": ["TEST"] * 91,
+        }
+    )
     file_path = tmp_path / "test_data.parquet"
     pq.write_table(pa.Table.from_pandas(df), file_path)
     return file_path
@@ -222,10 +234,12 @@ class TestDPDSourceIntegration:
         )
 
         # Create and write test data
-        df = pd.DataFrame({
-            "Date": pd.date_range("2024-01-01", "2024-01-31"),
-            "value": range(31),
-        })
+        df = pd.DataFrame(
+            {
+                "Date": pd.date_range("2024-01-01", "2024-01-31"),
+                "value": range(31),
+            }
+        )
         table = pa.Table.from_pandas(df)
 
         # Publish snapshot
@@ -241,7 +255,9 @@ class TestDPDSourceIntegration:
             path="month=M2024-01/data_abc123.parquet",
             partition_values={"month": "M2024-01"},
             checksum="dummy_checksum",
-            size_bytes=(data_dir / "month=M2024-01" / "data_abc123.parquet").stat().st_size,
+            size_bytes=(data_dir / "month=M2024-01" / "data_abc123.parquet")
+            .stat()
+            .st_size,
         )
         source_dpd._publish_snapshot(
             files=[file_metadata],
@@ -319,6 +335,7 @@ class TestDPDSourceCacheRegistry:
     def reset_registry(self) -> None:
         """Reset CacheRegistry before and after each test."""
         from ionbus_parquet_cache.cache_registry import CacheRegistry
+
         CacheRegistry.reset()
         yield
         CacheRegistry.reset()
@@ -340,10 +357,12 @@ class TestDPDSourceCacheRegistry:
         )
 
         # Create and write test data
-        df = pd.DataFrame({
-            "Date": pd.date_range("2024-01-01", "2024-01-31"),
-            "value": range(31),
-        })
+        df = pd.DataFrame(
+            {
+                "Date": pd.date_range("2024-01-01", "2024-01-31"),
+                "value": range(31),
+            }
+        )
         table = pa.Table.from_pandas(df)
 
         # Publish snapshot
@@ -359,7 +378,9 @@ class TestDPDSourceCacheRegistry:
             path="month=M2024-01/data_abc123.parquet",
             partition_values={"month": "M2024-01"},
             checksum="dummy_checksum",
-            size_bytes=(data_dir / "month=M2024-01" / "data_abc123.parquet").stat().st_size,
+            size_bytes=(data_dir / "month=M2024-01" / "data_abc123.parquet")
+            .stat()
+            .st_size,
         )
         source_dpd._publish_snapshot(
             files=[file_metadata],
@@ -370,7 +391,7 @@ class TestDPDSourceCacheRegistry:
         )
 
         # Register source cache in CacheRegistry
-        registry = CacheRegistry.instance(source_data=source_cache)
+        CacheRegistry.instance(source_data=source_cache)
 
         # Create target DPD in different cache
         target_cache = tmp_path / "target_cache"
@@ -425,10 +446,12 @@ class TestDPDSourceCacheRegistry:
         )
 
         # Create and write test data
-        df = pd.DataFrame({
-            "Date": pd.date_range("2024-02-01", "2024-02-29"),
-            "value": range(29),
-        })
+        df = pd.DataFrame(
+            {
+                "Date": pd.date_range("2024-02-01", "2024-02-29"),
+                "value": range(29),
+            }
+        )
         table = pa.Table.from_pandas(df)
 
         # Publish snapshot
@@ -444,7 +467,9 @@ class TestDPDSourceCacheRegistry:
             path="month=M2024-02/data_abc123.parquet",
             partition_values={"month": "M2024-02"},
             checksum="dummy_checksum",
-            size_bytes=(data_dir / "month=M2024-02" / "data_abc123.parquet").stat().st_size,
+            size_bytes=(data_dir / "month=M2024-02" / "data_abc123.parquet")
+            .stat()
+            .st_size,
         )
         source_dpd._publish_snapshot(
             files=[file_metadata],
@@ -459,7 +484,7 @@ class TestDPDSourceCacheRegistry:
         path_cache.mkdir()
 
         # Register the registry_cache in CacheRegistry
-        registry = CacheRegistry.instance(my_cache=registry_cache)
+        CacheRegistry.instance(my_cache=registry_cache)
 
         # Create target DPD
         target_cache = tmp_path / "target_cache"
@@ -485,7 +510,9 @@ class TestDPDSourceCacheRegistry:
         # But _get_source_dpd should use registry lookup (dpd_cache_name takes precedence)
         result_dpd = source._get_source_dpd()
         assert result_dpd is not None
-        assert result_dpd.cache_dir == registry_cache  # From registry, not path_cache
+        assert (
+            result_dpd.cache_dir == registry_cache
+        )  # From registry, not path_cache
 
         # Verify we got the February data (from registry_cache)
         start, end = source.available_dates()
@@ -501,7 +528,7 @@ class TestDPDSourceCacheRegistry:
         # Set up registry with a different cache name
         some_cache = tmp_path / "some_cache"
         some_cache.mkdir()
-        registry = CacheRegistry.instance(some_cache=some_cache)
+        CacheRegistry.instance(some_cache=some_cache)
 
         # Create target DPD
         target_cache = tmp_path / "target_cache"
@@ -533,7 +560,7 @@ class TestDPDSourceCacheRegistry:
         # Set up registry with a valid but empty cache
         empty_cache = tmp_path / "empty_cache"
         empty_cache.mkdir()
-        registry = CacheRegistry.instance(empty_cache=empty_cache)
+        CacheRegistry.instance(empty_cache=empty_cache)
 
         # Create target DPD
         target_cache = tmp_path / "target_cache"
@@ -553,7 +580,9 @@ class TestDPDSourceCacheRegistry:
         )
 
         # Should raise ConfigurationError when trying to get the source DPD
-        with pytest.raises(ConfigurationError, match="not found in cache 'empty_cache'"):
+        with pytest.raises(
+            ConfigurationError, match="not found in cache 'empty_cache'"
+        ):
             source._get_source_dpd()
 
 

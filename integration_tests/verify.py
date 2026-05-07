@@ -20,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from ionbus_parquet_cache.cache_registry import CacheRegistry
 
-
 # Expected values for validation
 EXPECTED = {
     "futures_daily": {
@@ -46,7 +45,11 @@ EXPECTED = {
 
 def get_cache_dir() -> Path:
     """Get the test cache directory."""
-    return Path(__file__).parent.parent.parent.parent / "parquet_test_data" / "test_caches"
+    return (
+        Path(__file__).parent.parent.parent.parent
+        / "parquet_test_data"
+        / "test_caches"
+    )
 
 
 def check_dataset_exists(registry: CacheRegistry, name: str) -> bool:
@@ -244,7 +247,7 @@ def check_restate(corrupt_cache_path: str, original_cache_path: str):
         corrupt_cache_path: Path to the restated (formerly corrupt) cache
         original_cache_path: Path to the original (uncorrupted) cache
     """
-    print(f"Checking restate results...")
+    print("Checking restate results...")
     print(f"  Restated cache: {corrupt_cache_path}")
     print(f"  Original cache: {original_cache_path}")
 
@@ -327,7 +330,9 @@ def main():
         corrupt_data(sys.argv[2], sys.argv[3])
     elif command == "check-restate":
         if len(sys.argv) < 4:
-            print("Usage: verify.py check-restate <corrupt_cache> <original_cache>")
+            print(
+                "Usage: verify.py check-restate <corrupt_cache> <original_cache>"
+            )
             sys.exit(1)
         check_restate(sys.argv[2], sys.argv[3])
     else:

@@ -690,16 +690,87 @@ class DatedParquetDataset(ParquetDataset):
                     f"{old_value!r} -> {new_value!r}"
                 )
 
+    def _existing_column_descriptions(self) -> dict[str, str]:
+        """Return column descriptions from current snapshot, or empty dict."""
+        self._load_current_metadata_if_available()
+        if self._metadata is None:
+            return {}
+        descriptions = self._metadata.yaml_config.get(
+            "column_descriptions",
+            {},
+        )
+        if descriptions is None:
+            return {}
+        self._validate_column_descriptions(
+            descriptions,
+            f"Existing column_descriptions for '{self.name}'",
+        )
+        return descriptions
+
+    @staticmethod
+    def _validate_column_descriptions(
+        descriptions: Any,
+        context: str,
+    ) -> None:
+        """Validate column_descriptions is a dict[str, str]."""
+        if not isinstance(descriptions, dict):
+            raise ValidationError(
+                f"{context} must be a dict, "
+                f"got {type(descriptions).__name__}"
+            )
+        for column_name, description in descriptions.items():
+            if not isinstance(column_name, str) or not isinstance(
+                description,
+                str,
+            ):
+                raise ValidationError(
+                    f"{context} keys and values must be strings"
+                )
+
+    def _resolve_yaml_config_column_descriptions(
+        self,
+        resolved: dict[str, Any],
+    ) -> None:
+        """
+        Resolve column_descriptions in place.
+
+        Omitting column_descriptions carries forward the previous snapshot's
+        descriptions. Supplying column_descriptions may add or change text,
+        but may not remove an existing column description.
+        """
+        existing = self._existing_column_descriptions()
+
+        if "column_descriptions" not in resolved:
+            if existing:
+                resolved["column_descriptions"] = deepcopy(existing)
+            return
+
+        descriptions = resolved["column_descriptions"]
+        self._validate_column_descriptions(
+            descriptions,
+            f"column_descriptions for '{self.name}'",
+        )
+
+        for column_name in existing:
+            if column_name not in descriptions:
+                raise ValidationError(
+                    f"column_descriptions.{column_name} cannot be removed"
+                )
+
     def _resolve_yaml_config_annotations(
         self,
         yaml_config: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """
-        Return a metadata config with watched annotations resolved.
+        Return a metadata config with watched user metadata resolved.
 
         Omitting annotations carries forward the previous snapshot's value.
         Supplying annotations may add keys, but may not remove or change
         existing keys.
+
+        Omitting column_descriptions carries forward the previous snapshot's
+        value. Supplying column_descriptions may add or change descriptions,
+        but may not remove existing column description keys.
         """
         resolved = (
             self._default_yaml_config()
@@ -711,15 +782,16 @@ class DatedParquetDataset(ParquetDataset):
         if "annotations" not in resolved:
             if existing:
                 resolved["annotations"] = deepcopy(existing)
-            return resolved
+        else:
+            annotations = resolved["annotations"]
+            if annotations is None or not isinstance(annotations, dict):
+                raise ValidationError(
+                    f"annotations for '{self.name}' must be a dict when supplied"
+                )
 
-        annotations = resolved["annotations"]
-        if annotations is None or not isinstance(annotations, dict):
-            raise ValidationError(
-                f"annotations for '{self.name}' must be a dict when supplied"
-            )
+            self._assert_annotations_append_only(existing, annotations)
 
-        self._assert_annotations_append_only(existing, annotations)
+        self._resolve_yaml_config_column_descriptions(resolved)
         return resolved
 
     def _provenance_relative_path(self, suffix: str) -> str:
@@ -815,6 +887,41 @@ class DatedParquetDataset(ParquetDataset):
                 f"Provenance sidecar for '{self.name}' must contain a dict"
             )
         return payload
+
+    def get_column_descriptions(
+        self,
+        snapshot: str | None = None,
+    ) -> dict[str, str]:
+        """
+        Return column descriptions stored in snapshot metadata.
+
+        Args:
+            snapshot: Optional snapshot suffix. If omitted, reads the current
+                snapshot metadata.
+
+        Returns:
+            A copy of the column description dictionary. Returns an empty
+            dictionary when the snapshot has no column descriptions.
+
+        Raises:
+            SnapshotNotFoundError: If no requested/current metadata exists.
+            ValidationError: If stored column descriptions are malformed.
+        """
+        if snapshot is None:
+            if self._metadata is None:
+                self._metadata = self._load_metadata()
+            metadata = self._metadata
+        else:
+            metadata = self._load_metadata_for_snapshot(snapshot)
+
+        descriptions = metadata.yaml_config.get("column_descriptions", {})
+        if descriptions is None:
+            return {}
+        self._validate_column_descriptions(
+            descriptions,
+            f"column_descriptions for '{self.name}'",
+        )
+        return deepcopy(descriptions)
 
     def cache_history(
         self,

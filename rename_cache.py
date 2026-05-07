@@ -69,13 +69,16 @@ def rename_cache(
 
     # Collect metadata files to update (skip trimmed snapshots)
     pkl_files = [
-        p for p in meta_dir.iterdir()
+        p
+        for p in meta_dir.iterdir()
         if p.suffix == ".gz"
         and p.name.endswith(".pkl.gz")
         and "_trimmed" not in p.name
     ]
     if not pkl_files:
-        raise FileNotFoundError(f"No snapshot metadata files found in {meta_dir}")
+        raise FileNotFoundError(
+            f"No snapshot metadata files found in {meta_dir}"
+        )
 
     logger.info(
         f"{'[dry-run] ' if dry_run else ''}"
@@ -88,7 +91,9 @@ def rename_cache(
     try:
         for old_pkl in pkl_files:
             # Derive new filename: replace leading "<old_name>_" with "<new_name>_"
-            suffix_part = old_pkl.name[len(old_name) + 1:]  # e.g. "1wDpgS.pkl.gz"
+            suffix_part = old_pkl.name[
+                len(old_name) + 1 :
+            ]  # e.g. "1wDpgS.pkl.gz"
             new_pkl_name = f"{new_name}_{suffix_part}"
             new_pkl_path = meta_dir / new_pkl_name
 
@@ -98,7 +103,10 @@ def rename_cache(
             )
 
             if not dry_run:
-                from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
+                from ionbus_parquet_cache.dated_dataset import (
+                    SnapshotMetadata,
+                )
+
                 metadata = SnapshotMetadata.from_pickle(old_pkl)
                 metadata.name = new_name
                 metadata.to_pickle(new_pkl_path)

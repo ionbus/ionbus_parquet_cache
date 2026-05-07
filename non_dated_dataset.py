@@ -15,11 +15,11 @@ import pyarrow as pa
 import pyarrow.dataset as pds
 from pydantic import PrivateAttr, computed_field
 
-from ionbus_parquet_cache.parquet_dataset_base import ParquetDataset
 from ionbus_parquet_cache.exceptions import (
     SnapshotNotFoundError,
     SnapshotPublishError,
 )
+from ionbus_parquet_cache.parquet_dataset_base import ParquetDataset
 from ionbus_parquet_cache.snapshot import (
     extract_suffix_from_filename,
     generate_snapshot_suffix,
@@ -70,6 +70,7 @@ class NonDatedParquetDataset(ParquetDataset):
         """
         if self.is_gcs:
             from ionbus_parquet_cache.gcs_utils import gcs_ls
+
             suffixes = []
             for item_url in gcs_ls(str(self.npd_dir)):
                 name = item_url.rstrip("/").split("/")[-1]
@@ -105,6 +106,7 @@ class NonDatedParquetDataset(ParquetDataset):
 
         if self.is_gcs:
             from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_join
+
             npd_url = str(self.npd_dir)
             dir_url = gcs_join(npd_url, f"{self.name}_{self.current_suffix}")
             if gcs_exists(dir_url):
@@ -182,6 +184,7 @@ class NonDatedParquetDataset(ParquetDataset):
                 gcs_pa_filesystem,
                 gcs_strip_prefix,
             )
+
             npd_url = str(self.npd_dir)
             dir_url = gcs_join(npd_url, f"{self.name}_{suffix}")
             file_url = gcs_join(npd_url, f"{self.name}_{suffix}.parquet")
@@ -242,11 +245,15 @@ class NonDatedParquetDataset(ParquetDataset):
         if not source.exists():
             raise FileNotFoundError(f"Source path does not exist: {source}")
 
+        current = self.current_suffix
+        if current is None:
+            current = self._discover_current_suffix()
+            self.current_suffix = current
+
         # Generate new suffix
         new_suffix = generate_snapshot_suffix()
 
         # Check for duplicate suffix (spec: update fails if same timestamp)
-        current = self.current_suffix
         if current is not None and new_suffix <= current:
             raise SnapshotPublishError(
                 f"Snapshot suffix collision: new suffix '{new_suffix}' is not "
@@ -295,6 +302,7 @@ class NonDatedParquetDataset(ParquetDataset):
         # Count snapshots
         if self.is_gcs:
             from ionbus_parquet_cache.gcs_utils import gcs_ls
+
             snapshot_count = sum(
                 1
                 for item_url in gcs_ls(str(self.npd_dir))

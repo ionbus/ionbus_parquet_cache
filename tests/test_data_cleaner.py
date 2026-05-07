@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import duckdb
-import pyarrow as pa
 import pytest
 
 from ionbus_parquet_cache.data_cleaner import DataCleaner, NoOpCleaner
@@ -101,7 +99,9 @@ class TestDataCleanerWithDuckDB:
                 return rel.filter(f"value >= {self.min_value}")
 
         # Create test relation
-        rel = duckdb.sql("SELECT * FROM (VALUES (1), (2), (3), (4), (5)) AS t(value)")
+        rel = duckdb.sql(
+            "SELECT * FROM (VALUES (1), (2), (3), (4), (5)) AS t(value)"
+        )
 
         cleaner = FilterCleaner(mock_dataset, min_value=3)
         result = cleaner(rel)
@@ -117,7 +117,9 @@ class TestDataCleanerWithDuckDB:
 
         class TransformCleaner(DataCleaner):
             def __call__(self, rel):
-                return duckdb.sql("SELECT value, value * 2 AS doubled FROM rel")
+                return duckdb.sql(
+                    "SELECT value, value * 2 AS doubled FROM rel"
+                )
 
         # Create test relation
         rel = duckdb.sql("SELECT * FROM (VALUES (1), (2), (3)) AS t(value)")

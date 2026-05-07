@@ -18,7 +18,7 @@ if you are building data pipelines or need to manage versioned, partitioned parq
 
 **DatedParquetDataset (DPD)**: hive-partitioned parquet dataset partitioned by date + optional additional columns. maintains a `_meta_data/` directory with pickled snapshot files. each snapshot captures: parquet schema, file list with checksums, date range, partition values. snapshots are immutable — updates create new snapshots. use for time-series data (prices, events, analytics).
 
-**NonDatedParquetDataset (NPD)**: reference data without date partitioning (stocks, instruments, hierarchies). snapshots work the same way. use for slowly-changing dimensions or lookup tables.
+**NonDatedParquetDataset (NPD)**: reference data without date partitioning (stocks, instruments, hierarchies). snapshots are imported as complete replacements, either with `python -m ionbus_parquet_cache.import_npd` or `import_snapshot()`. use for slowly-changing dimensions or lookup tables.
 
 **Snapshot**: immutable versioned state of a dataset. identified by a base-36 timestamp suffix (e.g. `1H4DW01`). contains parquet schema, file metadata (path, checksum, partition values), date range (for DPDs), partition value enumerations. stored in `_meta_data/<dataset_name>_<suffix>.pkl.gz`. only the latest snapshot is loaded by default; older snapshots are preserved for historical reads.
 
@@ -37,8 +37,9 @@ if you are building data pipelines or need to manage versioned, partitioned parq
 | `NonDatedParquetDataset` | reference (non-dated) datasets |
 | `DataSource` | abstract base for external data providers (implement `get_data()`) |
 | `DataCleaner` | callable to transform data via DuckDB relations |
-| `yaml_config` | load YAML configs and create DPDs/NPDs |
+| `yaml_config` | load YAML configs and create DPDs |
 | `sync_cache` | CLI tool: push/pull/sync between local and GCS |
+| `import_npd` | CLI tool: import parquet files/directories as NPD snapshots |
 | `update-cache` | CLI tool: refresh a dataset from a DataSource |
 | `cleanup-cache` | CLI tool: remove old snapshots and trim data |
 
@@ -140,16 +141,19 @@ Use YAML configuration + CLI for simplicity:
 
 ```yaml
 # config.yaml
-caches:
-  default: /path/to/cache
+cache_dir: /path/to/cache
 
 datasets:
   md.futures_daily:
-    source_class: my_package.MyDataSource
+    source_location: module://my_package.data_sources
+    source_class_name: MyDataSource
     date_col: date
     date_partition: day
     partition_columns: [exchange, instrument]
     row_group_size: 128000
+    column_descriptions:
+      instrument: Contract or instrument identifier.
+      exchange: Listing exchange code.
 ```
 
 then:
@@ -158,6 +162,13 @@ then:
 python -m ionbus_parquet_cache.yaml_create_datasets config.yaml
 python -m ionbus_parquet_cache.update_datasets /path/to/cache md.futures_daily \
     --start-date 2024-01-01 --end-date 2024-01-31
+```
+
+for NPD snapshots created outside the cache:
+
+```bash
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet
 ```
 
 or programmatically:
@@ -184,6 +195,21 @@ df = dpd.read_data(snapshot="1H4DW01", start_date=..., end_date=...)
 latest = registry.get_latest_snapshot("md.futures_daily")
 print(f"Latest snapshot: {latest}")
 ```
+
+### reading column descriptions
+
+DPD column descriptions are stored in snapshot metadata as
+`column_descriptions` and can be read without knowing the internal metadata
+shape:
+
+```python
+descriptions = dpd.get_column_descriptions()
+old_descriptions = dpd.get_column_descriptions(snapshot="1H4DW00")
+```
+
+The method returns a copy of the requested snapshot dictionary, or `{}` when
+none are stored. NPDs do not currently have YAML-backed snapshot metadata, so
+this accessor is DPD-only.
 
 ### cache refresh and invalidation
 
@@ -262,12 +288,12 @@ do not store credentials, api keys, passwords, tokens, or private key material
 in YAML files. YAML config is stored in snapshot metadata and may be copied
 when caches are synced.
 
-treat `source_init_args`, `cleaning_init_args`, and
-`sync_function_init_args` as non-secret configuration only: endpoints,
-timeouts, project names, table names, and other values safe to keep in
-metadata. DataSources, DataCleaners, and sync functions that need secrets
-should read them from environment variables or an external credential provider
-and fail clearly if a required value is missing.
+treat `annotations`, `column_descriptions`, `source_init_args`,
+`cleaning_init_args`, and `sync_function_init_args` as non-secret configuration
+only: endpoints, timeouts, project names, table names, column blurbs, and other
+values safe to keep in metadata. DataSources, DataCleaners, and sync functions
+that need secrets should read them from environment variables or an external
+credential provider and fail clearly if a required value is missing.
 
 ```python
 import os
@@ -349,6 +375,9 @@ datasets:
 
     # optional
     row_group_size: 128000  # rows per parquet row group; lower = more metadata, faster filters
+    column_descriptions:  # optional, stored in snapshot metadata
+      instrument_id: Quiet symbology_v2 listing-level UUID.
+      vendor_symbol: Vendor ticker-like symbol.
     num_instrument_buckets: 256  # hash-based instrument bucketing
     instrument_column: instrument  # required if num_instrument_buckets set
     sort_columns: [instrument, date]  # sort order within each partition file
@@ -357,13 +386,12 @@ datasets:
     end_date_str: 2024-12-31
 
     # transforms (applied during update)
-    transforms:
-      columns_to_rename:
-        old_name: new_name
-      columns_to_drop: [col1, col2]
-      dropna_columns: [price]  # drop rows where these are null
-      dedup_columns: [symbol, date]  # deduplicate
-      dedup_keep: last|first  # which duplicate to keep
+    columns_to_rename:
+      old_name: new_name
+    columns_to_drop: [col1, col2]
+    dropna_columns: [price]  # drop rows where these are null
+    dedup_columns: [symbol, date]  # deduplicate
+    dedup_keep: last|first  # which duplicate to keep
 ```
 
 ### key fields
@@ -372,7 +400,8 @@ datasets:
 - **num_instrument_buckets**: if set, enables bucketing. rows are distributed across `__instrument_bucket__=0/` ... `__instrument_bucket__=N/` based on `hash(instrument_column) % num_instrument_buckets`. breakingchanges with bucketing: bucketed datasets cannot be updated without full rebuild if you change `num_instrument_buckets`.
 - **sort_columns**: affects read performance. set to frequent filter columns.
 - **repull_n_days**: useful for datasets that correct historical data (e.g. option prices). e.g., `repull_n_days: 5` means "always fetch the last 5 business days, not just new dates".
-- **sync_function_***: optional post-sync hooks for `sync-cache push` from a local source. they run only with `--run-sync-functions`, `--run-sync-only`, or a CLI `--sync-function` override. cache-local hooks load from the local source cache; remote-source post-sync is unsupported.
+- **column_descriptions**: optional `dict[str, str]` stored in captured YAML snapshot metadata. omitted values carry forward; explicit updates may add or change text, but may not remove existing keys in the same lineage. use `dpd.get_column_descriptions()` to read the current or requested snapshot dictionary.
+- **sync_function_***: optional post-sync hooks for `sync-cache push` from a local source. YAML-configured hooks currently come from DPD YAML entries. NPD sync targets are supported with the CLI `--sync-function` override. cache-local hooks load from the local source cache; remote-source post-sync is unsupported.
 ---
 
 ## things not to do

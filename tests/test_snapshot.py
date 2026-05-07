@@ -27,7 +27,9 @@ class TestGenerateSnapshotSuffix:
     def test_all_chars_are_base36_uppercase(self) -> None:
         """All characters should be digits or A-Z."""
         suffix = generate_snapshot_suffix()
-        assert all(c in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" for c in suffix)
+        assert all(
+            c in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" for c in suffix
+        )
 
     def test_is_valid_suffix(self) -> None:
         suffix = generate_snapshot_suffix()
@@ -71,13 +73,13 @@ class TestParseSnapshotSuffix:
     def test_invalid_raises(self) -> None:
         """Invalid suffixes should raise ValueError."""
         with pytest.raises(ValueError):
-            parse_snapshot_suffix("12345")    # 5 chars
+            parse_snapshot_suffix("12345")  # 5 chars
         with pytest.raises(ValueError):
-            parse_snapshot_suffix("12345678") # 8 chars
+            parse_snapshot_suffix("12345678")  # 8 chars
         with pytest.raises(ValueError):
             parse_snapshot_suffix("12345!!")  # invalid char
         with pytest.raises(ValueError):
-            parse_snapshot_suffix("1Gz5hK")   # 6-char — not valid
+            parse_snapshot_suffix("1Gz5hK")  # 6-char — not valid
         with pytest.raises(ValueError):
             parse_snapshot_suffix("aaaaaaa")  # lowercase — not valid
 
@@ -86,10 +88,16 @@ class TestExtractSuffixFromFilename:
     """Tests for extract_suffix_from_filename()."""
 
     def test_parquet_file(self) -> None:
-        assert extract_suffix_from_filename("dataset_1H4DW00.parquet") == "1H4DW00"
+        assert (
+            extract_suffix_from_filename("dataset_1H4DW00.parquet")
+            == "1H4DW00"
+        )
 
     def test_pickle_file(self) -> None:
-        assert extract_suffix_from_filename("dataset_1H4DW00.pkl.gz") == "1H4DW00"
+        assert (
+            extract_suffix_from_filename("dataset_1H4DW00.pkl.gz")
+            == "1H4DW00"
+        )
 
     def test_directory(self) -> None:
         assert extract_suffix_from_filename("dataset_1H4DW00/") == "1H4DW00"
@@ -103,8 +111,12 @@ class TestExtractSuffixFromFilename:
 
     def test_invalid_suffix(self) -> None:
         assert extract_suffix_from_filename("dataset_short.parquet") is None
-        assert extract_suffix_from_filename("dataset_toolongx1.parquet") is None
-        assert extract_suffix_from_filename("dataset_1Gz5hK.parquet") is None  # 6-char
+        assert (
+            extract_suffix_from_filename("dataset_toolongx1.parquet") is None
+        )
+        assert (
+            extract_suffix_from_filename("dataset_1Gz5hK.parquet") is None
+        )  # 6-char
 
 
 class TestGetCurrentSuffix:
@@ -138,9 +150,11 @@ class TestIsValidSuffix:
         assert is_valid_suffix("ABC1234")
 
     def test_invalid_suffixes(self) -> None:
-        assert not is_valid_suffix("12345")    # 5 chars
-        assert not is_valid_suffix("12345678") # 8 chars
+        assert not is_valid_suffix("12345")  # 5 chars
+        assert not is_valid_suffix("12345678")  # 8 chars
         assert not is_valid_suffix("12345!!")  # invalid char
         assert not is_valid_suffix("")
         assert not is_valid_suffix("aaaaaaa")  # lowercase
-        assert not is_valid_suffix("1Gz5hK")   # 6-char base-62 — no longer valid
+        assert not is_valid_suffix(
+            "1Gz5hK"
+        )  # 6-char base-62 — no longer valid
