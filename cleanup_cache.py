@@ -659,8 +659,10 @@ def _discover_dpd_snapshots(
                     )
                     if sidecar.exists():
                         sidecars.append(sidecar)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"Skipping provenance sidecar discovery for {meta_file}: {e}"
+                )
 
             size = sum(
                 f.stat().st_size for f in files + sidecars if f.exists()
