@@ -71,7 +71,6 @@
 
 <!-- TOC end -->
 
-
 A Python library for managing versioned Parquet datasets with automatic date partitioning, snapshot versioning, and multi-cache support.
 
 ## Installation
