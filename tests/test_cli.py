@@ -409,6 +409,72 @@ class TestImportNpdMain:
         assert len(snapshot_files) == 1
         assert snapshot_files[0].read_text() == "not parquet"
 
+    def test_import_with_info_and_provenance_files(
+        self, temp_cache: Path, tmp_path: Path
+    ) -> None:
+        """--info-file and --provenance-file should attach NPD sidecars."""
+        source = tmp_path / "instruments.parquet"
+        pd.DataFrame({"symbol": ["AAPL"]}).to_parquet(source, index=False)
+        info_file = tmp_path / "instruments.info.yaml"
+        info_file.write_text("""
+notes: Instrument notes.
+annotations:
+  vendor: example
+column_descriptions:
+  symbol: Vendor ticker-like symbol.
+""")
+        provenance_file = tmp_path / "instruments.provenance.yaml"
+        provenance_file.write_text("""
+source: unit-test
+batch: 3
+""")
+
+        result = import_npd_main(
+            [
+                str(temp_cache),
+                "ref.instrument_master",
+                str(source),
+                "--info-file",
+                str(info_file),
+                "--provenance-file",
+                str(provenance_file),
+            ]
+        )
+
+        assert result == 0
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache,
+            name="ref.instrument_master",
+        )
+        assert npd.get_notes() == "Instrument notes."
+        assert npd.get_annotations() == {"vendor": "example"}
+        assert npd.get_column_descriptions() == {
+            "symbol": "Vendor ticker-like symbol.",
+        }
+        assert npd.read_provenance() == {"source": "unit-test", "batch": 3}
+
+    def test_import_info_file_rejects_unknown_keys(
+        self, temp_cache: Path, tmp_path: Path
+    ) -> None:
+        """Unknown --info-file keys should fail before writing."""
+        source = tmp_path / "instruments.parquet"
+        pd.DataFrame({"symbol": ["AAPL"]}).to_parquet(source, index=False)
+        info_file = tmp_path / "bad.info.yaml"
+        info_file.write_text("owner: quiet\n")
+
+        result = import_npd_main(
+            [
+                str(temp_cache),
+                "ref.instrument_master",
+                str(source),
+                "--info-file",
+                str(info_file),
+            ]
+        )
+
+        assert result == 1
+        assert not (temp_cache / "non-dated").exists()
+
     def test_rejects_directory_without_parquet(
         self, temp_cache: Path, tmp_path: Path
     ) -> None:
@@ -1176,6 +1242,42 @@ class TestFindOrphansScriptGeneration:
         # The script should contain the orphan file path
         script_content = scripts[0].read_text()
         assert "orphan_file_XyZabc.parquet" in script_content
+
+    def test_find_orphans_includes_npd_sidecars(
+        self,
+        temp_cache: Path,
+        tmp_path: Path,
+    ) -> None:
+        """NPD sidecars without a matching snapshot should be reported."""
+        import sys
+
+        source = tmp_path / "ref.parquet"
+        pd.DataFrame({"symbol": ["AAPL"]}).to_parquet(source, index=False)
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache,
+            name="ref.instrument_master",
+        )
+        npd.import_snapshot(source, info={"notes": "Current notes."})
+
+        orphan = (
+            temp_cache
+            / "non-dated"
+            / "ref.instrument_master"
+            / "_meta_data"
+            / "ref.instrument_master_1ZZZZZZ.pkl.gz"
+        )
+        orphan.write_bytes(b"not a real sidecar")
+
+        result = cleanup_cache_main([str(temp_cache), "--find-orphans"])
+        assert result == 0
+
+        if sys.platform == "win32":
+            scripts = list(temp_cache.glob("_cleanup_*.bat"))
+        else:
+            scripts = list(temp_cache.glob("_cleanup_*.sh"))
+        assert scripts
+        script_content = scripts[0].read_text()
+        assert "ref.instrument_master_1ZZZZZZ.pkl.gz" in script_content
 
     def test_find_orphans_no_script_when_no_orphans(
         self, configured_cache: Path

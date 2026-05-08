@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-
 from ionbus_utils.date_utils import date_partition_range
 from ionbus_utils.file_utils import format_size
 from ionbus_utils.logging_utils import logger
@@ -231,6 +230,7 @@ def _run_cleanup(
                     f"{size_str} reclaimable"
                 )
                 files_to_delete.extend(snap.get("files", []))
+                files_to_delete.extend(snap.get("sidecars", []))
                 # Also delete metadata file
                 meta_file = snap.get("meta_file")
                 if meta_file:
@@ -275,6 +275,7 @@ def _run_cleanup(
                 logger.info(f"  {suffix}: {size_str} reclaimable")
                 if snap.get("path"):
                     files_to_delete.append(snap["path"])
+                files_to_delete.extend(snap.get("sidecars", []))
             else:
                 size_str = format_size(snap.get("size", 0))
                 logger.info(f"  {suffix}: {size_str}")
@@ -647,13 +648,30 @@ def _discover_dpd_snapshots(
 
             # Find associated data files
             files = list(item.rglob(f"*_{suffix}.parquet"))
-            size = sum(f.stat().st_size for f in files if f.exists())
+            sidecars: list[Path] = []
+            try:
+                metadata = SnapshotMetadata.from_pickle(meta_file)
+                if metadata.provenance is not None:
+                    sidecar = (
+                        item
+                        / "_provenance"
+                        / f"{name}_{suffix}.provenance.pkl.gz"
+                    )
+                    if sidecar.exists():
+                        sidecars.append(sidecar)
+            except Exception:
+                pass
+
+            size = sum(
+                f.stat().st_size for f in files + sidecars if f.exists()
+            )
 
             snapshots.append(
                 {
                     "suffix": suffix,
                     "meta_file": meta_file,
                     "files": files,
+                    "sidecars": sidecars,
                     "size": size,
                     "created_at": created_at,
                 }
@@ -663,6 +681,19 @@ def _discover_dpd_snapshots(
             result[name] = snapshots
 
     return result
+
+
+def _expected_npd_sidecars(
+    dataset_dir: Path,
+    name: str,
+    suffix: str,
+) -> list[Path]:
+    """Return convention-named NPD sidecars that exist for a snapshot."""
+    candidates = [
+        dataset_dir / "_meta_data" / f"{name}_{suffix}.pkl.gz",
+        dataset_dir / "_provenance" / f"{name}_{suffix}.provenance.pkl.gz",
+    ]
+    return [path for path in candidates if path.exists()]
 
 
 def _discover_npd_snapshots(
@@ -711,11 +742,14 @@ def _discover_npd_snapshots(
                 size = sum(
                     f.stat().st_size for f in item.rglob("*") if f.is_file()
                 )
+            sidecars = _expected_npd_sidecars(dataset_dir, name, suffix)
+            size += sum(f.stat().st_size for f in sidecars if f.exists())
 
             snapshots.append(
                 {
                     "suffix": suffix,
                     "path": item,
+                    "sidecars": sidecars,
                     "size": size,
                     "created_at": created_at,
                 }
@@ -740,6 +774,7 @@ def _find_orphaned_files(
         for snap in snapshots:
             known_files.add(snap["meta_file"])
             known_files.update(snap.get("files", []))
+            known_files.update(snap.get("sidecars", []))
 
     for snapshots in npd_snapshots.values():
         for snap in snapshots:
@@ -748,6 +783,7 @@ def _find_orphaned_files(
                     known_files.add(snap["path"])
                 else:
                     known_files.update(snap["path"].rglob("*"))
+            known_files.update(snap.get("sidecars", []))
 
     # Find parquet files not in known set
     orphans = []
@@ -756,6 +792,39 @@ def _find_orphaned_files(
             # Check if it's in a _meta_data dir (shouldn't have parquet)
             if "_meta_data" not in f.parts:
                 orphans.append(f)
+
+    known_dpd_suffixes = {
+        name: {snap["suffix"] for snap in snapshots}
+        for name, snapshots in dpd_snapshots.items()
+    }
+    known_npd_suffixes = {
+        name: {snap["suffix"] for snap in snapshots}
+        for name, snapshots in npd_snapshots.items()
+    }
+
+    for f in cache_path.glob("*/_provenance/*.provenance.pkl.gz"):
+        if f in known_files:
+            continue
+        suffix = extract_suffix_from_filename(f.name)
+        dataset_name = f.parent.parent.name
+        if suffix not in known_dpd_suffixes.get(dataset_name, set()):
+            orphans.append(f)
+
+    for f in cache_path.glob("non-dated/*/_meta_data/*.pkl.gz"):
+        if f in known_files:
+            continue
+        suffix = extract_suffix_from_filename(f.name)
+        dataset_name = f.parent.parent.name
+        if suffix not in known_npd_suffixes.get(dataset_name, set()):
+            orphans.append(f)
+
+    for f in cache_path.glob("non-dated/*/_provenance/*.provenance.pkl.gz"):
+        if f in known_files:
+            continue
+        suffix = extract_suffix_from_filename(f.name)
+        dataset_name = f.parent.parent.name
+        if suffix not in known_npd_suffixes.get(dataset_name, set()):
+            orphans.append(f)
 
     return orphans
 

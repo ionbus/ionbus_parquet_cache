@@ -475,6 +475,11 @@ def _gcs_rel_snapshot_info(rel_path: str) -> tuple[str, bool, str] | None:
     if parts[0] == "non-dated":
         if len(parts) < 3:
             return None
+        if len(parts) >= 4 and parts[2] in ("_meta_data", "_provenance"):
+            suffix = extract_suffix_from_filename(parts[3])
+            if suffix is None:
+                return None
+            return parts[1], True, suffix
         suffix = extract_suffix_from_filename(parts[2])
         if suffix is None:
             return None
@@ -517,6 +522,32 @@ def _is_expected_gcs_dpd_provenance_rel(
         and parts[1] == "_provenance"
         and parts[2] == f"{dataset_name}_{suffix}.provenance.pkl.gz"
     )
+
+
+def _is_gcs_npd_sidecar_rel(rel_path: str) -> bool:
+    """Return True when rel_path is under an NPD sidecar directory."""
+    parts = _rel_parts(rel_path)
+    return (
+        len(parts) >= 4
+        and parts[0] == "non-dated"
+        and parts[2] in ("_meta_data", "_provenance")
+    )
+
+
+def _is_expected_gcs_npd_sidecar_rel(
+    rel_path: str,
+    dataset_name: str,
+    suffix: str,
+) -> bool:
+    """Return True for convention-named NPD info/provenance sidecars."""
+    parts = _rel_parts(rel_path)
+    if len(parts) != 4 or parts[0] != "non-dated" or parts[1] != dataset_name:
+        return False
+    if parts[2] == "_meta_data":
+        return parts[3] == f"{dataset_name}_{suffix}.pkl.gz"
+    if parts[2] == "_provenance":
+        return parts[3] == f"{dataset_name}_{suffix}.provenance.pkl.gz"
+    return False
 
 
 def _select_snapshot_suffixes(
@@ -577,12 +608,20 @@ def _collect_gcs_sync_blobs(
             and not _is_expected_gcs_dpd_provenance_rel(rel, name, suffix)
         ):
             continue
+        is_npd_sidecar = is_npd and _is_gcs_npd_sidecar_rel(rel)
+        if is_npd_sidecar and not _is_expected_gcs_npd_sidecar_rel(
+            rel,
+            name,
+            suffix,
+        ):
+            continue
 
         candidates.append((blob_url, rel, name, is_npd, suffix))
 
         # DPD snapshots are defined by metadata files. NPD snapshots are
-        # self-describing, so any blob under the snapshot contributes suffix.
-        if is_npd or _is_gcs_dpd_metadata_rel(rel):
+        # self-describing, so data blobs under the snapshot contribute suffix.
+        # Sidecars follow selected snapshots, but never define them.
+        if (is_npd and not is_npd_sidecar) or _is_gcs_dpd_metadata_rel(rel):
             available.setdefault((is_npd, name), set()).add(suffix)
 
     selected = _select_snapshot_suffixes(
@@ -701,6 +740,29 @@ def _local_dpd_snapshot_files(snap: dict) -> list[Path]:
     )
     if provenance_path.exists():
         files.append(provenance_path)
+    return files
+
+
+def _local_npd_snapshot_files(snap: dict) -> list[Path]:
+    """Return local files that belong to an NPD snapshot."""
+    item = snap["path"]
+    files: list[Path] = []
+    if item.is_file():
+        files.append(item)
+    else:
+        files.extend(f for f in item.rglob("*") if f.is_file())
+
+    dataset_dir = item.parent
+    name = dataset_dir.name
+    suffix = snap["suffix"]
+    info_sidecar = dataset_dir / "_meta_data" / f"{name}_{suffix}.pkl.gz"
+    provenance_sidecar = (
+        dataset_dir / "_provenance" / f"{name}_{suffix}.provenance.pkl.gz"
+    )
+    if info_sidecar.exists():
+        files.append(info_sidecar)
+    if provenance_sidecar.exists():
+        files.append(provenance_sidecar)
     return files
 
 
@@ -958,21 +1020,12 @@ def _local_sync_pairs_from_selected(
                 )
                 pairs.append((f, str(rel).replace("\\", "/")))
         else:
-            item = selected.snapshot["path"]
-            if item.is_file():
+            for item in _local_npd_snapshot_files(selected.snapshot):
                 rel = _apply_rename(
                     item.relative_to(source_path),
                     rename_map,
                 )
                 pairs.append((item, str(rel).replace("\\", "/")))
-            else:
-                for f in item.rglob("*"):
-                    if f.is_file():
-                        rel = _apply_rename(
-                            f.relative_to(source_path),
-                            rename_map,
-                        )
-                        pairs.append((f, str(rel).replace("\\", "/")))
 
     return pairs
 
@@ -1174,16 +1227,17 @@ def _run_sync_push_gcs(
     sync_function_config: SyncFunctionConfig | None = None,
 ) -> int:
     """Push a local cache to GCS, or sync between two GCS locations."""
+    from ionbus_utils.file_utils import format_size
+
     from ionbus_parquet_cache.gcs_utils import (
+        gcs_download,
         gcs_find,
         gcs_join,
-        gcs_download,
         gcs_upload,
         is_gcs_path,
         should_download,
         should_upload,
     )
-    from ionbus_utils.file_utils import format_size
 
     rename_map = rename_map or {}
     src_is_gcs = is_gcs_path(source)

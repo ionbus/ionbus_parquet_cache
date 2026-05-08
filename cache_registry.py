@@ -469,14 +469,20 @@ class CacheRegistry:
         snapshot: str | None = None,
     ) -> dict[str, Any]:
         """
-        Load optional external provenance for a DPD snapshot.
+        Load optional external provenance for a dataset snapshot.
 
         Args:
             name: Dataset name.
             cache_name: Optional specific cache to search.
             snapshot: Optional snapshot suffix. If None, uses current.
         """
-        return self._require_dpd(name, cache_name).read_provenance(snapshot)
+        dataset = self.get_dataset(name, cache_name)
+        if dataset is None:
+            raise SnapshotNotFoundError(
+                f"Dataset '{name}' not found in any cache",
+                dataset_name=name,
+            )
+        return dataset.read_provenance(snapshot)
 
     def read_data(
         self,

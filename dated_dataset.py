@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime as dt
 import gzip
 import pickle
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -648,388 +647,46 @@ class DatedParquetDataset(ParquetDataset):
         except SnapshotNotFoundError:
             pass
 
-    def _existing_annotations(self) -> dict[str, Any]:
-        """Return annotations from the current snapshot, or an empty dict."""
-        self._load_current_metadata_if_available()
-        if self._metadata is None:
-            return {}
-        annotations = self._metadata.yaml_config.get("annotations", {})
-        if annotations is None:
-            return {}
-        if not isinstance(annotations, dict):
-            raise ValidationError(
-                f"Existing annotations for '{self.name}' must be a dict, "
-                f"got {type(annotations).__name__}"
-            )
-        return annotations
-
-    def _assert_annotations_append_only(
+    def _load_snapshot_info(
         self,
-        old: dict[str, Any],
-        new: dict[str, Any],
-        path: str = "annotations",
-    ) -> None:
-        """Reject annotation removals and changes to existing values."""
-        for key, old_value in old.items():
-            child_path = f"{path}.{key}"
-            if key not in new:
-                raise ValidationError(
-                    f"{child_path} cannot be removed from annotations"
-                )
+        snapshot: str | None = None,
+    ) -> dict[str, Any]:
+        """Return snapshot info from DPD snapshot metadata."""
+        if snapshot is None:
+            if self._metadata is None:
+                self._metadata = self._load_metadata()
+            metadata = self._metadata
+        else:
+            metadata = self._load_metadata_for_snapshot(snapshot)
+        return metadata.yaml_config
 
-            new_value = new[key]
-            if isinstance(old_value, dict) and isinstance(new_value, dict):
-                self._assert_annotations_append_only(
-                    old_value,
-                    new_value,
-                    child_path,
-                )
-            elif new_value != old_value:
-                raise ValidationError(
-                    f"{child_path} cannot change in annotations: "
-                    f"{old_value!r} -> {new_value!r}"
-                )
-
-    def _existing_notes(self) -> str | None:
-        """Return notes from the current snapshot, or None."""
-        self._load_current_metadata_if_available()
-        if self._metadata is None:
-            return None
-        notes = self._metadata.yaml_config.get("notes")
-        if notes is None:
-            return None
-        self._validate_notes(notes, f"Existing notes for '{self.name}'")
-        return notes
-
-    @staticmethod
-    def _validate_notes(notes: Any, context: str) -> None:
-        """Validate notes is a string."""
-        if not isinstance(notes, str):
-            raise ValidationError(
-                f"{context} must be a string, got {type(notes).__name__}"
-            )
-
-    def _resolve_yaml_config_notes(self, resolved: dict[str, Any]) -> None:
-        """
-        Resolve notes in place.
-
-        Omitting notes carries forward the previous snapshot's value.
-        Supplying notes replaces the previous value, including with an empty
-        string. Supplying None is rejected because notes cannot be deleted.
-        """
-        existing = self._existing_notes()
-
-        if "notes" not in resolved:
-            if existing is not None:
-                resolved["notes"] = existing
-            return
-
-        self._validate_notes(resolved["notes"], f"notes for '{self.name}'")
-
-    def _existing_column_descriptions(self) -> dict[str, str]:
-        """Return column descriptions from current snapshot, or empty dict."""
-        self._load_current_metadata_if_available()
-        if self._metadata is None:
-            return {}
-        descriptions = self._metadata.yaml_config.get(
-            "column_descriptions",
-            {},
-        )
-        if descriptions is None:
-            return {}
-        self._validate_column_descriptions(
-            descriptions,
-            f"Existing column_descriptions for '{self.name}'",
-        )
-        return descriptions
-
-    @staticmethod
-    def _validate_column_descriptions(
-        descriptions: Any,
-        context: str,
-    ) -> None:
-        """Validate column_descriptions is a dict[str, str]."""
-        if not isinstance(descriptions, dict):
-            raise ValidationError(
-                f"{context} must be a dict, "
-                f"got {type(descriptions).__name__}"
-            )
-        for column_name, description in descriptions.items():
-            if not isinstance(column_name, str) or not isinstance(
-                description,
-                str,
-            ):
-                raise ValidationError(
-                    f"{context} keys and values must be strings"
-                )
-
-    def _resolve_yaml_config_column_descriptions(
+    def _load_provenance_ref(
         self,
-        resolved: dict[str, Any],
-    ) -> None:
-        """
-        Resolve column_descriptions in place.
-
-        Omitting column_descriptions carries forward the previous snapshot's
-        descriptions. Supplying column_descriptions may add or change text,
-        but may not remove an existing column description.
-        """
-        existing = self._existing_column_descriptions()
-
-        if "column_descriptions" not in resolved:
-            if existing:
-                resolved["column_descriptions"] = deepcopy(existing)
-            return
-
-        descriptions = resolved["column_descriptions"]
-        self._validate_column_descriptions(
-            descriptions,
-            f"column_descriptions for '{self.name}'",
-        )
-
-        for column_name in existing:
-            if column_name not in descriptions:
-                raise ValidationError(
-                    f"column_descriptions.{column_name} cannot be removed"
-                )
+        snapshot: str | None = None,
+    ) -> SnapshotProvenanceRef | None:
+        """Return the DPD provenance reference from snapshot metadata."""
+        if snapshot is None:
+            if self._metadata is None:
+                self._metadata = self._load_metadata()
+            metadata = self._metadata
+        else:
+            metadata = self._load_metadata_for_snapshot(snapshot)
+        return metadata.provenance
 
     def _resolve_yaml_config_annotations(
         self,
         yaml_config: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """
-        Return a metadata config with watched user metadata resolved.
-
-        Omitting annotations carries forward the previous snapshot's value.
-        Supplying annotations may add keys, but may not remove or change
-        existing keys.
-
-        Omitting notes carries forward the previous snapshot's value.
-        Supplying notes may replace the previous value, including with an empty
-        string, but notes may not be deleted.
-
-        Omitting column_descriptions carries forward the previous snapshot's
-        value. Supplying column_descriptions may add or change descriptions,
-        but may not remove existing column description keys.
-        """
+        """Return captured YAML with watched snapshot-info fields resolved."""
         resolved = (
             self._default_yaml_config()
             if yaml_config is None
             else dict(yaml_config)
         )
-        existing = self._existing_annotations()
-
-        if "annotations" not in resolved:
-            if existing:
-                resolved["annotations"] = deepcopy(existing)
-        else:
-            annotations = resolved["annotations"]
-            if annotations is None or not isinstance(annotations, dict):
-                raise ValidationError(
-                    f"annotations for '{self.name}' must be a dict when supplied"
-                )
-
-            self._assert_annotations_append_only(existing, annotations)
-
-        self._resolve_yaml_config_notes(resolved)
-        self._resolve_yaml_config_column_descriptions(resolved)
-        return resolved
-
-    def _provenance_relative_path(self, suffix: str) -> str:
-        """Return the dataset-relative provenance sidecar path."""
-        return f"_provenance/{self.name}_{suffix}.provenance.pkl.gz"
-
-    def _write_provenance_sidecar(
-        self,
-        suffix: str,
-        payload: dict[str, Any],
-    ) -> SnapshotProvenanceRef:
-        """Write a gzip pickle provenance sidecar for a snapshot."""
-        assert not self.is_gcs
-        rel_path = self._provenance_relative_path(suffix)
-        sidecar_path = self.dataset_dir / rel_path  # type: ignore[operator]
-        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-        with gzip.open(sidecar_path, "wb") as f:
-            pickle.dump(
-                payload,
-                f,
-                protocol=SNAPSHOT_METADATA_PICKLE_PROTOCOL,
-            )
-        return SnapshotProvenanceRef(
-            path=rel_path,
-            checksum=get_file_hash(sidecar_path),
-            size_bytes=sidecar_path.stat().st_size,
+        return self._resolve_snapshot_info_fields(
+            resolved,
+            validate_keys=False,
         )
-
-    def _delete_provenance_sidecar(
-        self,
-        provenance: SnapshotProvenanceRef | None,
-    ) -> None:
-        """Best-effort cleanup for an unpublished provenance sidecar."""
-        if self.is_gcs or provenance is None:
-            return
-        sidecar_path = (
-            self.dataset_dir / provenance.path
-        )  # type: ignore[operator]
-        try:
-            sidecar_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    def read_provenance(self, snapshot: str | None = None) -> dict[str, Any]:
-        """
-        Load the optional external provenance sidecar for a snapshot.
-
-        Returns an empty dict when the snapshot has no provenance sidecar.
-        """
-        if snapshot is None:
-            if self._metadata is None:
-                self._metadata = self._load_metadata()
-            metadata = self._metadata
-        else:
-            metadata = self._load_metadata_for_snapshot(snapshot)
-
-        provenance = metadata.provenance
-        if provenance is None:
-            return {}
-
-        if self.is_gcs:
-            from ionbus_parquet_cache.gcs_utils import (
-                gcs_exists,
-                gcs_join,
-                gcs_open,
-            )
-
-            sidecar_url = gcs_join(str(self.dataset_dir), provenance.path)
-            if not gcs_exists(sidecar_url):
-                raise FileNotFoundError(
-                    f"Provenance sidecar not found: {sidecar_url}"
-                )
-            with gcs_open(sidecar_url) as f:
-                with gzip.open(f, "rb") as gz:
-                    payload = pickle.load(gz)
-        else:
-            sidecar_path = (
-                self.dataset_dir / provenance.path
-            )  # type: ignore[operator]
-            if not sidecar_path.exists():
-                raise FileNotFoundError(
-                    f"Provenance sidecar not found: {sidecar_path}"
-                )
-            if get_file_hash(sidecar_path) != provenance.checksum:
-                raise ValidationError(
-                    f"Provenance checksum mismatch for {sidecar_path}"
-                )
-            with gzip.open(sidecar_path, "rb") as f:
-                payload = pickle.load(f)
-
-        if not isinstance(payload, dict):
-            raise ValidationError(
-                f"Provenance sidecar for '{self.name}' must contain a dict"
-            )
-        return payload
-
-    def get_annotations(
-        self,
-        snapshot: str | None = None,
-    ) -> dict[str, Any]:
-        """
-        Return annotations stored in snapshot metadata.
-
-        Args:
-            snapshot: Optional snapshot suffix. If omitted, reads the current
-                snapshot metadata.
-
-        Returns:
-            A copy of the annotations dictionary. Returns an empty dictionary
-            when the snapshot has no annotations.
-
-        Raises:
-            SnapshotNotFoundError: If no requested/current metadata exists.
-            ValidationError: If stored annotations are malformed.
-        """
-        if snapshot is None:
-            if self._metadata is None:
-                self._metadata = self._load_metadata()
-            metadata = self._metadata
-        else:
-            metadata = self._load_metadata_for_snapshot(snapshot)
-
-        annotations = metadata.yaml_config.get("annotations", {})
-        if annotations is None:
-            return {}
-        if not isinstance(annotations, dict):
-            raise ValidationError(
-                f"annotations for '{self.name}' must be a dict, "
-                f"got {type(annotations).__name__}"
-            )
-        return deepcopy(annotations)
-
-    def get_notes(
-        self,
-        snapshot: str | None = None,
-    ) -> str | None:
-        """
-        Return notes stored in snapshot metadata.
-
-        Args:
-            snapshot: Optional snapshot suffix. If omitted, reads the current
-                snapshot metadata.
-
-        Returns:
-            The notes string, or None when the snapshot has no notes.
-
-        Raises:
-            SnapshotNotFoundError: If no requested/current metadata exists.
-            ValidationError: If stored notes are malformed.
-        """
-        if snapshot is None:
-            if self._metadata is None:
-                self._metadata = self._load_metadata()
-            metadata = self._metadata
-        else:
-            metadata = self._load_metadata_for_snapshot(snapshot)
-
-        notes = metadata.yaml_config.get("notes")
-        if notes is None:
-            return None
-        self._validate_notes(notes, f"notes for '{self.name}'")
-        return notes
-
-    def get_column_descriptions(
-        self,
-        snapshot: str | None = None,
-    ) -> dict[str, str]:
-        """
-        Return column descriptions stored in snapshot metadata.
-
-        Args:
-            snapshot: Optional snapshot suffix. If omitted, reads the current
-                snapshot metadata.
-
-        Returns:
-            A copy of the column description dictionary. Returns an empty
-            dictionary when the snapshot has no column descriptions.
-
-        Raises:
-            SnapshotNotFoundError: If no requested/current metadata exists.
-            ValidationError: If stored column descriptions are malformed.
-        """
-        if snapshot is None:
-            if self._metadata is None:
-                self._metadata = self._load_metadata()
-            metadata = self._metadata
-        else:
-            metadata = self._load_metadata_for_snapshot(snapshot)
-
-        descriptions = metadata.yaml_config.get("column_descriptions", {})
-        if descriptions is None:
-            return {}
-        self._validate_column_descriptions(
-            descriptions,
-            f"column_descriptions for '{self.name}'",
-        )
-        return deepcopy(descriptions)
 
     def cache_history(
         self,

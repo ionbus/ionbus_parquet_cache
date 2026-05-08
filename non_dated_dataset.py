@@ -7,6 +7,8 @@ updates. All snapshots live in the `non-dated/` subdirectory of the cache.
 
 from __future__ import annotations
 
+import gzip
+import pickle
 import shutil
 from pathlib import Path
 from typing import Any
@@ -18,13 +20,18 @@ from pydantic import PrivateAttr, computed_field
 from ionbus_parquet_cache.exceptions import (
     SnapshotNotFoundError,
     SnapshotPublishError,
+    ValidationError,
 )
-from ionbus_parquet_cache.parquet_dataset_base import ParquetDataset
+from ionbus_parquet_cache.parquet_dataset_base import (
+    SNAPSHOT_INFO_PICKLE_PROTOCOL,
+    ParquetDataset,
+)
 from ionbus_parquet_cache.snapshot import (
     extract_suffix_from_filename,
     generate_snapshot_suffix,
     get_current_suffix,
 )
+from ionbus_parquet_cache.snapshot_history import SnapshotProvenanceRef
 
 
 class NonDatedParquetDataset(ParquetDataset):
@@ -57,6 +64,27 @@ class NonDatedParquetDataset(ParquetDataset):
         if self.is_gcs:
             return f"{self.cache_dir}/non-dated/{self.name}"
         return self.cache_dir / "non-dated" / self.name  # type: ignore[operator]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def meta_dir(self) -> Path | str:
+        """Return the optional NPD snapshot-info sidecar directory."""
+        if self.is_gcs:
+            return f"{self.npd_dir}/_meta_data"
+        return self.npd_dir / "_meta_data"  # type: ignore[operator]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def provenance_dir(self) -> Path | str:
+        """Return the optional NPD provenance sidecar directory."""
+        if self.is_gcs:
+            return f"{self.npd_dir}/_provenance"
+        return self.npd_dir / "_provenance"  # type: ignore[operator]
+
+    @property
+    def _snapshot_root_dir(self) -> Path | str:
+        """Return the dataset root used for NPD sidecars."""
+        return self.npd_dir
 
     def _discover_current_suffix(self) -> str | None:
         """
@@ -223,16 +251,210 @@ class NonDatedParquetDataset(ParquetDataset):
             dataset_name=self.name,
         )
 
-    def import_snapshot(self, source_path: str | Path) -> str:
+    def _info_sidecar_relative_path(self, suffix: str) -> str:
+        """Return the NPD-root-relative info sidecar path."""
+        return f"_meta_data/{self.name}_{suffix}.pkl.gz"
+
+    def _info_sidecar_path(self, suffix: str) -> Path | str:
+        """Return the info sidecar path for a suffix."""
+        rel_path = self._info_sidecar_relative_path(suffix)
+        if self.is_gcs:
+            from ionbus_parquet_cache.gcs_utils import gcs_join
+
+            return gcs_join(str(self.npd_dir), rel_path)
+        return self.npd_dir / rel_path  # type: ignore[operator]
+
+    def _current_or_requested_suffix(
+        self,
+        snapshot: str | None,
+    ) -> str:
+        """Return requested suffix or discover the current NPD suffix."""
+        suffix = snapshot
+        if suffix is None:
+            suffix = self.current_suffix or self._discover_current_suffix()
+        if suffix is None:
+            raise SnapshotNotFoundError(
+                f"No valid snapshot found for NPD '{self.name}'",
+                dataset_name=self.name,
+            )
+        return suffix
+
+    def _load_info_sidecar_payload(self, suffix: str) -> dict[str, Any]:
+        """Load and validate an NPD info sidecar payload."""
+        sidecar_path = self._info_sidecar_path(suffix)
+        if self.is_gcs:
+            from ionbus_parquet_cache.gcs_utils import gcs_exists, gcs_open
+
+            if not gcs_exists(str(sidecar_path)):
+                return {"info": {}, "provenance": None}
+            with gcs_open(str(sidecar_path)) as f:
+                with gzip.open(f, "rb") as gz:
+                    payload = pickle.load(gz)
+        else:
+            sidecar = Path(sidecar_path)
+            if not sidecar.exists():
+                return {"info": {}, "provenance": None}
+            with gzip.open(sidecar, "rb") as f:
+                payload = pickle.load(f)
+
+        if not isinstance(payload, dict):
+            raise ValidationError(
+                f"NPD info sidecar for '{self.name}' must contain a dict"
+            )
+        if payload.get("name") not in (None, self.name):
+            raise ValidationError(
+                f"NPD info sidecar name mismatch for '{self.name}'"
+            )
+        if payload.get("suffix") not in (None, suffix):
+            raise ValidationError(
+                f"NPD info sidecar suffix mismatch for '{self.name}'"
+            )
+
+        info = payload.get("info", {})
+        if info is None:
+            info = {}
+        if not isinstance(info, dict):
+            raise ValidationError(
+                f"NPD info sidecar info for '{self.name}' must be a dict"
+            )
+
+        provenance = payload.get("provenance")
+        if provenance is not None and not isinstance(
+            provenance,
+            SnapshotProvenanceRef,
+        ):
+            raise ValidationError(
+                f"NPD info sidecar provenance for '{self.name}' must be a "
+                "SnapshotProvenanceRef or None"
+            )
+
+        return {
+            "name": self.name,
+            "suffix": suffix,
+            "info": info,
+            "provenance": provenance,
+        }
+
+    def _load_snapshot_info(
+        self,
+        snapshot: str | None = None,
+    ) -> dict[str, Any]:
+        """Return snapshot info from the optional NPD sidecar."""
+        suffix = self._current_or_requested_suffix(snapshot)
+        payload = self._load_info_sidecar_payload(suffix)
+        return payload["info"]
+
+    def _load_provenance_ref(
+        self,
+        snapshot: str | None = None,
+    ) -> SnapshotProvenanceRef | None:
+        """Return the NPD provenance reference from the info sidecar."""
+        suffix = self._current_or_requested_suffix(snapshot)
+        payload = self._load_info_sidecar_payload(suffix)
+        return payload["provenance"]
+
+    def _write_info_sidecar(
+        self,
+        suffix: str,
+        info: dict[str, Any],
+        provenance: SnapshotProvenanceRef | None,
+    ) -> Path:
+        """Write the normalized NPD info sidecar for a snapshot."""
+        assert not self.is_gcs
+        sidecar_path = self.npd_dir / self._info_sidecar_relative_path(suffix)  # type: ignore[operator]
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = sidecar_path.parent / f"{self.name}_{suffix}_tmp.pkl.gz"
+        payload = {
+            "name": self.name,
+            "suffix": suffix,
+            "info": info,
+            "provenance": provenance,
+        }
+        try:
+            with gzip.open(temp_path, "wb") as f:
+                pickle.dump(
+                    payload,
+                    f,
+                    protocol=SNAPSHOT_INFO_PICKLE_PROTOCOL,
+                )
+            temp_path.replace(sidecar_path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        return sidecar_path
+
+    def _delete_info_sidecar(self, suffix: str) -> None:
+        """Best-effort cleanup for an unpublished NPD info sidecar."""
+        if self.is_gcs:
+            return
+        sidecar_path = self.npd_dir / self._info_sidecar_relative_path(suffix)  # type: ignore[operator]
+        try:
+            sidecar_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _resolve_import_info(
+        self,
+        info: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Validate and carry forward NPD snapshot info."""
+        if info is None:
+            supplied: dict[str, Any] = {}
+        elif not isinstance(info, dict):
+            raise ValidationError(
+                f"snapshot info for '{self.name}' must be a dict, "
+                f"got {type(info).__name__}"
+            )
+        else:
+            supplied = dict(info)
+        return self._resolve_snapshot_info_fields(supplied)
+
+    def _normalize_import_provenance(
+        self,
+        provenance: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Validate NPD import provenance and normalize empty dicts to None."""
+        if provenance is None:
+            return None
+        if not isinstance(provenance, dict):
+            raise ValidationError(
+                f"provenance for '{self.name}' must be a dict, "
+                f"got {type(provenance).__name__}"
+            )
+        if not provenance:
+            return None
+        return dict(provenance)
+
+    def _remove_path(self, path: Path) -> None:
+        """Best-effort cleanup for files or directories."""
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def import_snapshot(
+        self,
+        source_path: str | Path,
+        info: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> str:
         """
         Import a new snapshot from a file or directory.
 
-        Copies the source into the NPD directory with a new snapshot suffix.
-        The new snapshot becomes the current snapshot.
+        Copies the source into the NPD directory with a new snapshot suffix and
+        optional snapshot info/provenance sidecars. The new snapshot becomes
+        current only after all requested files are written.
 
         Args:
             source_path: Path to source parquet file or hive-partitioned
                 directory.
+            info: Optional snapshot-info fields: notes, annotations, and
+                column_descriptions.
+            provenance: Optional explicit per-snapshot provenance. Empty
+                dictionaries are treated as absent.
 
         Returns:
             The suffix of the new snapshot.
@@ -241,9 +463,19 @@ class NonDatedParquetDataset(ParquetDataset):
             FileNotFoundError: If source_path does not exist.
             SnapshotPublishError: If the import fails.
         """
+        if self.is_gcs:
+            raise SnapshotPublishError(
+                "Direct NPD imports into GCS caches are not supported. "
+                "Import locally and sync to GCS."
+            )
+
         source = Path(source_path)
         if not source.exists():
             raise FileNotFoundError(f"Source path does not exist: {source}")
+        if not source.is_file() and not source.is_dir():
+            raise SnapshotPublishError(
+                f"Source path is not a file or directory: {source}"
+            )
 
         current = self.current_suffix
         if current is None:
@@ -261,19 +493,44 @@ class NonDatedParquetDataset(ParquetDataset):
                 "This can happen if imports are too fast (within same second)."
             )
 
+        resolved_info = self._resolve_import_info(info)
+        provenance_payload = self._normalize_import_provenance(provenance)
+        provenance_ref: SnapshotProvenanceRef | None = None
+
         # Ensure NPD directory exists
-        self.npd_dir.mkdir(parents=True, exist_ok=True)
+        self.npd_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+
+        if source.is_dir():
+            dest = self.npd_dir / f"{self.name}_{new_suffix}"  # type: ignore[operator]
+            temp_dest = self.npd_dir / f"{self.name}_{new_suffix}_tmp"  # type: ignore[operator]
+        else:
+            dest = self.npd_dir / f"{self.name}_{new_suffix}.parquet"  # type: ignore[operator]
+            temp_dest = self.npd_dir / f"{self.name}_{new_suffix}_tmp.parquet"  # type: ignore[operator]
+
+        if dest.exists():
+            raise SnapshotPublishError(f"Destination already exists: {dest}")
+        self._remove_path(temp_dest)
 
         try:
+            if provenance_payload is not None:
+                provenance_ref = self._write_provenance_sidecar(
+                    new_suffix,
+                    provenance_payload,
+                )
+            if resolved_info or provenance_ref is not None:
+                self._write_info_sidecar(
+                    new_suffix,
+                    resolved_info,
+                    provenance_ref,
+                )
+
             if source.is_dir():
-                # Copy directory (hive-partitioned)
-                dest = self.npd_dir / f"{self.name}_{new_suffix}"
-                shutil.copytree(source, dest)
+                shutil.copytree(source, temp_dest)
+                temp_dest.rename(dest)
                 self._is_directory_snapshot = True
             else:
-                # Copy single file
-                dest = self.npd_dir / f"{self.name}_{new_suffix}.parquet"
-                shutil.copy2(source, dest)
+                shutil.copy2(source, temp_dest)
+                temp_dest.replace(dest)
                 self._is_directory_snapshot = False
 
             # Update current suffix and invalidate cache
@@ -284,6 +541,10 @@ class NonDatedParquetDataset(ParquetDataset):
             return new_suffix
 
         except Exception as e:
+            self._remove_path(temp_dest)
+            self._remove_path(dest)
+            self._delete_info_sidecar(new_suffix)
+            self._delete_provenance_sidecar(provenance_ref)
             raise SnapshotPublishError(
                 f"Failed to import snapshot for NPD '{self.name}': {e}"
             ) from e

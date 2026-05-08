@@ -8,7 +8,10 @@ DatedParquetDataset and NonDatedParquetDataset.
 from __future__ import annotations
 
 import datetime as dt
+import gzip
+import pickle
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from pathlib import Path
 from typing import Annotated, Any, ClassVar
 
@@ -16,11 +19,21 @@ import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pyarrow.dataset as pds
+from ionbus_utils.file_utils import get_file_hash
 from ionbus_utils.yaml_utils.pdyaml import PDYaml
 from pydantic import BeforeValidator, PrivateAttr
 
-from ionbus_parquet_cache.exceptions import SnapshotNotFoundError
+from ionbus_parquet_cache.exceptions import (
+    SnapshotNotFoundError,
+    ValidationError,
+)
 from ionbus_parquet_cache.filter_utils import build_dataset_filter
+from ionbus_parquet_cache.snapshot_history import SnapshotProvenanceRef
+
+SNAPSHOT_INFO_PICKLE_PROTOCOL = 4
+SNAPSHOT_INFO_KEYS = frozenset(
+    {"notes", "annotations", "column_descriptions"}
+)
 
 
 def _parse_cache_dir(v: Any) -> str | Path:
@@ -119,6 +132,359 @@ class ParquetDataset(PDYaml, ABC):
             SnapshotNotFoundError: If the snapshot does not exist.
         """
         pass
+
+    @property
+    def _snapshot_root_dir(self) -> Path | str:
+        """Return the dataset root used for snapshot sidecars."""
+        if self.is_gcs:
+            return f"{self.cache_dir}/{self.name}"
+        return self.cache_dir / self.name  # type: ignore[operator]
+
+    def _load_snapshot_info(
+        self,
+        snapshot: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Return stored snapshot info for a snapshot.
+
+        Subclasses override this to read from DPD metadata or NPD sidecars.
+        """
+        raise SnapshotNotFoundError(
+            f"No snapshot info found for dataset '{self.name}'",
+            dataset_name=self.name,
+        )
+
+    def _load_provenance_ref(
+        self,
+        snapshot: str | None = None,
+    ) -> SnapshotProvenanceRef | None:
+        """Return an optional provenance reference for a snapshot."""
+        return None
+
+    def _load_current_snapshot_info_if_available(self) -> dict[str, Any]:
+        """Return current snapshot info, or an empty dict for a new dataset."""
+        try:
+            return self._load_snapshot_info()
+        except SnapshotNotFoundError:
+            return {}
+
+    @staticmethod
+    def _validate_snapshot_info_keys(
+        info: dict[str, Any],
+        context: str,
+    ) -> None:
+        """Reject unknown snapshot-info fields."""
+        unknown = sorted(set(info) - SNAPSHOT_INFO_KEYS)
+        if unknown:
+            allowed = ", ".join(sorted(SNAPSHOT_INFO_KEYS))
+            raise ValidationError(
+                f"{context} has unknown key(s): {', '.join(unknown)}. "
+                f"Allowed keys are: {allowed}"
+            )
+
+    def _existing_annotations(self) -> dict[str, Any]:
+        """Return annotations from the current snapshot, or an empty dict."""
+        info = self._load_current_snapshot_info_if_available()
+        annotations = info.get("annotations", {})
+        if annotations is None:
+            return {}
+        if not isinstance(annotations, dict):
+            raise ValidationError(
+                f"Existing annotations for '{self.name}' must be a dict, "
+                f"got {type(annotations).__name__}"
+            )
+        return annotations
+
+    def _assert_annotations_append_only(
+        self,
+        old: dict[str, Any],
+        new: dict[str, Any],
+        path: str = "annotations",
+    ) -> None:
+        """Reject annotation removals and changes to existing values."""
+        for key, old_value in old.items():
+            child_path = f"{path}.{key}"
+            if key not in new:
+                raise ValidationError(
+                    f"{child_path} cannot be removed from annotations"
+                )
+
+            new_value = new[key]
+            if isinstance(old_value, dict) and isinstance(new_value, dict):
+                self._assert_annotations_append_only(
+                    old_value,
+                    new_value,
+                    child_path,
+                )
+            elif new_value != old_value:
+                raise ValidationError(
+                    f"{child_path} cannot change in annotations: "
+                    f"{old_value!r} -> {new_value!r}"
+                )
+
+    def _existing_notes(self) -> str | None:
+        """Return notes from the current snapshot, or None."""
+        info = self._load_current_snapshot_info_if_available()
+        notes = info.get("notes")
+        if notes is None:
+            return None
+        self._validate_notes(notes, f"Existing notes for '{self.name}'")
+        return notes
+
+    @staticmethod
+    def _validate_notes(notes: Any, context: str) -> None:
+        """Validate notes is a string."""
+        if not isinstance(notes, str):
+            raise ValidationError(
+                f"{context} must be a string, got {type(notes).__name__}"
+            )
+
+    def _existing_column_descriptions(self) -> dict[str, str]:
+        """Return column descriptions from current snapshot, or empty dict."""
+        info = self._load_current_snapshot_info_if_available()
+        descriptions = info.get("column_descriptions", {})
+        if descriptions is None:
+            return {}
+        self._validate_column_descriptions(
+            descriptions,
+            f"Existing column_descriptions for '{self.name}'",
+        )
+        return descriptions
+
+    @staticmethod
+    def _validate_column_descriptions(
+        descriptions: Any,
+        context: str,
+    ) -> None:
+        """Validate column_descriptions is a dict[str, str]."""
+        if not isinstance(descriptions, dict):
+            raise ValidationError(
+                f"{context} must be a dict, "
+                f"got {type(descriptions).__name__}"
+            )
+        for column_name, description in descriptions.items():
+            if not isinstance(column_name, str) or not isinstance(
+                description,
+                str,
+            ):
+                raise ValidationError(
+                    f"{context} keys and values must be strings"
+                )
+
+    def _resolve_snapshot_info_fields(
+        self,
+        supplied: dict[str, Any],
+        *,
+        validate_keys: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Resolve snapshot-info fields against the current snapshot.
+
+        Missing fields carry forward. Explicit annotations are append-only,
+        explicit notes may replace the previous string, and explicit column
+        descriptions may add or change text but may not remove keys.
+        """
+        if validate_keys:
+            self._validate_snapshot_info_keys(
+                supplied,
+                f"snapshot info for '{self.name}'",
+            )
+        resolved = dict(supplied)
+
+        existing_annotations = self._existing_annotations()
+        if "annotations" not in resolved:
+            if existing_annotations:
+                resolved["annotations"] = deepcopy(existing_annotations)
+        else:
+            annotations = resolved["annotations"]
+            if annotations is None or not isinstance(annotations, dict):
+                raise ValidationError(
+                    f"annotations for '{self.name}' must be a dict when supplied"
+                )
+            self._assert_annotations_append_only(
+                existing_annotations,
+                annotations,
+            )
+
+        existing_notes = self._existing_notes()
+        if "notes" not in resolved:
+            if existing_notes is not None:
+                resolved["notes"] = existing_notes
+        else:
+            self._validate_notes(
+                resolved["notes"], f"notes for '{self.name}'"
+            )
+
+        existing_descriptions = self._existing_column_descriptions()
+        if "column_descriptions" not in resolved:
+            if existing_descriptions:
+                resolved["column_descriptions"] = deepcopy(
+                    existing_descriptions
+                )
+        else:
+            descriptions = resolved["column_descriptions"]
+            self._validate_column_descriptions(
+                descriptions,
+                f"column_descriptions for '{self.name}'",
+            )
+            for column_name in existing_descriptions:
+                if column_name not in descriptions:
+                    raise ValidationError(
+                        f"column_descriptions.{column_name} cannot be removed"
+                    )
+
+        return resolved
+
+    def _provenance_relative_path(self, suffix: str) -> str:
+        """Return the dataset-relative provenance sidecar path."""
+        return f"_provenance/{self.name}_{suffix}.provenance.pkl.gz"
+
+    def _write_provenance_sidecar(
+        self,
+        suffix: str,
+        payload: dict[str, Any],
+    ) -> SnapshotProvenanceRef:
+        """Write a gzip pickle provenance sidecar for a snapshot."""
+        if self.is_gcs:
+            raise ValidationError(
+                "Direct GCS provenance writes are unsupported"
+            )
+        if not isinstance(payload, dict):
+            raise ValidationError(
+                f"provenance for '{self.name}' must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+
+        rel_path = self._provenance_relative_path(suffix)
+        sidecar_path = self._snapshot_root_dir / rel_path  # type: ignore[operator]
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(sidecar_path, "wb") as f:
+            pickle.dump(
+                payload,
+                f,
+                protocol=SNAPSHOT_INFO_PICKLE_PROTOCOL,
+            )
+        return SnapshotProvenanceRef(
+            path=rel_path,
+            checksum=get_file_hash(sidecar_path),
+            size_bytes=sidecar_path.stat().st_size,
+        )
+
+    def _delete_provenance_sidecar(
+        self,
+        provenance: SnapshotProvenanceRef | None,
+    ) -> None:
+        """Best-effort cleanup for an unpublished provenance sidecar."""
+        if self.is_gcs or provenance is None:
+            return
+        sidecar_path = self._snapshot_root_dir / provenance.path  # type: ignore[operator]
+        try:
+            sidecar_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def read_provenance(self, snapshot: str | None = None) -> dict[str, Any]:
+        """
+        Load the optional external provenance sidecar for a snapshot.
+
+        Returns an empty dict when the snapshot has no provenance sidecar.
+        """
+        provenance = self._load_provenance_ref(snapshot)
+        if provenance is None:
+            return {}
+
+        if self.is_gcs:
+            from ionbus_parquet_cache.gcs_utils import (
+                gcs_exists,
+                gcs_join,
+                gcs_open,
+            )
+
+            sidecar_url = gcs_join(
+                str(self._snapshot_root_dir), provenance.path
+            )
+            if not gcs_exists(sidecar_url):
+                raise FileNotFoundError(
+                    f"Provenance sidecar not found: {sidecar_url}"
+                )
+            with gcs_open(sidecar_url) as f:
+                with gzip.open(f, "rb") as gz:
+                    payload = pickle.load(gz)
+        else:
+            sidecar_path = self._snapshot_root_dir / provenance.path  # type: ignore[operator]
+            if not sidecar_path.exists():
+                raise FileNotFoundError(
+                    f"Provenance sidecar not found: {sidecar_path}"
+                )
+            if get_file_hash(sidecar_path) != provenance.checksum:
+                raise ValidationError(
+                    f"Provenance checksum mismatch for {sidecar_path}"
+                )
+            with gzip.open(sidecar_path, "rb") as f:
+                payload = pickle.load(f)
+
+        if not isinstance(payload, dict):
+            raise ValidationError(
+                f"Provenance sidecar for '{self.name}' must contain a dict"
+            )
+        return payload
+
+    def get_annotations(
+        self,
+        snapshot: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Return annotations stored for a snapshot.
+
+        Returns a copy of the annotations dictionary. Missing annotations
+        return an empty dictionary.
+        """
+        info = self._load_snapshot_info(snapshot)
+        annotations = info.get("annotations", {})
+        if annotations is None:
+            return {}
+        if not isinstance(annotations, dict):
+            raise ValidationError(
+                f"annotations for '{self.name}' must be a dict, "
+                f"got {type(annotations).__name__}"
+            )
+        return deepcopy(annotations)
+
+    def get_notes(
+        self,
+        snapshot: str | None = None,
+    ) -> str | None:
+        """
+        Return notes stored for a snapshot.
+
+        Returns None when the snapshot has no notes field. An explicit empty
+        string is returned unchanged.
+        """
+        info = self._load_snapshot_info(snapshot)
+        notes = info.get("notes")
+        if notes is None:
+            return None
+        self._validate_notes(notes, f"notes for '{self.name}'")
+        return notes
+
+    def get_column_descriptions(
+        self,
+        snapshot: str | None = None,
+    ) -> dict[str, str]:
+        """
+        Return column descriptions stored for a snapshot.
+
+        Returns a copy of the dictionary, or an empty dictionary when missing.
+        """
+        info = self._load_snapshot_info(snapshot)
+        descriptions = info.get("column_descriptions", {})
+        if descriptions is None:
+            return {}
+        self._validate_column_descriptions(
+            descriptions,
+            f"column_descriptions for '{self.name}'",
+        )
+        return deepcopy(descriptions)
 
     def pyarrow_dataset(
         self,

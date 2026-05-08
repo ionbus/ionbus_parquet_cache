@@ -12,6 +12,7 @@ import pytest
 from ionbus_parquet_cache.exceptions import (
     SnapshotNotFoundError,
     SnapshotPublishError,
+    ValidationError,
 )
 from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
 from ionbus_parquet_cache.snapshot import generate_snapshot_suffix
@@ -105,6 +106,10 @@ class TestNonDatedDatasetImport:
         pd.testing.assert_frame_equal(
             result.reset_index(drop=True), sample_df
         )
+        assert npd.get_notes() is None
+        assert npd.get_annotations() == {}
+        assert npd.get_column_descriptions() == {}
+        assert npd.read_provenance() == {}
 
     def test_import_hive_directory(
         self, temp_cache: Path, sample_hive_dir: Path
@@ -161,6 +166,114 @@ class TestNonDatedDatasetImport:
 
         with pytest.raises(FileNotFoundError):
             npd.import_snapshot("/nonexistent/path")
+
+    def test_import_snapshot_info_and_provenance(
+        self,
+        temp_cache: Path,
+        sample_parquet: Path,
+    ) -> None:
+        """NPD imports should write readable info and provenance sidecars."""
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache,
+            name="instrument_master",
+        )
+        info = {
+            "notes": "Instrument master from vendor feed.",
+            "annotations": {"vendor": "example"},
+            "column_descriptions": {
+                "symbol": "Vendor ticker-like symbol.",
+            },
+        }
+        provenance = {"source": "unit-test", "batch": 7}
+
+        suffix = npd.import_snapshot(
+            sample_parquet,
+            info=info,
+            provenance=provenance,
+        )
+
+        assert (
+            npd.npd_dir / "_meta_data" / f"instrument_master_{suffix}.pkl.gz"
+        ).exists()
+        assert (
+            npd.npd_dir
+            / "_provenance"
+            / f"instrument_master_{suffix}.provenance.pkl.gz"
+        ).exists()
+        assert npd.get_notes() == "Instrument master from vendor feed."
+        assert npd.get_annotations() == {"vendor": "example"}
+        assert npd.get_column_descriptions() == {
+            "symbol": "Vendor ticker-like symbol.",
+        }
+        assert npd.read_provenance() == provenance
+
+    def test_import_carries_forward_info_but_not_provenance(
+        self,
+        temp_cache: Path,
+        sample_parquet: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Omitted NPD info fields carry forward; provenance does not."""
+        suffixes = iter(["1AAAAAA", "1BBBBB0"])
+        monkeypatch.setattr(
+            "ionbus_parquet_cache.non_dated_dataset.generate_snapshot_suffix",
+            lambda: next(suffixes),
+        )
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache,
+            name="instrument_master",
+        )
+
+        npd.import_snapshot(
+            sample_parquet,
+            info={
+                "notes": "Initial notes.",
+                "annotations": {"vendor": "example"},
+                "column_descriptions": {"symbol": "Vendor symbol."},
+            },
+            provenance={"source": "first"},
+        )
+        npd.import_snapshot(sample_parquet, info={"notes": ""})
+
+        assert npd.get_notes() == ""
+        assert npd.get_annotations() == {"vendor": "example"}
+        assert npd.get_column_descriptions() == {
+            "symbol": "Vendor symbol.",
+        }
+        assert npd.read_provenance() == {}
+
+    def test_import_info_rejects_removals_and_unknown_keys(
+        self,
+        temp_cache: Path,
+        sample_parquet: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """NPD snapshot info uses shared append-only validation."""
+        suffixes = iter(["1AAAAAA", "1BBBBB0", "1CCCCC0"])
+        monkeypatch.setattr(
+            "ionbus_parquet_cache.non_dated_dataset.generate_snapshot_suffix",
+            lambda: next(suffixes),
+        )
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache,
+            name="instrument_master",
+        )
+        npd.import_snapshot(
+            sample_parquet,
+            info={
+                "annotations": {"vendor": "example"},
+                "column_descriptions": {"symbol": "Vendor symbol."},
+            },
+        )
+
+        with pytest.raises(ValidationError, match="cannot change"):
+            npd.import_snapshot(
+                sample_parquet,
+                info={"annotations": {"vendor": "changed"}},
+            )
+
+        with pytest.raises(ValidationError, match="unknown key"):
+            npd.import_snapshot(sample_parquet, info={"owner": "quiet"})
 
 
 class TestNonDatedDatasetRead:

@@ -4224,6 +4224,11 @@ source_path    # Parquet file or directory containing parquet files
 - Provenance never carries forward. If `--provenance-file` is omitted, the new
   NPD snapshot has no provenance sidecar even if the previous NPD snapshot had
   one.
+- An empty `--provenance-file` mapping is treated the same as no supplied
+  provenance and does not write a provenance sidecar.
+- An empty `--info-file` mapping supplies no fields. It still resolves snapshot
+  info normally, so any previous `notes`, `annotations`, and
+  `column_descriptions` carry forward.
 - On dry run, the command validates `--info-file` and `--provenance-file` but
   writes no data, info sidecar, or provenance sidecar.
 - If validation, data copy, info sidecar writing, or provenance sidecar writing

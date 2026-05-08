@@ -11,6 +11,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from ionbus_parquet_cache.dated_dataset import (
+    DatedParquetDataset,
+    FileMetadata,
+)
+from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
+from ionbus_parquet_cache.snapshot_history import SnapshotProvenanceRef
 from ionbus_parquet_cache.sync_cache import (
     _collect_gcs_sync_blobs,
     _collect_selected_local_snapshots,
@@ -18,11 +24,6 @@ from ionbus_parquet_cache.sync_cache import (
     _sync_function_targets_from_selected,
     sync_cache_main,
 )
-from ionbus_parquet_cache.dated_dataset import (
-    DatedParquetDataset,
-    FileMetadata,
-)
-from ionbus_parquet_cache.snapshot_history import SnapshotProvenanceRef
 
 GCS_CACHE = "gs://bucket/cache"
 
@@ -544,6 +545,46 @@ class TestSyncPush:
         # NPD should be synced
         assert (dest_cache / "non-dated" / "test_npd").exists()
 
+    def test_push_copies_npd_sidecars(
+        self,
+        source_with_dpd: Path,
+        dest_cache: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Push should copy convention-named NPD info/provenance sidecars."""
+        source = tmp_path / "ref.parquet"
+        pd.DataFrame({"symbol": ["AAPL"]}).to_parquet(source, index=False)
+        npd = NonDatedParquetDataset(
+            cache_dir=source_with_dpd,
+            name="test_npd",
+        )
+        suffix = npd.import_snapshot(
+            source,
+            info={"notes": "NPD notes."},
+            provenance={"source": "unit-test"},
+        )
+
+        result = sync_cache_main(
+            [
+                "push",
+                str(source_with_dpd),
+                str(dest_cache),
+                "--npd-only",
+            ]
+        )
+
+        assert result == 0
+        dest_npd_dir = dest_cache / "non-dated" / "test_npd"
+        assert (dest_npd_dir / f"test_npd_{suffix}.parquet").exists()
+        assert (
+            dest_npd_dir / "_meta_data" / f"test_npd_{suffix}.pkl.gz"
+        ).exists()
+        assert (
+            dest_npd_dir
+            / "_provenance"
+            / f"test_npd_{suffix}.provenance.pkl.gz"
+        ).exists()
+
     def test_push_delete_removes_extra_files(
         self, source_with_dpd: Path, dest_cache: Path
     ) -> None:
@@ -705,6 +746,9 @@ class TestGcsBlobSelection:
             "dpd/_provenance/custom_1BBBBB0.provenance.pkl.gz",
             "non-dated/ref/ref_1AAAAAA/data.parquet",
             "non-dated/ref/ref_1BBBBB0/data.parquet",
+            "non-dated/ref/_meta_data/ref_1BBBBB0.pkl.gz",
+            "non-dated/ref/_provenance/ref_1BBBBB0.provenance.pkl.gz",
+            "non-dated/ref/_provenance/custom_1BBBBB0.provenance.pkl.gz",
         ]
 
         selected = _collect_gcs_sync_blobs(
@@ -723,6 +767,8 @@ class TestGcsBlobSelection:
             "dpd/month=M2024-01/data_1BBBBB0.parquet",
             "dpd/_provenance/dpd_1BBBBB0.provenance.pkl.gz",
             "non-dated/ref/ref_1BBBBB0/data.parquet",
+            "non-dated/ref/_meta_data/ref_1BBBBB0.pkl.gz",
+            "non-dated/ref/_provenance/ref_1BBBBB0.provenance.pkl.gz",
         }
 
     def test_dataset_filter_matches_npd_dataset_name(self) -> None:

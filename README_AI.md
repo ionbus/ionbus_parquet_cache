@@ -175,6 +175,11 @@ for NPD snapshots created outside the cache:
 ```bash
 python -m ionbus_parquet_cache.import_npd \
     /path/to/cache ref.instrument_master /source/instruments.parquet
+
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet \
+    --info-file /source/instruments.info.yaml \
+    --provenance-file /source/instruments.provenance.yaml
 ```
 
 or programmatically:
@@ -202,25 +207,29 @@ latest = registry.get_latest_snapshot("md.futures_daily")
 print(f"Latest snapshot: {latest}")
 ```
 
-### reading metadata fields
+### reading snapshot info and provenance
 
-DPD annotations, notes, and column descriptions are stored in snapshot
-metadata and can be read without knowing the internal metadata shape:
+Annotations, notes, and column descriptions are stored as snapshot info and
+can be read without knowing the internal storage shape. DPDs store them in
+captured YAML snapshot metadata. NPDs store them in the optional info sidecar
+created by `--info-file` or `import_snapshot(info=...)`.
 
 ```python
-annotations = dpd.get_annotations()
-old_annotations = dpd.get_annotations(snapshot="1H4DW00")
+annotations = ds.get_annotations()
+old_annotations = ds.get_annotations(snapshot="1H4DW00")
 
-notes = dpd.get_notes()
-old_notes = dpd.get_notes(snapshot="1H4DW00")
+notes = ds.get_notes()
+old_notes = ds.get_notes(snapshot="1H4DW00")
 
-descriptions = dpd.get_column_descriptions()
-old_descriptions = dpd.get_column_descriptions(snapshot="1H4DW00")
+descriptions = ds.get_column_descriptions()
+old_descriptions = ds.get_column_descriptions(snapshot="1H4DW00")
+
+provenance = ds.read_provenance()
 ```
 
 The dictionary methods return copies, or `{}` when none are stored. `get_notes`
-returns `str | None`. NPDs do not currently have YAML-backed snapshot metadata,
-so these accessors are DPD-only.
+returns `str | None`. `read_provenance()` returns `{}` when no explicit
+provenance sidecar is attached.
 
 ### cache refresh and invalidation
 
@@ -350,6 +359,9 @@ loaded from that source cache, so `pull`, GCS-source push, and remote-to-remote
 post-sync runs are intentionally unsupported. local-source push may target a
 local filesystem path, another disk or mounted filesystem, or GCS.
 
+normal file sync copies selected DPD metadata/data/provenance sidecars and
+selected NPD snapshot data plus convention-named NPD info/provenance sidecars.
+
 execution guarantees:
 - hooks run after all selected files copy successfully
 - hooks run serially in deterministic dataset/snapshot order
@@ -416,9 +428,10 @@ datasets:
 - **num_instrument_buckets**: if set, enables bucketing. rows are distributed across `__instrument_bucket__=0/` ... `__instrument_bucket__=N/` based on `hash(instrument_column) % num_instrument_buckets`. breakingchanges with bucketing: bucketed datasets cannot be updated without full rebuild if you change `num_instrument_buckets`.
 - **sort_columns**: affects read performance. set to frequent filter columns.
 - **repull_n_days**: useful for datasets that correct historical data (e.g. option prices). e.g., `repull_n_days: 5` means "always fetch the last 5 business days, not just new dates".
-- **annotations**: optional append-only structured metadata stored in captured YAML snapshot metadata. use `dpd.get_annotations()` to read a copy of the current or requested snapshot dictionary.
-- **notes**: optional string stored in captured YAML snapshot metadata. omitted values carry forward; explicit string updates are allowed, including `""`, but `null` is rejected. use `dpd.get_notes()` to read current or historical notes.
-- **column_descriptions**: optional `dict[str, str]` stored in captured YAML snapshot metadata. omitted values carry forward; explicit updates may add or change text, but may not remove existing keys in the same lineage. use `dpd.get_column_descriptions()` to read the current or requested snapshot dictionary.
+- **annotations**: optional append-only structured snapshot info. DPDs store it in captured YAML snapshot metadata; NPDs store it in the optional info sidecar. use `ds.get_annotations()` to read a copy of the current or requested snapshot dictionary.
+- **notes**: optional string snapshot info. omitted values carry forward; explicit string updates are allowed, including `""`, but `null` is rejected. use `ds.get_notes()` to read current or historical notes.
+- **column_descriptions**: optional `dict[str, str]` snapshot info. omitted values carry forward; explicit updates may add or change text, but may not remove existing keys in the same lineage. use `ds.get_column_descriptions()` to read the current or requested snapshot dictionary.
+- **NPD info files**: `python -m ionbus_parquet_cache.import_npd --info-file path.yaml` accepts only `notes`, `annotations`, and `column_descriptions`; unknown keys are errors. `--provenance-file path.yaml` is separate explicit provenance and never carries forward.
 - **sync_function_***: optional post-sync hooks for `sync-cache push` from a local source. YAML-configured hooks currently come from DPD YAML entries. NPD sync targets are supported with the CLI `--sync-function` override. cache-local hooks load from the local source cache; remote-source post-sync is unsupported.
 ---
 

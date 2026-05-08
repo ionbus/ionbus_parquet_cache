@@ -14,8 +14,8 @@ from ionbus_parquet_cache.dated_dataset import (
     DatedParquetDataset,
     FileMetadata,
 )
-from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
 from ionbus_parquet_cache.exceptions import SnapshotNotFoundError
+from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
 
 
 @pytest.fixture(autouse=True)
@@ -274,6 +274,25 @@ class TestCacheRegistryGet:
 
         assert len(history) == 1
         assert history[0].status == "missing_lineage"
+
+    def test_read_provenance_wrapper_supports_npd(
+        self,
+        temp_cache: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Registry provenance reads should work for NPDs as well."""
+        source = tmp_path / "source.parquet"
+        pd.DataFrame({"symbol": ["AAPL"]}).to_parquet(source, index=False)
+        npd = NonDatedParquetDataset(
+            cache_dir=temp_cache,
+            name="ref.instruments",
+        )
+        npd.import_snapshot(source, provenance={"source": "unit-test"})
+        registry = CacheRegistry.instance(test=temp_cache)
+
+        assert registry.read_provenance("ref.instruments") == {
+            "source": "unit-test",
+        }
 
 
 class TestCacheRegistryReadData:

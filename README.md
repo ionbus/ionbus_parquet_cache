@@ -430,11 +430,13 @@ lineage, requested/added/rewritten date ranges, and optional instrument scope.
 Legacy snapshots without lineage return a history entry with
 `status="missing_lineage"` instead of failing.
 
-If a DataSource stores external snapshot provenance, normal data reads and
-metadata loads do not load that payload. Load it explicitly when needed:
+If a DPD DataSource stores external snapshot provenance, or an NPD import
+supplies a provenance file, normal data reads and metadata loads do not load
+that payload. Load it explicitly when needed:
 
 ```python
 provenance = dpd.read_provenance()
+provenance = npd.read_provenance()
 provenance = registry.read_provenance("md.futures_daily", snapshot="1H4DW01")
 ```
 
@@ -486,6 +488,16 @@ Import externally produced NPD snapshots from a parquet file or directory:
 ```bash
 python -m ionbus_parquet_cache.import_npd \
     /path/to/cache ref.instrument_master /source/instruments.parquet
+```
+
+Attach optional notes, annotations, column descriptions, and explicit
+provenance when importing:
+
+```bash
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet \
+    --info-file /source/instruments.info.yaml \
+    --provenance-file /source/instruments.provenance.yaml
 ```
 
 ### Search order and naming conventions
@@ -967,16 +979,17 @@ when the previous snapshot also has no annotations.
 Keep annotations small. Large audit records, source manifests, request logs, or
 process graphs belong in snapshot provenance via `DataSource.get_provenance()`.
 
-Read stored DPD annotations from snapshot metadata:
+Read stored annotations from snapshot metadata:
 
 ```python
-annotations = dpd.get_annotations()
-old_annotations = dpd.get_annotations(snapshot="1H4DW00")
+annotations = ds.get_annotations()
+old_annotations = ds.get_annotations(snapshot="1H4DW00")
 ```
 
-The method returns a copy of the current or requested snapshot dictionary.
-NPDs currently do not have YAML-backed snapshot metadata, so this accessor is
-DPD-only.
+The method returns a copy of the current or requested snapshot dictionary, or
+`{}` when missing. DPDs store annotations in captured YAML snapshot metadata.
+NPDs store them in the optional NPD info sidecar written by `--info-file` or
+`import_snapshot(info=...)`.
 
 ### Notes
 
@@ -996,15 +1009,16 @@ carried forward. Explicit updates may replace the string at any time,
 including with `notes: ""` to clear visible text. `notes: null` is rejected
 because notes cannot be deleted once present.
 
-Read stored DPD notes from snapshot metadata:
+Read stored notes from snapshot metadata:
 
 ```python
-notes = dpd.get_notes()
-old_notes = dpd.get_notes(snapshot="1H4DW00")
+notes = ds.get_notes()
+old_notes = ds.get_notes(snapshot="1H4DW00")
 ```
 
-The method returns `str | None`. NPDs currently do not have YAML-backed
-snapshot metadata, so this accessor is DPD-only.
+The method returns `str | None`. DPDs store notes in captured YAML snapshot
+metadata. NPDs store notes in the optional NPD info sidecar. Missing notes
+return `None`; an explicit empty string is returned as `""`.
 
 ### Column descriptions
 
@@ -1029,16 +1043,16 @@ Existing description keys may not be removed within the same cache lineage.
 The removal rule is per key: `column_descriptions: {}` is allowed only when the
 previous dictionary was empty, because otherwise it removes every existing key.
 
-Read stored DPD column descriptions from snapshot metadata:
+Read stored column descriptions from snapshot metadata:
 
 ```python
-descriptions = dpd.get_column_descriptions()
-old_descriptions = dpd.get_column_descriptions(snapshot="1H4DW00")
+descriptions = ds.get_column_descriptions()
+old_descriptions = ds.get_column_descriptions(snapshot="1H4DW00")
 ```
 
-The method returns a copy of the current or requested snapshot dictionary.
-NPDs currently do not have YAML-backed snapshot metadata, so this accessor is
-DPD-only.
+The method returns a copy of the current or requested snapshot dictionary, or
+`{}` when missing. DPDs store descriptions in captured YAML snapshot metadata.
+NPDs store them in the optional NPD info sidecar.
 
 ### Configuration reference
 
@@ -1397,6 +1411,12 @@ python -m ionbus_parquet_cache.import_npd \
 python -m ionbus_parquet_cache.import_npd \
     /path/to/cache ref.exchange_calendar /source/exchange_calendar/
 
+# Import with snapshot info and explicit provenance
+python -m ionbus_parquet_cache.import_npd \
+    /path/to/cache ref.instrument_master /source/instruments.parquet \
+    --info-file /source/instruments.info.yaml \
+    --provenance-file /source/instruments.provenance.yaml
+
 # Preview without copying
 python -m ionbus_parquet_cache.import_npd \
     /path/to/cache ref.instrument_master /source/instruments.parquet \
@@ -1413,6 +1433,26 @@ parquet dataset before copying. `--skip-validation` still requires the source
 to exist; single-file sources must end in `.parquet`, and directory sources
 must contain at least one `.parquet` file. Direct imports into `gs://` caches
 are not supported; import locally and use `sync-cache push`.
+
+`--info-file` is an optional strict YAML mapping with only these top-level
+keys: `notes`, `annotations`, and `column_descriptions`. Missing fields carry
+forward from the previous NPD snapshot. Unknown keys are errors. Notes may be
+long YAML block strings; there are intentionally no per-field CLI flags.
+
+```yaml
+notes: |
+  Long human notes are fine.
+
+annotations:
+  vendor: example
+
+column_descriptions:
+  instrument_id: Quiet symbology_v2 listing-level UUID.
+  vendor_symbol: Vendor ticker-like symbol.
+```
+
+`--provenance-file` is a separate YAML mapping for explicit per-snapshot
+provenance. It never carries forward from the previous NPD snapshot.
 
 ### cleanup-cache
 
@@ -1516,11 +1556,12 @@ python -m ionbus_parquet_cache.sync_cache push /local/cache gs://my-bucket/cache
 GCS sync uses size-based change detection. Requires `pip install gcsfs`.
 For DPDs, sync copies the snapshot metadata pickle, every parquet file
 referenced by that metadata, and any provenance sidecar that follows the
-expected naming convention for the selected snapshot:
-`_provenance/{dataset_name}_{snapshot_id}.provenance.pkl.gz`. No extra flag is
-required for provenance sidecars. Only sidecars with that exact name and
-location are synced automatically; custom provenance files elsewhere in the
-cache tree are not part of the sync contract and must be managed separately.
+expected naming convention for the selected snapshot. For NPDs, sync copies
+the selected snapshot file/directory plus convention-named info/provenance
+sidecars under `non-dated/{name}/_meta_data/` and
+`non-dated/{name}/_provenance/` when present. No extra flag is required.
+Custom sidecar files outside the expected names are not part of the sync
+contract and must be managed separately.
 
 Post-sync functions are optional side-effect hooks for work that should happen
 after selected cache files are copied. See [Sync Functions](#sync-functions).
