@@ -144,7 +144,7 @@ Failure behavior:
 - Incompatible type changes fail with clear error showing column and old/new types.
 - Snapshot is not advanced when schema validation fails.
 - Optional `annotations`, `notes`, and `column_descriptions` are stored as
-  user-facing snapshot info. For DPDs, they live in the captured YAML
+  snapshot info. For DPDs, they live in the captured YAML
   configuration. For NPDs, they live in the optional NPD info sidecar
   `non-dated/{name}/_meta_data/{name}_{suffix}.pkl.gz`.
   Missing fields carry forward from the previous snapshot; explicit values are
@@ -162,9 +162,9 @@ Failure behavior:
   parquet directory as a complete `NonDatedParquetDataset` snapshot. The
   imported snapshot becomes the current NPD snapshot and is discoverable by
   `CacheRegistry`.
-- NPD imports may write optional user info and optional provenance sidecars.
-  User info carries forward field-by-field when omitted. Provenance is never
-  carried forward.
+- NPD imports may write optional snapshot info and optional provenance
+  sidecars. Snapshot info carries forward field-by-field when omitted.
+  Provenance is never carried forward.
 
 ## Implementation Readiness Checklist
 
@@ -203,9 +203,9 @@ The cache is a directory containing:
         instrument_master/         <- single-file NPD
             instrument_master_1H4DW00.parquet
             instrument_master_1H4DW01.parquet   <- current snapshot
-            _meta_data/            <- optional NPD user info/provenance refs
+            _meta_data/            <- optional NPD snapshot info/provenance refs
                 instrument_master_1H4DW01.pkl.gz
-            _provenance/           <- optional per-snapshot user provenance
+            _provenance/           <- optional per-snapshot provenance
                 instrument_master_1H4DW01.provenance.pkl.gz
         calendar_data/             <- hive-partitioned NPD
             calendar_data_1H4DW00/              <- old snapshot (directory)
@@ -222,7 +222,7 @@ The cache is a directory containing:
         _meta_data/
             md.futures_daily_1H4DW00.pkl.gz
             md.futures_daily_1H4DW01.pkl.gz   <- current snapshot (largest suffix)
-        _provenance/               <- optional large per-snapshot user provenance
+        _provenance/               <- optional large per-snapshot provenance
             md.futures_daily_1H4DW01.provenance.pkl.gz
         FutureRoot=ES/
             year=Y2023/FutureRoot=ES_year=Y2023_1H4DW00.parquet
@@ -264,7 +264,7 @@ The cache is loaded by pointing to the cache root directory.
   `non-dated/` for snapshot files (`name_suffix.parquet`) or directories
   (`name_suffix/`). `_meta_data/` and `_provenance/` under an NPD directory
   are sidecar directories and must not be treated as snapshots. No yaml files
-  are needed to read NPD data or user info.
+  are needed to read NPD data or snapshot info.
 - **yaml/ files:** Only needed when updating data. They define the
   `DataSource` class and configuration for how to fetch new data.
 - **code/ files:** Only needed when updating data. They contain the
@@ -473,8 +473,7 @@ it's stored or retrieved.
 
 **Shared snapshot-info responsibilities:**
 
-The base class owns the public API and validation semantics for user-facing
-snapshot info:
+The base class owns the public API and validation semantics for snapshot info:
 
 - `notes`
 - `annotations`
@@ -609,7 +608,7 @@ non-dated/
         instrument_master_1H4DW00.parquet  <- old snapshot
         instrument_master_1H4DW01.parquet  <- current snapshot (largest suffix)
         _meta_data/
-            instrument_master_1H4DW01.pkl.gz  <- optional user info/provenance ref
+            instrument_master_1H4DW01.pkl.gz  <- optional snapshot info/provenance ref
         _provenance/
             instrument_master_1H4DW01.provenance.pkl.gz  <- optional provenance
     calendar_data/                        <- hive-partitioned NPD
@@ -636,8 +635,8 @@ non-dated/
 **NPD-specific methods** (in addition to base class methods):
 
 - `import_snapshot(source_path, info=None, provenance=None)` -- imports a new
-  snapshot from a file or directory, with optional user-facing snapshot info
-  and optional per-snapshot provenance. This is the required NPD import
+  snapshot from a file or directory, with optional snapshot info and optional
+  per-snapshot provenance. This is the required NPD import
   contract; implementations must not treat `info` or `provenance` as
   DPD-style operational metadata.
 - `read_data(filters=None, columns=None)` -- same as base class, but raises
@@ -674,7 +673,7 @@ The `import_snapshot()` method:
 - Copies the source file or directory into the NPD directory
 - Assigns a new snapshot suffix (base-36 timestamp)
 - For directories, performs a recursive copy preserving structure
-- Resolves and writes optional user-facing snapshot info
+- Resolves and writes optional snapshot info
 - Writes optional provenance only when explicitly supplied
 - The new snapshot becomes the current snapshot
 
@@ -703,11 +702,10 @@ sidecar directories and must not be treated as snapshot directories.
 
 **NPD snapshot info sidecars:** NPDs may have optional per-snapshot info
 sidecars at `non-dated/{name}/_meta_data/{name}_{suffix}.pkl.gz`. The file is
-a gzip-compressed pickle containing only user-facing snapshot info and an
-optional provenance reference. It is not JSON or YAML. It does not store
-schema, file manifests, checksums, byte sizes, source labels, imported
-timestamps, or lineage. The data snapshot itself remains the suffixed file or
-directory.
+a gzip-compressed pickle containing only snapshot info and an optional
+provenance reference. It is not JSON or YAML. It does not store schema, file
+manifests, checksums, byte sizes, source labels, imported timestamps, or
+lineage. The data snapshot itself remains the suffixed file or directory.
 
 Legacy NPD snapshots without an info sidecar are valid. Their snapshot info is
 treated as absent: `get_notes()` returns `None`, `get_annotations()` returns
@@ -761,7 +759,7 @@ or `read_data_pl()` will construct a new dataset from the latest snapshot.
 
 ## Snapshot Info and Provenance
 
-Snapshot info is small, user-facing context that travels with a specific cache
+Snapshot info is small, reader-facing context that travels with a specific cache
 snapshot and helps readers understand the dataset. It is separate from
 operational metadata such as DPD schemas, DPD file manifests, update lineage,
 and cache date ranges.
@@ -832,8 +830,26 @@ snapshot.
 
 For DPDs, provenance comes from `DataSource.get_provenance()`. For NPDs,
 provenance comes only from the import command/API when explicitly supplied.
-Omitting NPD provenance on a later import means the new snapshot has no
-provenance sidecar, even if the previous NPD snapshot had one.
+
+### NPD Snapshot Provenance
+
+NPD snapshot provenance is supplied only through
+`import_snapshot(..., provenance=...)` or the CLI `--provenance-file`. It is
+never read from NPD snapshot info and it never carries forward from a previous
+NPD snapshot.
+
+When NPD provenance is supplied, the cache writes it as a gzip-compressed
+pickle sidecar:
+
+```text
+non-dated/{name}/_provenance/{name}_{suffix}.provenance.pkl.gz
+```
+
+The NPD snapshot-info sidecar stores only the `SnapshotProvenanceRef` for that
+sidecar. If NPD provenance is omitted, the new snapshot has
+`provenance=None`, even if the previous NPD snapshot had a provenance sidecar.
+Normal NPD data reads and snapshot-info accessors do not load provenance;
+callers use `read_provenance()` when they explicitly need it.
 
 ### NPD info file
 
@@ -861,7 +877,7 @@ NPD snapshot according to the shared snapshot-info rules.
 
 The CLI intentionally does not provide per-field flags such as `--notes`,
 `--notes-str`, `--annotations`, or `--column-descriptions`. Notes may be long,
-and all user-facing NPD info should travel through `--info-file`.
+and all NPD snapshot info should travel through `--info-file`.
 
 The NPD import CLI also accepts a separate `--provenance-file`. It must parse as
 a mapping. Its keys are user-defined and are not restricted by the
@@ -4130,7 +4146,7 @@ python -m ionbus_parquet_cache.import_npd \
 python -m ionbus_parquet_cache.import_npd \
     /path/to/cache ref.exchange_calendar /source/exchange_calendar/
 
-# Import a snapshot with user-facing info and explicit provenance
+# Import a snapshot with snapshot info and explicit provenance
 python -m ionbus_parquet_cache.import_npd \
     /path/to/cache ref.instrument_master /source/instruments.parquet \
     --info-file /source/instruments.info.yaml \
@@ -4188,8 +4204,8 @@ source_path    # Parquet file or directory containing parquet files
 - `--info-file` is optional. It must be a YAML mapping with only these
   top-level keys: `notes`, `annotations`, `column_descriptions`.
 - The command intentionally has no per-field info flags such as `--notes`,
-  `--notes-str`, `--annotations`, or `--column-descriptions`. All user-facing
-  NPD info comes from `--info-file`.
+  `--notes-str`, `--annotations`, or `--column-descriptions`. All NPD snapshot
+  info comes from `--info-file`.
 - Unknown `--info-file` keys are a hard error. The command must not silently
   ignore extra fields.
 - Before publishing, the command resolves snapshot info by validating supplied
@@ -4222,8 +4238,8 @@ source_path    # Parquet file or directory containing parquet files
   `non-dated/{name}/`.
 - If `name` already exists as an NPD, the command creates a new snapshot under
   the existing NPD directory. Older snapshots remain available.
-- If user info is supplied, user info is carried forward, or provenance is
-  supplied, the command writes
+- If snapshot info is supplied, snapshot info is carried forward, or provenance
+  is supplied, the command writes
   `non-dated/{name}/_meta_data/{name}_{suffix}.pkl.gz` as a gzip-compressed
   pickle containing normalized snapshot info and, when present, the provenance
   reference.
@@ -4671,7 +4687,7 @@ When `sync-cache` selects an NPD snapshot, it copies:
 
 No separate flag is required to sync info or provenance sidecars. They are part
 of the cache snapshot, unlike sync functions, which are optional external side
-effects. A snapshot with no info sidecar has no user-facing info to copy. A
+effects. A snapshot with no info sidecar has no snapshot info to copy. A
 snapshot with `provenance=None` has no provenance sidecar to copy.
 
 The sync contract is convention-based. If a user creates or renames some other
