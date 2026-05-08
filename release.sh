@@ -140,6 +140,91 @@ verify_dist_artifacts() {
   }
 }
 
+verify_built_package_versions() {
+  local tag="$1"
+
+  "$RUN_ENV" "$ENV_NAME" python -c '
+import email.parser
+import io
+import pathlib
+import re
+import sys
+import tarfile
+import zipfile
+
+tag = sys.argv[1]
+wheels = sorted(pathlib.Path("dist").glob(f"*{tag}*.whl"))
+if len(wheels) != 1:
+    raise SystemExit(f"expected exactly one wheel for {tag}, found {len(wheels)}")
+
+sdists = sorted(pathlib.Path("dist").glob(f"*{tag}*.tar.gz"))
+if len(sdists) != 1:
+    raise SystemExit(f"expected exactly one sdist for {tag}, found {len(sdists)}")
+
+version_re = re.compile("__version__\\s*=\\s*([\\\"\\x27])([^\\\"\\x27]+)\\1")
+
+
+def parse_metadata_version(text):
+    metadata = email.parser.Parser().parsestr(text)
+    return metadata["Version"]
+
+
+with zipfile.ZipFile(wheels[0]) as zf:
+    names = zf.namelist()
+    metadata_names = [n for n in names if n.endswith(".dist-info/METADATA")]
+    if len(metadata_names) != 1:
+        raise SystemExit(
+            f"expected exactly one wheel METADATA file, found {len(metadata_names)}"
+        )
+    version_names = [n for n in names if n == "ionbus_parquet_cache/_version.py"]
+    if len(version_names) != 1:
+        raise SystemExit(
+            f"expected exactly one wheel _version.py, found {len(version_names)}"
+        )
+    metadata_version = parse_metadata_version(
+        zf.read(metadata_names[0]).decode("utf-8")
+    )
+    version_text = zf.read(version_names[0]).decode("utf-8")
+    runtime_match = version_re.search(version_text)
+    runtime_version = runtime_match.group(2) if runtime_match else None
+
+with tarfile.open(sdists[0], "r:gz") as tf:
+    names = tf.getnames()
+    pkg_info_names = [
+        n for n in names if n.count("/") == 1 and n.endswith("/PKG-INFO")
+    ]
+    if len(pkg_info_names) != 1:
+        raise SystemExit(
+            f"expected exactly one sdist PKG-INFO file, found {len(pkg_info_names)}"
+        )
+    member = tf.extractfile(pkg_info_names[0])
+    if member is None:
+        raise SystemExit(f"could not read {pkg_info_names[0]}")
+    sdist_metadata_version = parse_metadata_version(
+        io.TextIOWrapper(member, encoding="utf-8").read()
+    )
+
+if runtime_version is None:
+    raise SystemExit("could not read runtime version from wheel _version.py")
+if metadata_version != runtime_version:
+    raise SystemExit(
+        "package metadata version does not match runtime version: "
+        f"{metadata_version!r} != {runtime_version!r}"
+    )
+if metadata_version != tag:
+    raise SystemExit(
+        f"package metadata version {metadata_version!r} does not match tag {tag!r}"
+    )
+if sdist_metadata_version != tag:
+    raise SystemExit(
+        f"sdist metadata version {sdist_metadata_version!r} does not match tag {tag!r}"
+    )
+' "$tag" || {
+    echo "ERROR: built package metadata/runtime version verification failed"
+    exit 1
+  }
+}
+
 cleanup_pip_artifacts() {
   rm -rf build dist
   find . -maxdepth 1 -name "*.egg-info" -exec rm -rf {} +
@@ -179,6 +264,7 @@ build_pip_artifacts() {
   fi
 
   verify_dist_artifacts "$tag"
+  verify_built_package_versions "$tag"
   echo "Built pip artifacts in: $ROOT_DIR/dist"
 }
 
@@ -208,6 +294,7 @@ send_pip_artifacts() {
 
   tag="$(ensure_tag_context)"
   verify_dist_artifacts "$tag"
+  verify_built_package_versions "$tag"
 
   "$RUN_ENV" "$ENV_NAME" python -c "import pathlib, subprocess, sys; files=sorted(str(p) for p in pathlib.Path('dist').glob('*')); sys.exit(subprocess.run([sys.executable, '-m', 'twine', 'upload', *files], check=False).returncode if files else 1)"
 }

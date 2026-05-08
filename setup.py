@@ -6,15 +6,23 @@ import os
 import re
 import subprocess
 from glob import glob
+from pathlib import Path
 
 from setuptools import setup
 
+VERSION_FILE = Path("_version.py")
+VERSION_RE = re.compile(r'__version__\s*=\s*["\']([^"\']+)["\']')
 
-def get_latest_tag() -> str | None:
-    """Gets latest tag from git; returns None if not found."""
+
+def get_release_tag() -> str | None:
+    """Return the exact release tag from env/git, or None if unavailable."""
+    env_tag = os.environ.get("GIT_DESCRIBE_TAG", "").strip()
+    if env_tag:
+        return env_tag
+
     try:
         result = subprocess.run(
-            ["git", "describe", "--tags"],
+            ["git", "describe", "--tags", "--exact-match"],
             capture_output=True,
             text=True,
             check=True,
@@ -22,6 +30,24 @@ def get_latest_tag() -> str | None:
         return result.stdout.strip()
     except subprocess.CalledProcessError:
         return None
+
+
+def write_version_file(version: str) -> None:
+    """Write the package runtime version source."""
+    VERSION_FILE.write_text(
+        f'__version__ = "{version}"\n',
+        encoding="utf-8",
+    )
+
+
+def read_version_file() -> str:
+    """Read the package runtime version source."""
+    if not VERSION_FILE.exists():
+        write_version_file("0.0.0")
+    match = VERSION_RE.search(VERSION_FILE.read_text(encoding="utf-8"))
+    if not match:
+        raise RuntimeError(f"Could not read version from {VERSION_FILE}")
+    return match.group(1)
 
 
 avoid_regexes = [
@@ -49,9 +75,10 @@ def ok_dir(name: str) -> bool:
     return True
 
 
-if latest_tag := get_latest_tag():
-    with open("_version.py", "w", encoding="utf-8") as ver_file:
-        ver_file.write(f'__version__ = "{latest_tag}"\n')
+if release_tag := get_release_tag():
+    write_version_file(release_tag)
+
+version = read_version_file()
 
 all_dirs = [x for x in glob("*") if os.path.isdir(x) and ok_dir(x)]
 packages = ["ionbus_parquet_cache"] + [
@@ -67,6 +94,7 @@ with open("readme_pip.md", "r", encoding="utf-8") as readme_file:
 
 setup(
     name="ionbus-parquet-cache",
+    version=version,
     url="https://github.com/ionbus/ionbus_parquet_cache",
     packages=packages,
     package_dir=package_dirs,

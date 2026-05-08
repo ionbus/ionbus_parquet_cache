@@ -55,7 +55,6 @@ Required tools in the Pixi environment:
 - `python-build`
 - `twine`
 - `conda-build`
-- `setuptools-git-versioning`
 - `anaconda-client`
 
 ## Versioning and tags
@@ -65,6 +64,8 @@ Version numbers come from git tags.
 - `#bugfix` in a commit message bumps only the fourth version number
 - `--tag` tells the release script to create the next local tag automatically
 - the script verifies that `HEAD` is exactly on a tag before it builds or uploads
+- the script verifies that built package metadata matches
+  `ionbus_parquet_cache.__version__` and the release tag
 - the script never pushes anything to git; tags remain local until you push them yourself
 
 ## Build and send modes
