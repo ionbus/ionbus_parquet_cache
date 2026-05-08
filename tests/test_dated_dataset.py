@@ -358,6 +358,172 @@ class TestDatedDatasetAnnotations:
                 {"annotations": {"flags": {"1": "active"}}}
             )
 
+    def test_get_annotations_current_and_historical(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Annotations should be readable from snapshot metadata."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        first_annotations = {"flags": {"1": "active"}}
+        second_annotations = {
+            "flags": {"1": "active", "2": "stale"},
+            "owner": "research",
+        }
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"annotations": first_annotations},
+            suffix="1GZ5HK0",
+        )
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"annotations": second_annotations},
+            suffix="1GZ5HK1",
+        )
+
+        current = dpd.get_annotations()
+        historical = dpd.get_annotations(snapshot="1GZ5HK0")
+
+        assert current == second_annotations
+        assert historical == first_annotations
+
+        current["flags"]["1"] = "mutated locally"
+        assert dpd.get_annotations() == second_annotations
+
+    def test_get_annotations_returns_empty_dict_when_missing(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Snapshots without annotations should return an empty dict."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"date_col": "Date"},
+            suffix="1GZ5HK0",
+        )
+
+        assert dpd.get_annotations() == {}
+
+    def test_get_annotations_validates_stored_metadata(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Malformed stored annotations should raise clearly."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"annotations": "bad"},
+            suffix="1GZ5HK0",
+        )
+
+        with pytest.raises(ValidationError, match="must be a dict"):
+            dpd.get_annotations()
+
+    def test_notes_carry_forward_when_omitted(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Omitted notes should inherit current metadata notes."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"notes": "Initial dataset notes."},
+            suffix="1GZ5HK0",
+        )
+
+        resolved = dpd._resolve_yaml_config_annotations({"date_col": "Date"})
+
+        assert resolved["notes"] == "Initial dataset notes."
+
+    def test_notes_may_change_and_be_empty_but_not_null(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Notes may be edited or emptied, but not deleted with None."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"notes": "Old notes."},
+            suffix="1GZ5HK0",
+        )
+
+        resolved = dpd._resolve_yaml_config_annotations(
+            {"notes": "Updated notes."}
+        )
+        emptied = dpd._resolve_yaml_config_annotations({"notes": ""})
+
+        assert resolved["notes"] == "Updated notes."
+        assert emptied["notes"] == ""
+
+        with pytest.raises(ValidationError, match="notes.*must be a string"):
+            dpd._resolve_yaml_config_annotations({"notes": None})
+
+    def test_get_notes_current_and_historical(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Notes should be readable from snapshot metadata."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"notes": "Original notes."},
+            suffix="1GZ5HK0",
+        )
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"notes": "Updated notes."},
+            suffix="1GZ5HK1",
+        )
+
+        assert dpd.get_notes() == "Updated notes."
+        assert dpd.get_notes(snapshot="1GZ5HK0") == "Original notes."
+
+    def test_get_notes_returns_none_when_missing(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Snapshots without notes should return None."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"date_col": "Date"},
+            suffix="1GZ5HK0",
+        )
+
+        assert dpd.get_notes() is None
+
+    def test_get_notes_validates_stored_metadata(
+        self,
+        temp_cache: Path,
+    ) -> None:
+        """Malformed stored notes should raise clearly."""
+        dpd = DatedParquetDataset(cache_dir=temp_cache, name="test")
+        schema = pa.schema([("Date", pa.date32())])
+        dpd._publish_snapshot(
+            files=[],
+            schema=schema,
+            yaml_config={"notes": {"bad": "value"}},
+            suffix="1GZ5HK0",
+        )
+
+        with pytest.raises(ValidationError, match="notes.*must be a string"):
+            dpd.get_notes()
+
     def test_column_descriptions_carry_forward_when_omitted(
         self,
         temp_cache: Path,

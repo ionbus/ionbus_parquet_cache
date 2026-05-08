@@ -40,6 +40,7 @@
    * [Basic example](#basic-example)
    * [With data transformations](#with-data-transformations)
    * [Annotations](#annotations)
+   * [Notes](#notes)
    * [Column descriptions](#column-descriptions)
    * [Configuration reference](#configuration-reference)
 - [Data Cleaning](#data-cleaning)
@@ -842,9 +843,10 @@ in YAML files. YAML configuration is saved into snapshot metadata and may be
 copied when caches are synced.
 
 Treat `source_init_args`, `cleaning_init_args`,
-`sync_function_init_args`, and `column_descriptions` as non-secret
+`sync_function_init_args`, `notes`, and `column_descriptions` as non-secret
 configuration only: endpoint URLs, timeouts, project names, table names,
-column blurbs, and other values that are safe to keep in metadata.
+dataset notes, column blurbs, and other values that are safe to keep in
+metadata.
 DataSources, DataCleaners, and sync functions that need secrets should read
 them from environment variables or an external credential provider and fail
 clearly if a required value is missing.
@@ -891,7 +893,10 @@ datasets:
       - Date
       - Symbol
 
-    # Small user-owned notes stored with snapshot metadata
+    # Optional editable notes stored with snapshot metadata
+    notes: Daily futures data used by risk and research dashboards.
+
+    # Small user-owned structured metadata stored with snapshot metadata
     annotations:
       bitmask_columns:
         StatusFlags:
@@ -962,6 +967,45 @@ when the previous snapshot also has no annotations.
 Keep annotations small. Large audit records, source manifests, request logs, or
 process graphs belong in snapshot provenance via `DataSource.get_provenance()`.
 
+Read stored DPD annotations from snapshot metadata:
+
+```python
+annotations = dpd.get_annotations()
+old_annotations = dpd.get_annotations(snapshot="1H4DW00")
+```
+
+The method returns a copy of the current or requested snapshot dictionary.
+NPDs currently do not have YAML-backed snapshot metadata, so this accessor is
+DPD-only.
+
+### Notes
+
+Use optional `notes` for a short free-form string that should travel with the
+dataset's captured YAML configuration. Notes are meant for human context that
+is not naturally per-column and does not need the append-only rules of
+`annotations`.
+
+```yaml
+datasets:
+  ref.vendor_instruments:
+    notes: Vendor reference file normalized to Quiet symbology identifiers.
+```
+
+Notes are optional. If omitted on a later snapshot, the previous string is
+carried forward. Explicit updates may replace the string at any time,
+including with `notes: ""` to clear visible text. `notes: null` is rejected
+because notes cannot be deleted once present.
+
+Read stored DPD notes from snapshot metadata:
+
+```python
+notes = dpd.get_notes()
+old_notes = dpd.get_notes(snapshot="1H4DW00")
+```
+
+The method returns `str | None`. NPDs currently do not have YAML-backed
+snapshot metadata, so this accessor is DPD-only.
+
 ### Column descriptions
 
 Use optional `column_descriptions` for short human-readable blurbs keyed by
@@ -1008,7 +1052,8 @@ DPD-only.
 | `sort_columns` | `list[str]` | `[date_col]` | Sort order within partition files; defaults to `[date_col]` if not provided |
 | `repull_n_days` | `int` | `0` | Re-fetch this many recent business days on each update |
 | `row_group_size` | `int` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values enable row-group-level predicate pushdown at the cost of more file metadata. |
-| `annotations` | `dict` | `None` | Small user-owned notes stored in the captured YAML configuration. Append-only across snapshots: additions are allowed, removals and changes are rejected. |
+| `annotations` | `dict` | `None` | Small user-owned metadata stored in the captured YAML configuration. Append-only across snapshots: additions are allowed, removals and changes are rejected. |
+| `notes` | `str` | `None` | Optional free-form dataset notes. Omitted values carry forward; explicit string updates are allowed, including `""`, but `null` is rejected. |
 | `column_descriptions` | `dict[str, str]` | `None` | Optional human-readable descriptions keyed by column name. Omitted values carry forward; explicit updates may add or change text but may not remove existing keys. |
 | `instrument_column` | `str` | `None` | Column name holding instrument identifiers (e.g., `"ticker"`). Required when `num_instrument_buckets` is set. |
 | `num_instrument_buckets` | `int` | `None` | Enable hash bucketing: group tickers into this many bucket directories instead of one directory per ticker. Must be set together with `instrument_column`. |

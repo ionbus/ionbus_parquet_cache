@@ -237,6 +237,63 @@ datasets:
         with pytest.raises(ConfigurationError, match="annotations"):
             load_yaml_file(yaml_path, temp_cache)
 
+    def test_load_notes(self, temp_cache: Path) -> None:
+        """Notes should be preserved when explicitly supplied."""
+        yaml_path = temp_cache / "yaml" / "notes.yaml"
+        yaml_path.write_text("""
+datasets:
+    noted:
+        notes: Daily futures data used by risk dashboards.
+        source_class_name: TestSource
+""")
+
+        configs = load_yaml_file(yaml_path, temp_cache)
+        config = configs["noted"]
+
+        assert config.notes == "Daily futures data used by risk dashboards."
+        assert config.to_yaml_config()["notes"] == config.notes
+
+    def test_empty_notes_are_allowed(self, temp_cache: Path) -> None:
+        """An explicit empty notes string should be preserved."""
+        yaml_path = temp_cache / "yaml" / "empty_notes.yaml"
+        yaml_path.write_text("""
+datasets:
+    noted:
+        notes: ""
+        source_class_name: TestSource
+""")
+
+        configs = load_yaml_file(yaml_path, temp_cache)
+        config = configs["noted"]
+
+        assert config.notes == ""
+        assert config.to_yaml_config()["notes"] == ""
+
+    def test_omitted_notes_stay_omitted(
+        self,
+        temp_cache: Path,
+        sample_yaml: Path,
+    ) -> None:
+        """Omitted notes should not be added by to_yaml_config()."""
+        config = load_yaml_file(sample_yaml, temp_cache)["md.test_dataset"]
+
+        assert config.notes is None
+        assert "notes" not in config.to_yaml_config()
+
+    def test_notes_must_be_string(self, temp_cache: Path) -> None:
+        """Notes must be a YAML string when present."""
+        yaml_path = temp_cache / "yaml" / "bad_notes.yaml"
+        yaml_path.write_text("""
+datasets:
+    bad:
+        notes:
+            - nope
+        source_class_name: TestSource
+""")
+
+        with pytest.raises(ConfigurationError, match="notes"):
+            load_yaml_file(yaml_path, temp_cache)
+
     def test_load_column_descriptions(self, temp_cache: Path) -> None:
         """Column descriptions should be preserved when supplied."""
         yaml_path = temp_cache / "yaml" / "column_descriptions.yaml"
@@ -700,6 +757,9 @@ class TestTransformDefaults:
         assert config.dropna_columns == []
         assert config.dedup_columns == []
         assert config.dedup_keep == "last"
+        assert config.annotations is None
+        assert config.notes is None
+        assert config.column_descriptions is None
 
 
 class TestInstalledModuleDataSource:

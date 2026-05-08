@@ -143,6 +143,10 @@ Failure behavior:
   captured YAML configuration. They carry forward when omitted, and explicit
   updates may add or change description text. They are readable through
   `DatedParquetDataset.get_column_descriptions()`.
+- Optional `notes` are stored in snapshot metadata as part of the captured YAML
+  configuration. They carry forward when omitted, and explicit string updates
+  are allowed, including `""`. They are readable through
+  `DatedParquetDataset.get_notes()`.
 
 ### Snapshot/cleanup/sync
 
@@ -520,7 +524,8 @@ by date (and optionally by additional columns).
   applies a `DataCleaner` to the data; `transforms` is a dict of YAML
   transform settings (columns_to_rename, columns_to_drop, dropna_columns,
   dedup_columns, dedup_keep); `yaml_config` stores the full YAML configuration
-  in snapshot metadata, including the watched user `annotations` YAML dictionary.
+  in snapshot metadata, including watched user metadata such as
+  `annotations`, `notes`, and `column_descriptions`.
   External snapshot provenance comes from the DataSource provenance hook, not
   from an `update()` argument.
 - `get_partition_values(column)` -- returns the list of distinct values
@@ -539,6 +544,13 @@ by date (and optionally by additional columns).
   from the stored metadata. Returns a dict with keys `columns_to_rename`,
   `columns_to_drop`, `dropna_columns`, `dedup_columns`, `dedup_keep`, or
   `None` if no transforms are configured.
+- `get_annotations(snapshot=None)` -- retrieves the optional `annotations`
+  dictionary from the current snapshot metadata, or from the requested
+  snapshot suffix. Returns a copy and returns `{}` when no annotations are
+  stored.
+- `get_notes(snapshot=None)` -- retrieves the optional `notes` string from
+  the current snapshot metadata, or from the requested snapshot suffix.
+  Returns `str | None`.
 - `get_column_descriptions(snapshot=None)` -- retrieves the optional
   `column_descriptions` dictionary from the current snapshot metadata, or from
   the requested snapshot suffix. Returns a copy and returns `{}` when no
@@ -953,6 +965,7 @@ class FuturesDataCleaner(DataCleaner):
 | `repull_n_days` | `int` | `0` | Number of trailing business days to re-fetch each update |
 | `row_group_size` | `int \| None` | `None` (PyArrow default: 1,048,576 rows) | Maximum rows per Parquet row group. Smaller values allow row-group-level predicate pushdown within a file at the cost of more metadata overhead. Only relevant when files are large enough to contain multiple row groups. |
 | `annotations` | `dict \| None` | `None` | Small user-owned annotations stored as part of the captured YAML configuration in every snapshot metadata pickle. Intended for compact structured notes that make user code easier to understand or use, such as bitmask definitions, enum labels, units, or dataset-specific notes. Existing entries are append-only: later snapshots may add new keys, but may not remove keys or change values already present in the previous snapshot. Use `column_descriptions` for plain per-column blurbs. |
+| `notes` | `str \| None` | `None` | Optional human-readable dataset notes stored as part of the captured YAML configuration in every snapshot metadata pickle. Omitted values carry forward. Explicit string updates are allowed at any time, including `""`; `null` is rejected because notes cannot be deleted once present. |
 | `column_descriptions` | `dict[str, str] \| None` | `None` | Optional human-readable descriptions keyed by column name. Stored as part of the captured YAML configuration in every snapshot metadata pickle so users can inspect metadata to understand what each column means. |
 | `instrument_column` | `str` | `None` | Column containing instrument identifiers (e.g., `FutureRoot`, `ticker`). Required for `--instruments` CLI flag to work. Can be used for filtering at read time and does not need to be a partition column. |
 | `instruments` | `list[str]` | `None` | Instruments to include in updates. If `None`, fetches all instruments. Can be expanded over time using backfill (see below). |
@@ -1021,6 +1034,54 @@ snapshot's dictionary. Supplying `annotations: {}` is allowed only when the
 previous dictionary was empty; otherwise it attempts to remove existing fields
 and raises `ValidationError`. To remove or redefine entries, create a new
 dataset or perform an explicit rebuild whose lineage starts a new cache.
+
+Read stored DPD annotations from snapshot metadata:
+
+```python
+annotations = dpd.get_annotations()
+old_annotations = dpd.get_annotations(snapshot="1H4DW00")
+```
+
+The method returns a copy of the current or requested snapshot dictionary.
+NPDs currently do not have YAML-backed snapshot metadata, so this accessor is
+DPD-only.
+
+**Notes:**
+
+The optional `notes` YAML field is a free-form string stored with the captured
+YAML configuration in each snapshot metadata pickle. It is for short human
+context that should travel with the cache but is not naturally per-column and
+does not need append-only dictionary semantics.
+
+Example:
+
+```yaml
+datasets:
+  ref.vendor_instruments:
+    notes: Vendor reference file normalized to Quiet symbology identifiers.
+```
+
+For an existing cache, omitting `notes` carries forward the previous snapshot's
+string. Supplying `notes` replaces the previous value at any time. An empty
+string is allowed and is the supported way to clear visible notes:
+
+```yaml
+notes: ""
+```
+
+`notes: null` is rejected because notes cannot be deleted once present. Legacy
+snapshots without a `notes` YAML field are treated as absent, and
+`get_notes()` returns `None`.
+
+Read stored DPD notes from snapshot metadata:
+
+```python
+notes = dpd.get_notes()
+old_notes = dpd.get_notes(snapshot="1H4DW00")
+```
+
+NPDs currently do not have YAML-backed snapshot metadata, so this accessor is
+DPD-only.
 
 **Column descriptions:**
 
@@ -1119,14 +1180,14 @@ Do not store credentials, API keys, passwords, tokens, or private key material
 in YAML files. YAML configuration is stored in snapshot metadata and may be
 copied when caches are synced.
 
-Treat `annotations`, provenance sidecar contents, `source_init_args`,
+Treat `annotations`, provenance sidecar contents, `source_init_args`, `notes`,
 `column_descriptions`, `cleaning_init_args`, and `sync_function_init_args` as
 non-secret information: endpoint URLs, timeouts, project names, table names,
-bitmask definitions, column blurbs, source manifests, process graphs, and
-other values that are safe to sync with the cache. DataSources, DataCleaners,
-and sync functions that need secrets should read them from environment
-variables or an external credential provider and fail clearly if a required
-value is missing.
+bitmask definitions, dataset notes, column blurbs, source manifests, process
+graphs, and other values that are safe to sync with the cache. DataSources,
+DataCleaners, and sync functions that need secrets should read them from
+environment variables or an external credential provider and fail clearly if a
+required value is missing.
 
 ```python
 import os
@@ -2839,13 +2900,16 @@ Updating a `DatedParquetDataset` requires a `DataSource` subclass.
      (no error, no files written).
    - **Guarantee:** `get_data()` will never be called with dates outside
      these bounds.
-4. Validate the watched user annotations in `yaml_config["annotations"]` before any
-   data fetches or file writes. If this is a new cache, store the supplied
-   dictionary or `{}`. If the dataset already has a snapshot and `annotations` is
-   omitted, carry forward the previous snapshot's dictionary in the new
-   captured YAML. If `annotations` is supplied, it may only add keys to the
-   previous dictionary. Removing existing keys or changing existing values
-   raises `ValidationError`.
+4. Validate watched user metadata before any data fetches or file writes. This
+   includes `annotations`, `notes`, and `column_descriptions`.
+   If this is a new cache, store supplied values in the captured YAML.
+   If the dataset already has a snapshot and a watched field is omitted, carry
+   forward the previous snapshot's value in the new captured YAML. If
+   `annotations` is supplied, it may only add keys to the previous dictionary.
+   Removing existing annotation keys or changing existing annotation values
+   raises `ValidationError`. If `notes` is supplied, it must be a string and may
+   replace the previous value, including with `""`. If `column_descriptions` is
+   supplied, it may add keys or change text, but may not remove existing keys.
 5. Call `source.prepare(start_date, end_date, instruments)` internally
    to establish the update scope.
 6. Call `source.get_partitions()` to get the list of `PartitionSpec`
@@ -2890,9 +2954,9 @@ Updating a `DatedParquetDataset` requires a `DataSource` subclass.
     - Include lineage metadata describing the base snapshot, operation,
       added date ranges, rewritten date ranges, and instrument scope for
       this update.
-    - Include the captured YAML configuration, with watched user annotations
-      carried forward or extended, and when present a provenance sidecar
-      reference.
+    - Include the captured YAML configuration, with watched user metadata
+      carried forward, extended, or updated according to each field's rules, and
+      when present a provenance sidecar reference.
 13. Invalidate the cached PyArrow dataset so the next read constructs
     a fresh one from the new snapshot.
 14. Best-effort cleanup of orphan temp files and orphan provenance sidecars
@@ -3409,6 +3473,21 @@ Legacy snapshots without an `annotations` YAML field are treated as `{}`.
 Adding annotations to a legacy empty dictionary is allowed because it is an
 append-only extension.
 
+**Notes in the captured YAML:**
+
+The user `notes` string is not a separate top-level snapshot field. It lives
+under the dataset's captured YAML configuration, alongside annotations and
+column descriptions. The library stores it and carries it forward when omitted,
+but users may replace it with any string on a later snapshot.
+
+For a new cache, omitting `notes` means the field is absent. For later
+snapshots, omitting `notes` carries forward the previous snapshot's string into
+the new captured YAML. Supplying a string replaces the previous value. An empty
+string is valid and is the supported way to clear visible notes. Supplying
+`notes: null` or any non-string value raises `ValidationError`.
+
+Legacy snapshots without a `notes` YAML field are treated as absent.
+
 **Snapshot lineage metadata:**
 
 Each new DPD snapshot should record how it was produced. This is stored on the
@@ -3575,10 +3654,12 @@ If the YAML configuration changes between updates (e.g., adding a new
 transform or changing sort order), each snapshot reflects the
 configuration that was in effect when it was created.
 
-The captured YAML is authoritative for the watched user `annotations` dictionary.
-On update, the implementation compares the new YAML `annotations` subtree to the
-previous snapshot's captured YAML `annotations` subtree and carries the previous
-dictionary forward when the field is omitted. The top-level snapshot
+The captured YAML is authoritative for watched user metadata. On update, the
+implementation compares the new YAML `annotations` subtree to the previous
+snapshot's captured YAML `annotations` subtree and carries the previous
+dictionary forward when the field is omitted. It carries `notes` and
+`column_descriptions` forward when omitted, while allowing explicit note edits
+and explicit column-description additions or text edits. The top-level snapshot
 `provenance` field remains authoritative for external provenance loading and
 sync.
 

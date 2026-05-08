@@ -51,6 +51,7 @@ class DatasetConfig:
     lock_dir: Path | None = None
     row_group_size: int | None = None
     annotations: dict[str, Any] | None = None
+    notes: str | None = None
     column_descriptions: dict[str, str] | None = None
 
     # Data source settings
@@ -146,6 +147,8 @@ class DatasetConfig:
         }
         if self.annotations is not None:
             config["annotations"] = self.annotations
+        if self.notes is not None:
+            config["notes"] = self.notes
         if self.column_descriptions is not None:
             config["column_descriptions"] = self.column_descriptions
         return config
@@ -307,6 +310,13 @@ def load_yaml_file(
                 config_file=str(yaml_path),
             )
 
+        notes = settings.get("notes")
+        if "notes" in settings and not isinstance(notes, str):
+            raise ConfigurationError(
+                f"Dataset '{name}' notes must be a string",
+                config_file=str(yaml_path),
+            )
+
         column_descriptions = settings.get("column_descriptions")
         if "column_descriptions" in settings:
             if not isinstance(column_descriptions, dict):
@@ -350,6 +360,7 @@ def load_yaml_file(
             num_instrument_buckets=settings.get("num_instrument_buckets"),
             row_group_size=settings.get("row_group_size"),
             annotations=annotations,
+            notes=notes,
             column_descriptions=column_descriptions,
             source_location=settings.get("source_location", ""),
             source_class_name=settings.get("source_class_name", ""),

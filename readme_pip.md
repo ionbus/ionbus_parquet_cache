@@ -23,8 +23,8 @@ pip install -e .
 - `NonDatedParquetDataset` for full-refresh reference datasets
 - `DataSource` and `DataCleaner` extension points
 - YAML configuration helpers for declarative dataset setup
-- Snapshot lineage, cache history, YAML annotations, column descriptions, and
-  optional external provenance sidecars
+- Snapshot lineage, cache history, YAML annotations, notes, column
+  descriptions, and optional external provenance sidecars
 - CLI modules for dataset creation, NPD imports, updating, cleanup, cache sync,
   and post-sync hooks
 

@@ -690,6 +690,42 @@ class DatedParquetDataset(ParquetDataset):
                     f"{old_value!r} -> {new_value!r}"
                 )
 
+    def _existing_notes(self) -> str | None:
+        """Return notes from the current snapshot, or None."""
+        self._load_current_metadata_if_available()
+        if self._metadata is None:
+            return None
+        notes = self._metadata.yaml_config.get("notes")
+        if notes is None:
+            return None
+        self._validate_notes(notes, f"Existing notes for '{self.name}'")
+        return notes
+
+    @staticmethod
+    def _validate_notes(notes: Any, context: str) -> None:
+        """Validate notes is a string."""
+        if not isinstance(notes, str):
+            raise ValidationError(
+                f"{context} must be a string, got {type(notes).__name__}"
+            )
+
+    def _resolve_yaml_config_notes(self, resolved: dict[str, Any]) -> None:
+        """
+        Resolve notes in place.
+
+        Omitting notes carries forward the previous snapshot's value.
+        Supplying notes replaces the previous value, including with an empty
+        string. Supplying None is rejected because notes cannot be deleted.
+        """
+        existing = self._existing_notes()
+
+        if "notes" not in resolved:
+            if existing is not None:
+                resolved["notes"] = existing
+            return
+
+        self._validate_notes(resolved["notes"], f"notes for '{self.name}'")
+
     def _existing_column_descriptions(self) -> dict[str, str]:
         """Return column descriptions from current snapshot, or empty dict."""
         self._load_current_metadata_if_available()
@@ -768,6 +804,10 @@ class DatedParquetDataset(ParquetDataset):
         Supplying annotations may add keys, but may not remove or change
         existing keys.
 
+        Omitting notes carries forward the previous snapshot's value.
+        Supplying notes may replace the previous value, including with an empty
+        string, but notes may not be deleted.
+
         Omitting column_descriptions carries forward the previous snapshot's
         value. Supplying column_descriptions may add or change descriptions,
         but may not remove existing column description keys.
@@ -791,6 +831,7 @@ class DatedParquetDataset(ParquetDataset):
 
             self._assert_annotations_append_only(existing, annotations)
 
+        self._resolve_yaml_config_notes(resolved)
         self._resolve_yaml_config_column_descriptions(resolved)
         return resolved
 
@@ -887,6 +928,73 @@ class DatedParquetDataset(ParquetDataset):
                 f"Provenance sidecar for '{self.name}' must contain a dict"
             )
         return payload
+
+    def get_annotations(
+        self,
+        snapshot: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Return annotations stored in snapshot metadata.
+
+        Args:
+            snapshot: Optional snapshot suffix. If omitted, reads the current
+                snapshot metadata.
+
+        Returns:
+            A copy of the annotations dictionary. Returns an empty dictionary
+            when the snapshot has no annotations.
+
+        Raises:
+            SnapshotNotFoundError: If no requested/current metadata exists.
+            ValidationError: If stored annotations are malformed.
+        """
+        if snapshot is None:
+            if self._metadata is None:
+                self._metadata = self._load_metadata()
+            metadata = self._metadata
+        else:
+            metadata = self._load_metadata_for_snapshot(snapshot)
+
+        annotations = metadata.yaml_config.get("annotations", {})
+        if annotations is None:
+            return {}
+        if not isinstance(annotations, dict):
+            raise ValidationError(
+                f"annotations for '{self.name}' must be a dict, "
+                f"got {type(annotations).__name__}"
+            )
+        return deepcopy(annotations)
+
+    def get_notes(
+        self,
+        snapshot: str | None = None,
+    ) -> str | None:
+        """
+        Return notes stored in snapshot metadata.
+
+        Args:
+            snapshot: Optional snapshot suffix. If omitted, reads the current
+                snapshot metadata.
+
+        Returns:
+            The notes string, or None when the snapshot has no notes.
+
+        Raises:
+            SnapshotNotFoundError: If no requested/current metadata exists.
+            ValidationError: If stored notes are malformed.
+        """
+        if snapshot is None:
+            if self._metadata is None:
+                self._metadata = self._load_metadata()
+            metadata = self._metadata
+        else:
+            metadata = self._load_metadata_for_snapshot(snapshot)
+
+        notes = metadata.yaml_config.get("notes")
+        if notes is None:
+            return None
+        self._validate_notes(notes, f"notes for '{self.name}'")
+        return notes
 
     def get_column_descriptions(
         self,

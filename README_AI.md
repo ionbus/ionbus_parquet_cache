@@ -151,6 +151,12 @@ datasets:
     date_partition: day
     partition_columns: [exchange, instrument]
     row_group_size: 128000
+    notes: Daily futures data used by risk dashboards.
+    annotations:
+      bitmasks:
+        status_flags:
+          1: active
+          2: stale
     column_descriptions:
       instrument: Contract or instrument identifier.
       exchange: Listing exchange code.
@@ -196,20 +202,25 @@ latest = registry.get_latest_snapshot("md.futures_daily")
 print(f"Latest snapshot: {latest}")
 ```
 
-### reading column descriptions
+### reading metadata fields
 
-DPD column descriptions are stored in snapshot metadata as
-`column_descriptions` and can be read without knowing the internal metadata
-shape:
+DPD annotations, notes, and column descriptions are stored in snapshot
+metadata and can be read without knowing the internal metadata shape:
 
 ```python
+annotations = dpd.get_annotations()
+old_annotations = dpd.get_annotations(snapshot="1H4DW00")
+
+notes = dpd.get_notes()
+old_notes = dpd.get_notes(snapshot="1H4DW00")
+
 descriptions = dpd.get_column_descriptions()
 old_descriptions = dpd.get_column_descriptions(snapshot="1H4DW00")
 ```
 
-The method returns a copy of the requested snapshot dictionary, or `{}` when
-none are stored. NPDs do not currently have YAML-backed snapshot metadata, so
-this accessor is DPD-only.
+The dictionary methods return copies, or `{}` when none are stored. `get_notes`
+returns `str | None`. NPDs do not currently have YAML-backed snapshot metadata,
+so these accessors are DPD-only.
 
 ### cache refresh and invalidation
 
@@ -288,12 +299,13 @@ do not store credentials, api keys, passwords, tokens, or private key material
 in YAML files. YAML config is stored in snapshot metadata and may be copied
 when caches are synced.
 
-treat `annotations`, `column_descriptions`, `source_init_args`,
+treat `annotations`, `notes`, `column_descriptions`, `source_init_args`,
 `cleaning_init_args`, and `sync_function_init_args` as non-secret configuration
-only: endpoints, timeouts, project names, table names, column blurbs, and other
-values safe to keep in metadata. DataSources, DataCleaners, and sync functions
-that need secrets should read them from environment variables or an external
-credential provider and fail clearly if a required value is missing.
+only: endpoints, timeouts, project names, table names, dataset notes, column
+blurbs, and other values safe to keep in metadata. DataSources, DataCleaners,
+and sync functions that need secrets should read them from environment
+variables or an external credential provider and fail clearly if a required
+value is missing.
 
 ```python
 import os
@@ -375,6 +387,10 @@ datasets:
 
     # optional
     row_group_size: 128000  # rows per parquet row group; lower = more metadata, faster filters
+    notes: Human-readable dataset notes stored in snapshot metadata.
+    annotations:  # optional append-only structured metadata
+      units:
+        price: USD
     column_descriptions:  # optional, stored in snapshot metadata
       instrument_id: Quiet symbology_v2 listing-level UUID.
       vendor_symbol: Vendor ticker-like symbol.
@@ -400,6 +416,8 @@ datasets:
 - **num_instrument_buckets**: if set, enables bucketing. rows are distributed across `__instrument_bucket__=0/` ... `__instrument_bucket__=N/` based on `hash(instrument_column) % num_instrument_buckets`. breakingchanges with bucketing: bucketed datasets cannot be updated without full rebuild if you change `num_instrument_buckets`.
 - **sort_columns**: affects read performance. set to frequent filter columns.
 - **repull_n_days**: useful for datasets that correct historical data (e.g. option prices). e.g., `repull_n_days: 5` means "always fetch the last 5 business days, not just new dates".
+- **annotations**: optional append-only structured metadata stored in captured YAML snapshot metadata. use `dpd.get_annotations()` to read a copy of the current or requested snapshot dictionary.
+- **notes**: optional string stored in captured YAML snapshot metadata. omitted values carry forward; explicit string updates are allowed, including `""`, but `null` is rejected. use `dpd.get_notes()` to read current or historical notes.
 - **column_descriptions**: optional `dict[str, str]` stored in captured YAML snapshot metadata. omitted values carry forward; explicit updates may add or change text, but may not remove existing keys in the same lineage. use `dpd.get_column_descriptions()` to read the current or requested snapshot dictionary.
 - **sync_function_***: optional post-sync hooks for `sync-cache push` from a local source. YAML-configured hooks currently come from DPD YAML entries. NPD sync targets are supported with the CLI `--sync-function` override. cache-local hooks load from the local source cache; remote-source post-sync is unsupported.
 ---
