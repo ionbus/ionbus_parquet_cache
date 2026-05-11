@@ -1,10 +1,16 @@
 # Local Subsetting Of Remote Datasets
 
-Status: draft proposal.
+Status: implemented for the initial DPD-only version.
 
-This document describes a future command/API for creating a local, repeatedly
-usable subset of a remote cache dataset without syncing the source parquet files
-verbatim.
+This document describes the DPD-only command/API for creating a local,
+repeatedly usable subset of a remote cache dataset without syncing the source
+parquet files verbatim.
+
+This spec extends the main parquet cache contract in
+[Parquet_Cache_Spec.md](Parquet_Cache_Spec.md). The main spec remains
+authoritative for DPD snapshot metadata, partition value behavior, provenance
+sidecars, cache discovery, and sync semantics; this document specifies the
+local-subset workflow layered on top of those rules.
 
 The initial scope is DatedParquetDataset (DPD). NPD support can follow the same
 high-level idea later, but DPD semantics are the hard part and should drive the
@@ -34,8 +40,8 @@ remote snapshot data, and publish the result into a normal local cache dataset.
 **Subset spec**: A YAML file describing one or more source datasets, destination
 datasets, snapshot selection, and filters.
 
-**Materialized subset**: A local cache dataset created from a subset spec. It is
-a normal DPD snapshot with local files and local metadata.
+**Local subset**: A local cache dataset created from a subset spec. It is a
+normal DPD snapshot with local files and local metadata.
 
 **Source snapshot**: The remote DPD snapshot suffix that was read.
 
@@ -59,10 +65,10 @@ datasets:
     instruments_file: etfs.txt
 ```
 
-Then materializes it:
+Then creates or updates the local subset:
 
 ```bash
-python -m ionbus_parquet_cache.materialize_subset etfs.subset.yaml
+python -m ionbus_parquet_cache.local_subset etfs.subset.yaml
 ```
 
 Running the same command again later should read the latest matching remote
@@ -121,15 +127,15 @@ destination:
   ~/cache/quiet-subsets/md.etfs_daily/date=2026-05-11/part_1H8R02K.parquet
 ```
 
-`1H8R02K` is the local materialized subset snapshot. `1H8Q3AZ` is recorded as
-the source snapshot.
+`1H8R02K` is the local subset snapshot. `1H8Q3AZ` is recorded as the source
+snapshot.
 
 ## Update Behavior
 
 Re-running materialization should be allowed. It means:
 
 1. Resolve the source snapshot (`latest` by default, or an explicit suffix).
-2. Load the previous local materialized snapshot, if any.
+2. Load the previous local subset snapshot, if any.
 3. Compare the previous source snapshot and subset spec hash.
 4. If neither changed, exit successfully without publishing a new snapshot
    unless `--force` is provided.
@@ -141,7 +147,7 @@ append only newly available dates or merge individual partitions. Full
 rematerialization is simpler, safer, and easier to explain. Incremental
 materialization can be added later if the use case requires it.
 
-By default, a spec materializes all dataset entries. Use `--dataset NAME` to run
+By default, a spec processes all dataset entries. Use `--dataset NAME` to run
 only one entry.
 
 ## Effective Spec Hash
@@ -226,6 +232,11 @@ If any required layout column is missing, the command should fail with a clear
 validation error. The first version should not silently add omitted layout
 columns, because that makes the output schema surprising.
 
+Required partition columns are structural. They must be available while
+materializing the subset so the destination DPD can compute its partition
+directories, but partition columns may be omitted from the physical parquet
+files according to the normal DPD layout rules.
+
 ## Subset Spec Shape
 
 Proposed top-level fields:
@@ -280,6 +291,9 @@ For each dataset entry:
 The command should never publish a destination snapshot until all destination
 data files for that snapshot have been written successfully.
 
+If a dataset entry matches zero rows, the command should fail that entry without
+publishing a destination snapshot.
+
 Publishing is atomic per dataset, not across the whole spec. If dataset A
 publishes successfully and dataset B fails, dataset A remains published, dataset
 B publishes nothing, and the command exits nonzero with per-dataset status.
@@ -295,7 +309,7 @@ Lineage should use the existing DPD lineage model where possible:
 SnapshotLineage(
     base_snapshot="<source_snapshot_suffix>",
     first_snapshot_id="<first_local_subset_snapshot_or_current>",
-    operation="materialize_subset",
+    operation="local_subset",
     requested_date_range=...,
     added_date_ranges=[...],
     rewritten_date_ranges=[...],
@@ -305,7 +319,7 @@ SnapshotLineage(
 )
 ```
 
-`materialize_subset` is a valid DPD lineage `operation` string. Any code that
+`local_subset` is a valid DPD lineage `operation` string. Any code that
 reads lineage should treat operation as an open string and handle unknown values
 without failing.
 
@@ -313,7 +327,7 @@ Because the existing lineage model only stores a snapshot suffix for
 `base_snapshot`, richer source identity should be stored in a provenance sidecar:
 
 ```yaml
-kind: materialized_subset
+kind: local_subset
 source_cache: gs://quiet-cache/prod
 source_dataset: md.equities_daily
 source_snapshot: 1H8Q3AZ
@@ -362,24 +376,20 @@ always write explicit provenance for the new local snapshot.
 Proposed command:
 
 ```bash
-python -m ionbus_parquet_cache.materialize_subset SPEC.yaml [options]
+python -m ionbus_parquet_cache.local_subset SPEC.yaml [options]
 ```
 
 Options:
 
-- `--dataset NAME`: materialize only one dataset entry from the spec.
+- `--dataset NAME`: process only one dataset entry from the spec.
 - `--source-snapshot SUFFIX`: override all `source_snapshot` entries.
 - `--force`: publish even if source snapshot and effective spec hash match the
-  latest local materialization.
+  latest local subset.
 - `--dry-run`: validate the spec, resolve source snapshots, and report planned
   actions without writing files.
-- `--skip-existing`: skip dataset entries whose latest local materialization is
-  already current for the effective spec.
 - `--count`: compute row counts during dry-run. This may scan remote data.
 - `--verbose`: print resolved source snapshots, row counts after materialization,
   and output paths.
-
-The command should fail if both `--force` and `--skip-existing` are supplied.
 
 Dry-run should be cheap by default. It should not read all matching rows just to
 produce counts. It should report:
@@ -388,7 +398,7 @@ produce counts. It should report:
 - destination dataset;
 - destination cache/path;
 - resolved source snapshot;
-- latest local materialized source snapshot, if any;
+- latest local subset source snapshot, if any;
 - effective spec hash;
 - action: `publish`, `skip`, or `error`;
 - validation errors, if any.
@@ -402,9 +412,9 @@ only when publishing.
 Proposed API:
 
 ```python
-from ionbus_parquet_cache.subset_materializer import materialize_subset
+from ionbus_parquet_cache import local_subset
 
-result = materialize_subset("etfs.subset.yaml")
+result = local_subset("etfs.subset.yaml")
 ```
 
 The returned result should include one entry per dataset:

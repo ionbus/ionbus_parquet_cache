@@ -34,6 +34,7 @@
 - [CLI Tools](#cli-tools)
     * [`update-cache`](#update-cache)
     * [`import-npd`](#import-npd)
+    * [`local-subset`](#local-subset)
     * [`cleanup-cache`](#cleanup-cache)
         * [Trimming (Dangerous Operation)](#trimming-dangerous-operation)
         * [Finding orphaned files](#finding-orphaned-files)
@@ -4272,6 +4273,40 @@ path: /path/to/cache/non-dated/ref.instrument_master/ref.instrument_master_1H4DW
 
 On dry run, the command prints the same planned destination but performs no
 copy and does not create directories.
+
+### `local-subset`
+
+Creates normal local `DatedParquetDataset` snapshots from filtered source DPD
+snapshots in another cache. The source cache may be local or remote, including
+GCS. The destination cache must be local. NPDs are intentionally out of scope
+for this command.
+
+The detailed design and acceptance rules live in
+[Local_Subsetting_Spec.md](Local_Subsetting_Spec.md). This section links the
+feature into the main cache spec and records its relationship to the base DPD
+contract.
+
+The canonical invocation is:
+
+```bash
+python -m ionbus_parquet_cache.local_subset SPEC.yaml [options]
+```
+
+The destination is a normal local DPD snapshot. It follows the same snapshot
+metadata, partition-value, provenance-sidecar, and read semantics described in
+this spec. In particular, partition columns are structural: they must be
+available while writing the subset, but normal DPD layout rules may store those
+values in directory names rather than physical parquet columns.
+
+Re-running the command is idempotent. If the latest local subset provenance
+records the same resolved source snapshot and effective subset spec hash, the
+command exits successfully without publishing a new snapshot unless `--force`
+is supplied.
+
+If a dataset entry matches zero rows, no destination snapshot is published for
+that entry. Multi-dataset specs are atomic per dataset, not across the whole
+spec: one dataset can publish while another fails, and the command exits
+nonzero if any selected dataset fails.
 
 ### `cleanup-cache`
 

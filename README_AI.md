@@ -40,6 +40,7 @@ if you are building data pipelines or need to manage versioned, partitioned parq
 | `yaml_config` | load YAML configs and create DPDs |
 | `sync_cache` | CLI tool: push/pull/sync between local and GCS |
 | `import_npd` | CLI tool: import parquet files/directories as NPD snapshots |
+| `local_subset` | CLI/API: create local DPD subsets from filtered source DPD snapshots |
 | `update-cache` | CLI tool: refresh a dataset from a DataSource |
 | `cleanup-cache` | CLI tool: remove old snapshots and trim data |
 
@@ -181,6 +182,32 @@ python -m ionbus_parquet_cache.import_npd \
     --info-file /source/instruments.info.yaml \
     --provenance-file /source/instruments.provenance.yaml
 ```
+
+for local DPD subsets of a larger source cache:
+
+```yaml
+source_cache: gs://quiet-cache/prod
+dest_cache: ~/cache/quiet-subsets
+
+datasets:
+  md.equities_daily:
+    dest_name: md.etfs_daily
+    source_snapshot: latest
+    start_date: 2020-01-01
+    instruments_file: etfs.txt
+    columns: [date, month, instrument_id, close]
+```
+
+```bash
+python -m ionbus_parquet_cache.local_subset etfs.subset.yaml
+python -m ionbus_parquet_cache.local_subset etfs.subset.yaml --dry-run --verbose
+```
+
+local subsets are DPD-only. re-running the same spec skips publishing when the
+resolved source snapshot and effective spec hash are unchanged, unless
+`--force` is supplied. projection columns must include inherited layout columns;
+partition columns are structural and may be stored in directories rather than
+inside each parquet file. zero-row subsets fail without publishing.
 
 or programmatically:
 
@@ -431,6 +458,7 @@ datasets:
 - **annotations**: optional append-only structured snapshot info. DPDs store it in captured YAML snapshot metadata; NPDs store it in the optional info sidecar. use `ds.get_annotations()` to read a copy of the current or requested snapshot dictionary.
 - **notes**: optional string snapshot info. omitted values carry forward; explicit string updates are allowed, including `""`, but `null` is rejected. use `ds.get_notes()` to read current or historical notes.
 - **column_descriptions**: optional `dict[str, str]` snapshot info. omitted values carry forward; explicit updates may add or change text, but may not remove existing keys in the same lineage. use `ds.get_column_descriptions()` to read the current or requested snapshot dictionary.
+- **local_subset**: DPD-only command/API for filtered local copies of source DPD snapshots. the destination is a normal local DPD. source caches may be local or GCS, but `dest_cache` must be local. re-runs skip when the source snapshot and effective spec hash match the latest local subset provenance.
 - **NPD info files**: `python -m ionbus_parquet_cache.import_npd --info-file path.yaml` accepts only `notes`, `annotations`, and `column_descriptions`; unknown keys are errors. `--provenance-file path.yaml` is separate explicit provenance and never carries forward.
 - **sync_function_***: optional post-sync hooks for `sync-cache push` from a local source. YAML-configured hooks currently come from DPD YAML entries. NPD sync targets are supported with the CLI `--sync-function` override. cache-local hooks load from the local source cache; remote-source post-sync is unsupported.
 ---
