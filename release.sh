@@ -3,25 +3,41 @@ set -euo pipefail
 
 ENV_NAME="pixi_313_pd22"
 RUN_ENV="${HOME}/bin/python_env_management/run_env.sh"
-MODE="${1:-all}"
+MODE="${1:-build-pip}"
 TAG_FLAG=""
 ANY_BRANCH=""
+ALLOW_DIRTY=""
 CREATED_TAG=""
+RELEASE_TAG=""
+
+usage() {
+  echo "Usage: $0 [all|build|send|build-pip|send-pip|build-conda|send-conda]"
+  echo "          [--tag] [--any-branch] [--allow-dirty]"
+  echo "  all: build and publish pip and conda artifacts"
+  echo "  build: build pip and conda artifacts locally"
+  echo "  send: upload pip and conda artifacts"
+  echo "  build-pip: build pip artifacts only"
+  echo "  send-pip: upload pip artifacts only"
+  echo "  build-conda: build conda artifacts only"
+  echo "  send-conda: upload conda artifacts only"
+  echo "  --tag: create and verify a new local git tag before running"
+  echo "  --any-branch: skip the main-branch check"
+  echo "  --allow-dirty: allow only build-conda to build a local test artifact"
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help|help) usage; exit 0 ;;
+  esac
+done
 
 for arg in "${@:2}"; do
   case "$arg" in
     --tag)        TAG_FLAG="--tag" ;;
     --any-branch) ANY_BRANCH="--any-branch" ;;
+    --allow-dirty) ALLOW_DIRTY="--allow-dirty" ;;
     *)
-      echo "Usage: $0 [all|build|send|build-pip|build-conda|send-pip|send-conda] [--tag] [--any-branch]"
-      echo "  build: build pip and conda artifacts locally"
-      echo "  send: upload pip and conda artifacts"
-      echo "  build-pip: build pip artifacts only"
-      echo "  build-conda: build conda artifacts only"
-      echo "  send-pip: upload pip artifacts only"
-      echo "  send-conda: upload conda artifacts only"
-      echo "  --tag: create and verify a new local git tag before running"
-      echo "  --any-branch: skip the main-branch check"
+      usage
       exit 2
       ;;
   esac
@@ -37,21 +53,22 @@ CONDA_BLD_DIR="$(dirname "$ROOT_DIR")/$(basename "$ROOT_DIR")_conda-bld"
 cd "$ROOT_DIR"
 
 case "$MODE" in
-  all|build|send|build-pip|build-conda|send-pip|send-conda)
+  all|build|send|build-pip|send-pip|build-conda|send-conda)
     ;;
   *)
-    echo "Usage: $0 [all|build|send|build-pip|build-conda|send-pip|send-conda] [--tag] [--any-branch]"
-    echo "  build: build pip and conda artifacts locally"
-    echo "  send: upload pip and conda artifacts"
-    echo "  build-pip: build pip artifacts only"
-    echo "  build-conda: build conda artifacts only"
-    echo "  send-pip: upload pip artifacts only"
-    echo "  send-conda: upload conda artifacts only"
-    echo "  --tag: create and verify a new local git tag before running"
-    echo "  --any-branch: skip the main-branch check"
+    usage
     exit 2
     ;;
 esac
+
+if [[ -n "$ALLOW_DIRTY" && "$MODE" != "build-conda" ]]; then
+  echo "ERROR: --allow-dirty is only supported with build-conda." >&2
+  exit 2
+fi
+if [[ -n "$ALLOW_DIRTY" && -n "$TAG_FLAG" ]]; then
+  echo "ERROR: --allow-dirty cannot be combined with --tag." >&2
+  exit 2
+fi
 
 verify_main_branch() {
   local branch
@@ -73,6 +90,14 @@ verify_head_tag() {
   fi
   if [[ -n "$expected_tag" && "$current_tag" != "$expected_tag" ]]; then
     echo "ERROR: expected HEAD tag '$expected_tag' but found '$current_tag'"
+    exit 1
+  fi
+}
+
+verify_clean_tree() {
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "ERROR: release requires a clean git tree." >&2
+    git status --short >&2
     exit 1
   fi
 }
@@ -234,20 +259,23 @@ cleanup_conda_artifacts() {
   rm -rf "$CONDA_BLD_DIR"
 }
 
-ensure_tag_context() {
-  local tag
-
+ensure_release_context() {
+  if [[ -z "$ALLOW_DIRTY" ]]; then
+    verify_clean_tree
+  else
+    echo "WARNING: building local conda test artifact from a dirty tree." >&2
+  fi
   verify_head_tag
-  tag="$(git describe --tags --exact-match)"
-  export GIT_DESCRIBE_TAG="$tag"
-  printf '%s\n' "$tag"
+  RELEASE_TAG="$(git describe --tags --exact-match)"
+  export GIT_DESCRIBE_TAG="$RELEASE_TAG"
 }
 
 build_pip_artifacts() {
   local tag
 
   cleanup_pip_artifacts
-  tag="$(ensure_tag_context)"
+  ensure_release_context
+  tag="$RELEASE_TAG"
 
   if "$RUN_ENV" "$ENV_NAME" python -c "import build" >/dev/null 2>&1; then
     if ! "$RUN_ENV" "$ENV_NAME" python -m build --no-isolation --skip-dependency-check; then
@@ -272,7 +300,8 @@ build_conda_artifacts() {
   local tag conda_build_exe conda_output_path
 
   cleanup_conda_artifacts
-  tag="$(ensure_tag_context)"
+  ensure_release_context
+  tag="$RELEASE_TAG"
   export GIT_DESCRIBE_TAG="$tag"
 
   conda_build_exe="$(get_conda_build_exe)"
@@ -292,7 +321,8 @@ build_conda_artifacts() {
 send_pip_artifacts() {
   local tag
 
-  tag="$(ensure_tag_context)"
+  ensure_release_context
+  tag="$RELEASE_TAG"
   verify_dist_artifacts "$tag"
   verify_built_package_versions "$tag"
 
@@ -302,7 +332,8 @@ send_pip_artifacts() {
 send_conda_artifacts() {
   local tag conda_output_path anaconda_exe
 
-  tag="$(ensure_tag_context)"
+  ensure_release_context
+  tag="$RELEASE_TAG"
   conda_output_path="$(get_conda_output_path)"
   if [[ ! -f "$conda_output_path" ]]; then
     echo "ERROR: expected conda artifact is missing: $conda_output_path"
@@ -314,14 +345,11 @@ send_conda_artifacts() {
 }
 
 build_release() {
-  local tag
-
   build_pip_artifacts
   build_conda_artifacts
-  tag="$(ensure_tag_context)"
 
   echo
-  echo "Version/tag used: $tag"
+  echo "Version/tag used: $RELEASE_TAG"
 }
 
 send_release() {

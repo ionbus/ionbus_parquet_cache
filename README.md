@@ -56,6 +56,7 @@
 - [CLI Tools](#cli-tools)
    * [yaml-create-datasets](#yaml-create-datasets)
    * [update-cache](#update-cache)
+   * [local-subset](#local-subset)
    * [import-npd](#import-npd)
    * [cleanup-cache](#cleanup-cache)
    * [sync-cache](#sync-cache)
@@ -70,7 +71,6 @@
    * [Discovering available datasets](#discovering-available-datasets)
 
 <!-- TOC end -->
-
 
 A Python library for managing versioned Parquet datasets with automatic date partitioning, snapshot versioning, and multi-cache support.
 
@@ -1395,6 +1395,53 @@ python -m ionbus_parquet_cache.update_datasets /path/to/cache \
 # Preview without making changes
 python -m ionbus_parquet_cache.update_datasets /path/to/cache --dry-run --verbose
 ```
+
+### local-subset
+
+Create a normal local `DatedParquetDataset` snapshot from a filtered source DPD
+snapshot in another cache. The source cache may be local or GCS; the destination
+cache must be local. NPDs are not supported by this command.
+
+```yaml
+source_cache: gs://quiet-cache/prod
+dest_cache: ~/cache/quiet-subsets
+
+datasets:
+  md.equities_daily:
+    dest_name: md.etfs_daily
+    source_snapshot: latest
+    start_date: 2020-01-01
+    instruments_file: etfs.txt
+    columns: [date, month, instrument_id, close]
+```
+
+```bash
+# Create or update all local subsets in the spec
+python -m ionbus_parquet_cache.local_subset etfs.subset.yaml
+
+# Preview actions without writing
+python -m ionbus_parquet_cache.local_subset etfs.subset.yaml --dry-run --verbose
+
+# Process one dataset entry
+python -m ionbus_parquet_cache.local_subset etfs.subset.yaml \
+    --dataset md.equities_daily
+```
+
+Re-running the same spec is idempotent: if the resolved source snapshot and
+effective spec hash match the latest local subset provenance, the command skips
+publishing a new snapshot unless `--force` is supplied. The effective hash uses
+the normalized contents of `instruments_file`, so changing that file changes the
+planned local subset even when the path stays the same.
+
+Column projections must include the inherited DPD layout columns: `date_col`,
+`partition_columns`, `instrument_column` when configured, and `sort_columns`.
+The destination keeps the source layout, including date partitioning, instrument
+bucketing, sort columns, and row group size.
+
+Partition columns are structural: they must be available during
+materialization, but normal DPD layout rules may store them in directory names
+rather than in each parquet file. If a subset matches zero rows, no destination
+snapshot is published.
 
 ### import-npd
 

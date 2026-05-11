@@ -79,14 +79,16 @@ Combined modes:
 Single-target modes:
 
 - `./release.sh build-pip` builds only the pip artifacts
-- `./release.sh build-conda` builds only the conda artifacts
 - `./release.sh send-pip` uploads only the pip artifacts
+- `./release.sh build-conda` builds only the conda artifacts
 - `./release.sh send-conda` uploads only the conda artifacts
 
-Any of the build modes can also be combined with `--tag` and/or `--any-branch`:
+Flags:
 
 - `--tag` creates the next local tag before building
 - `--any-branch` skips the `main`-branch check (use sparingly)
+- `--allow-dirty` is only accepted with `build-conda`, for local conda
+  package experiments from a dirty tree
 
 ## Build only
 
@@ -128,7 +130,7 @@ PyPI uploads use your local PyPI credentials, for example through `~/.pypirc`.
 You can also upload only the pip artifacts directly with:
 
 ```bash
-~/bin/python_env_management/run_env.sh pixi_313_pd22 python -m twine upload dist/*
+~/bin/python_env_management/run_env.sh pixi_313_pd22 python3 -m twine upload dist/*
 ```
 
 ## Anaconda.org setup

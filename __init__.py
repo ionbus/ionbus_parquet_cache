@@ -11,6 +11,8 @@ This package provides:
 
 from __future__ import annotations
 
+from typing import Any
+
 from ionbus_parquet_cache.exceptions import (
     ParquetCacheError,
     SchemaMismatchError,
@@ -78,6 +80,21 @@ try:
 except ImportError:
     __version__ = "unknown"
 
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose local subset APIs without preloading the CLI module."""
+    if name in {"LocalSubsetResult", "local_subset"}:
+        from ionbus_parquet_cache.local_subset import (
+            LocalSubsetResult,
+            local_subset,
+        )
+
+        globals()["LocalSubsetResult"] = LocalSubsetResult
+        globals()["local_subset"] = local_subset
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     # Exceptions
     "ParquetCacheError",
@@ -136,4 +153,7 @@ __all__ = [
     # Bucketing utilities
     "instrument_bucket",
     "bucket_instruments",
+    # Local subsets
+    "LocalSubsetResult",
+    "local_subset",
 ]
