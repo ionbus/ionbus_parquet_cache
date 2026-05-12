@@ -102,6 +102,32 @@ class TestCleaner(DataCleaner):
     return cleaner_path
 
 
+@pytest.fixture
+def sample_cleaner_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """Create an importable module with sample DataCleaner classes."""
+    module_content = '''
+from __future__ import annotations
+from ionbus_parquet_cache.data_cleaner import DataCleaner
+
+
+class ModuleCleaner(DataCleaner):
+    """Test data cleaner loaded from an importable module."""
+
+    def __call__(self, rel):
+        return rel
+
+
+class NotCleaner:
+    """Class that deliberately does not inherit from DataCleaner."""
+'''
+    module_path = tmp_path / "module_cleaners.py"
+    module_path.write_text(module_content)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return "module_cleaners"
+
+
 class TestLoadYamlFile:
     """Tests for load_yaml_file()."""
 
@@ -534,6 +560,121 @@ datasets:
         assert isinstance(cleaner, DataCleaner)
         assert cleaner.min_price == 1.5
 
+    def test_load_cleaner_class_from_module(
+        self, temp_cache: Path, sample_cleaner_module: str
+    ) -> None:
+        """Should load DataCleaner class from an importable module."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            cleaning_class_location=f"module://{sample_cleaner_module}",
+            cleaning_class_name="ModuleCleaner",
+        )
+
+        cleaner_class = config.load_cleaner_class()
+
+        assert cleaner_class is not None
+        assert issubclass(cleaner_class, DataCleaner)
+        assert cleaner_class.__name__ == "ModuleCleaner"
+
+    def test_create_cleaner_from_module(
+        self, temp_cache: Path, sample_cleaner_module: str
+    ) -> None:
+        """Should create a DataCleaner instance from module:// config."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            cleaning_class_location=f"module://{sample_cleaner_module}",
+            cleaning_class_name="ModuleCleaner",
+            cleaning_init_args={"min_price": 1.5},
+        )
+
+        cleaner = config.create_cleaner(config.to_dpd())
+
+        assert cleaner is not None
+        assert isinstance(cleaner, DataCleaner)
+        assert cleaner.min_price == 1.5
+
+    def test_module_cleaner_class_not_found(
+        self, temp_cache: Path, sample_cleaner_module: str
+    ) -> None:
+        """Should raise ConfigurationError if cleaner class is missing."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            cleaning_class_location=f"module://{sample_cleaner_module}",
+            cleaning_class_name="MissingCleaner",
+        )
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            config.load_cleaner_class()
+        assert "not found in module" in str(exc_info.value)
+
+    def test_module_cleaner_module_not_found(self, temp_cache: Path) -> None:
+        """Should raise ConfigurationError if cleaner module is missing."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            cleaning_class_location="module://missing_cleaner_package.cleaners",
+            cleaning_class_name="ModuleCleaner",
+        )
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            config.load_cleaner_class()
+        assert "Could not import module" in str(exc_info.value)
+
+    def test_module_cleaner_wrong_base(
+        self, temp_cache: Path, sample_cleaner_module: str
+    ) -> None:
+        """Should raise ConfigurationError if class is not a DataCleaner."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            cleaning_class_location=f"module://{sample_cleaner_module}",
+            cleaning_class_name="NotCleaner",
+        )
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            config.load_cleaner_class()
+        assert "must inherit from DataCleaner" in str(exc_info.value)
+
+    def test_cleaner_name_without_location_raises(
+        self, temp_cache: Path
+    ) -> None:
+        """Cleaner class names should not fall back to built-ins."""
+        config = DatasetConfig(
+            name="test",
+            cache_dir=temp_cache,
+            cleaning_class_name="ModuleCleaner",
+        )
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            config.load_cleaner_class()
+        assert "cleaning_class_location" in str(exc_info.value)
+
+    def test_cleaner_name_with_empty_location_raises(
+        self, temp_cache: Path
+    ) -> None:
+        """An empty cleaner location should not fall back to built-ins."""
+        yaml_content = """
+datasets:
+    cleaned_data:
+        date_col: Date
+        source_class_name: SomeSource
+        cleaning_class_location: ""
+        cleaning_class_name: ModuleCleaner
+"""
+        (temp_cache / "yaml" / "empty_cleaner_location.yaml").write_text(
+            yaml_content
+        )
+
+        config = get_dataset_config(temp_cache, "cleaned_data")
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            config.load_cleaner_class()
+        assert config.cleaning_class_location == ""
+        assert "cleaning_class_location" in str(exc_info.value)
+
     def test_no_cleaner_returns_none(
         self, temp_cache: Path, sample_yaml: Path
     ) -> None:
@@ -892,3 +1033,40 @@ class TestInstalledModuleDataSource:
             source.__class__.__module__
             == "ionbus_parquet_cache.builtin_sources"
         )
+
+
+class TestInstalledModuleDataCleaner:
+    """Tests for loading DataCleaner from installed modules via module://."""
+
+    def test_create_cleaner_from_metadata_with_module(
+        self, temp_cache: Path, sample_cleaner_module: str
+    ) -> None:
+        """Should load DataCleaner from metadata with module:// location."""
+        import pyarrow as pa
+
+        from ionbus_parquet_cache.dated_dataset import SnapshotMetadata
+
+        dpd = DatedParquetDataset(
+            name="test.dataset",
+            cache_dir=temp_cache,
+            date_col="date",
+            partition_columns=[],
+        )
+        dpd._metadata = SnapshotMetadata(
+            name="test.dataset",
+            suffix="0000001",
+            schema=pa.schema([]),
+            files=[],
+            yaml_config={
+                "cleaning_class_location": f"module://{sample_cleaner_module}",
+                "cleaning_class_name": "ModuleCleaner",
+                "cleaning_init_args": {"min_price": 2.5},
+            },
+        )
+
+        cleaner = dpd.create_cleaner_from_metadata()
+
+        assert cleaner is not None
+        assert isinstance(cleaner, DataCleaner)
+        assert cleaner.__class__.__name__ == "ModuleCleaner"
+        assert cleaner.min_price == 2.5

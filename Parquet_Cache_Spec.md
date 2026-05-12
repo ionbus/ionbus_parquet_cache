@@ -26,6 +26,7 @@
 - [Data Cleaner Interface](#data-cleaner-interface)
     * [`DataCleaner` abstract class](#datacleaner-abstract-class)
     * [Implementing a `DataCleaner`](#implementing-a-datacleaner)
+    * [Installed Module Data Cleaners](#installed-module-data-cleaners)
 - [Schema Management](#schema-management)
 - [Reading Data](#reading-data)
 - [Updating Data](#updating-data)
@@ -185,9 +186,11 @@ Failure behavior:
 The cache is a directory containing:
 - A `yaml/` subdirectory with YAML files describing `DatedParquetDataset`s
   (one or more DPDs per file)
-- A `code/` subdirectory with cache-local `DataSource` implementations
-  (custom Python files); built-in sources and installed package sources are
-  referenced separately (see [Data Source Interface](#data-source-interface))
+- A `code/` subdirectory with cache-local `DataSource`, `DataCleaner`, and
+  sync-function implementations (custom Python files); built-in sources and
+  installed package modules are referenced separately (see
+  [Data Source Interface](#data-source-interface) and
+  [Data Cleaner Interface](#data-cleaner-interface))
 - A `non-dated/` subdirectory for `NonDatedParquetDataset` snapshots
 - One data subdirectory per `DatedParquetDataset`
 
@@ -268,8 +271,10 @@ The cache is loaded by pointing to the cache root directory.
   are needed to read NPD data or snapshot info.
 - **yaml/ files:** Only needed when updating data. They define the
   `DataSource` class and configuration for how to fetch new data.
-- **code/ files:** Only needed when updating data. They contain the
-  `DataSource` implementations referenced by yaml files.
+- **code/ files:** Only needed when updating data with cache-local code. They
+  contain `DataSource`, `DataCleaner`, and sync-function implementations
+  referenced by yaml files. Equivalent shared implementations can live in
+  installed/importable modules and be referenced with `module://`.
 
 This means a synced cache (data + snapshot metadata, plus any referenced
 provenance sidecars) is fully readable without the yaml/ or code/ directories.
@@ -305,6 +310,11 @@ The `source_location` field in YAML supports three modes:
   an installed Python package)
 - **Cache-local source (file path):** Relative to cache root
   (e.g., `code/futures_source.py`, recommended) or absolute path
+
+The `cleaning_class_location` field uses the same installed-module or file-path
+resolution for `DataCleaner` classes, except there is no built-in cleaner
+namespace: if `cleaning_class_name` is set, `cleaning_class_location` must be a
+cache-local/absolute Python file or a `module://` import path.
 
 See [YAML fields](#yaml-fields) for details.
 
@@ -1201,8 +1211,8 @@ class FuturesDataCleaner(DataCleaner):
 | `dropna_columns` | `list[str]` | `[]` | Drop rows where any of these columns are null |
 | `dedup_columns` | `list[str]` | `[]` | Columns to use as keys for deduplication |
 | `dedup_keep` | `str` | `"last"` | Which duplicate to keep: `"first"` or `"last"` |
-| `cleaning_class_location` | `str` | `None` | Path to Python file with `DataCleaner` subclass (relative to cache root or absolute) |
-| `cleaning_class_name` | `str` | `None` | Name of the `DataCleaner` subclass in `cleaning_class_location` |
+| `cleaning_class_location` | `str` | `None` | Location of the optional `DataCleaner` subclass. If `cleaning_class_name` is unset, no cleaner is used. If `cleaning_class_name` is set, this is required and may be `module://pkg.mod` for an installed/importable module, or a cache-local/absolute Python file path such as `cleaning/equity_cleaning.py`. Empty/blank does not resolve to a built-in cleaner. |
+| `cleaning_class_name` | `str` | `None` | Name of the `DataCleaner` subclass in `cleaning_class_location`. The class must inherit from `DataCleaner`. |
 | `cleaning_init_args` | `dict` | `{}` | Non-secret arguments passed to the `DataCleaner` constructor as `**kwargs` |
 
 **User annotations:**
@@ -2476,11 +2486,11 @@ class ExternalDataSource(DataSource):
         pass
 ```
 
-**Scope note:**
+**Shared module-location syntax:**
 
 The `module://` prefix applies to `source_location` for `DataSource` classes
-and to `sync_function_location` for post-sync functions. The mechanism could
-be extended to `cleaning_class_location` in the future if needed.
+and to `cleaning_class_location` for `DataCleaner` classes. It is also used by
+`sync_function_location` for post-sync functions.
 
 ---
 
@@ -2698,6 +2708,27 @@ datasets:
             expiry_buffer_days: 3
             add_roll_indicator: true
 ```
+
+### Installed Module Data Cleaners
+
+`cleaning_class_location` may reference an installed/importable module:
+
+```yaml
+datasets:
+    md.futures_daily:
+        source_location: code/futures_source.py
+        source_class_name: FuturesSource
+
+        cleaning_class_location: module://my_library.cleaners
+        cleaning_class_name: FuturesDataCleaner
+        cleaning_init_args:
+            expiry_buffer_days: 3
+```
+
+When `module://` is used, the value after the prefix must be an importable
+Python module path, not the distribution name. The cleaner class must be
+available from that module via `getattr(module, cleaning_class_name)` and must
+inherit from `DataCleaner`.
 
 ---
 
@@ -3884,10 +3915,11 @@ and explicit column-description additions or text edits. The top-level snapshot
 sync.
 
 **Note:** The metadata contains the configuration for reference, but may
-not be sufficient to re-run the update if the Python source files
-(`source_location`, `cleaning_class_location`) or installed packages/modules
-are not available. It serves as an audit trail showing exactly how the data
-was processed.
+not be sufficient to re-run the update, or to run configured post-sync hooks,
+if the code referenced by `source_location`, `cleaning_class_location`, or
+`sync_function_location` is not available, whether that code lives in
+cache-local Python files or external `module://` modules. It serves as an
+audit trail showing exactly how the data was processed.
 
 **Snapshot selection:**
 

@@ -928,8 +928,7 @@ class DatedParquetDataset(ParquetDataset):
             SnapshotNotFoundError: If no metadata exists.
             ConfigurationError: If cleaner class cannot be loaded.
         """
-        from ionbus_parquet_cache.data_cleaner import DataCleaner
-        from ionbus_parquet_cache.yaml_config import _load_class_from_file
+        from ionbus_parquet_cache.yaml_config import _resolve_cleaner_class
 
         if self._metadata is None:
             self._metadata = self._load_metadata()
@@ -942,20 +941,10 @@ class DatedParquetDataset(ParquetDataset):
         if not cleaner_class_name:
             return None
 
-        if not cleaner_location:
-            # No built-in cleaners, so location is required
-            from ionbus_parquet_cache.exceptions import ConfigurationError
-
-            raise ConfigurationError(
-                f"Dataset '{self.name}' has cleaning_class_name but no "
-                "cleaning_class_location"
-            )
-
-        cleaner_path = self.cache_dir / cleaner_location
-        cleaner_class = _load_class_from_file(
-            cleaner_path,
+        cleaner_class = _resolve_cleaner_class(
+            cleaner_location,
             cleaner_class_name,
-            DataCleaner,
+            self.cache_dir,
             f"Dataset '{self.name}'",
         )
 

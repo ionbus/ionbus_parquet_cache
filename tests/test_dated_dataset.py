@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pyarrow as pa
@@ -16,6 +17,7 @@ from ionbus_parquet_cache.dated_dataset import (
     SnapshotMetadata,
 )
 from ionbus_parquet_cache.exceptions import (
+    ConfigurationError,
     SnapshotNotFoundError,
     SnapshotPublishError,
     ValidationError,
@@ -1102,6 +1104,83 @@ class TestCreateSourceFromMetadata:
 
         transforms = dpd.get_transforms_from_metadata()
         assert transforms is None
+
+
+class TestCreateCleanerFromMetadata:
+    """Tests for creating cleaners from stored metadata."""
+
+    def _publish_config(
+        self,
+        temp_cache: Path,
+        yaml_config: dict[str, Any],
+    ) -> DatedParquetDataset:
+        """Create a DPD with one metadata snapshot containing yaml_config."""
+        dpd = DatedParquetDataset(
+            cache_dir=temp_cache,
+            name="test",
+            date_col="Date",
+            date_partition="month",
+        )
+        schema = pa.schema([("Date", pa.date32())])
+        file_metadata = FileMetadata(
+            path="f.parquet",
+            partition_values={},
+            checksum="dummy",
+            size_bytes=512,
+        )
+        dpd._publish_snapshot(
+            files=[file_metadata],
+            schema=schema,
+            yaml_config=yaml_config,
+        )
+        return dpd
+
+    def test_create_cleaner_from_metadata_with_module(
+        self, temp_cache: Path
+    ) -> None:
+        """Should create cleaner from module:// metadata."""
+        yaml_config = {
+            "date_col": "Date",
+            "cleaning_class_location": (
+                "module://ionbus_parquet_cache.data_cleaner"
+            ),
+            "cleaning_class_name": "NoOpCleaner",
+            "cleaning_init_args": {"marker": "kept"},
+        }
+        dpd = self._publish_config(temp_cache, yaml_config)
+
+        cleaner = dpd.create_cleaner_from_metadata()
+
+        from ionbus_parquet_cache.data_cleaner import NoOpCleaner
+
+        assert isinstance(cleaner, NoOpCleaner)
+        assert cleaner.dataset is dpd
+        assert cleaner.marker == "kept"
+
+    def test_create_cleaner_returns_none_without_cleaner_name(
+        self, temp_cache: Path
+    ) -> None:
+        """Should return None when metadata has no cleaner configured."""
+        dpd = self._publish_config(temp_cache, {"date_col": "Date"})
+
+        assert dpd.create_cleaner_from_metadata() is None
+
+    def test_create_cleaner_missing_location_raises(
+        self, temp_cache: Path
+    ) -> None:
+        """Should raise when cleaner name lacks a location."""
+        dpd = self._publish_config(
+            temp_cache,
+            {
+                "date_col": "Date",
+                "cleaning_class_name": "NoOpCleaner",
+            },
+        )
+
+        with pytest.raises(
+            ConfigurationError, match="cleaning_class_location"
+        ):
+            dpd.create_cleaner_from_metadata()
 
 
 class TestBackfillValidation:

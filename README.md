@@ -1085,8 +1085,8 @@ NPDs store them in the optional NPD info sidecar.
 | `dropna_columns` | `list[str]` | `[]` | Drop rows where any of these columns are null |
 | `dedup_columns` | `list[str]` | `[]` | Columns to deduplicate on |
 | `dedup_keep` | `str` | `"last"` | Which duplicate to keep: `"first"` or `"last"` |
-| `cleaning_class_location` | `str` | `None` | Path to Python file with DataCleaner class |
-| `cleaning_class_name` | `str` | `None` | Name of the DataCleaner class |
+| `cleaning_class_location` | `str` | `None` | Location of DataCleaner class: `code/file.py` for cache-local file or `module://pkg.mod` for installed package. Required when `cleaning_class_name` is set; blank does not resolve to a built-in cleaner. |
+| `cleaning_class_name` | `str` | `None` | Name of the DataCleaner class; must inherit from `DataCleaner` |
 | `cleaning_init_args` | `dict` | `{}` | Non-secret arguments passed to DataCleaner constructor |
 
 ## Data Cleaning
@@ -1119,6 +1119,21 @@ datasets:
     cleaning_init_args:
       min_price: 1.0
 ```
+
+You can also package cleaners in installed modules and reference them with
+`module://`:
+
+```yaml
+datasets:
+  md.equity_daily:
+    # ... other config ...
+    cleaning_class_location: module://my_library.cleaners
+    cleaning_class_name: PriceDataCleaner
+    cleaning_init_args:
+      min_price: 1.0
+```
+
+Use the importable module path, not the package distribution name.
 
 ## Instrument Hash Bucketing
 

@@ -198,6 +198,11 @@ class DatasetConfig:
         """
         Dynamically load the DataCleaner class if configured.
 
+        Resolution order:
+        1. If cleaning_class_name is empty, return None
+        2. If cleaning_class_location starts with 'module://', load from module
+        3. Otherwise, load from file path (relative to cache root or absolute)
+
         Returns:
             The DataCleaner subclass, or None if not configured.
 
@@ -207,21 +212,12 @@ class DatasetConfig:
         if not self.cleaning_class_name:
             return None
 
-        if not self.cleaning_class_location:
-            raise ConfigurationError(
-                f"Dataset '{self.name}' has cleaning_class_name but no "
-                f"cleaning_class_location",
-                config_file=str(self.cache_dir / "yaml"),
-            )
-
-        cleaner_path = _resolve_path(
-            self.cache_dir, self.cleaning_class_location
-        )
-        return _load_class_from_file(
-            cleaner_path,
+        return _resolve_cleaner_class(
+            self.cleaning_class_location,
             self.cleaning_class_name,
-            DataCleaner,
+            self.cache_dir,
             f"Dataset '{self.name}'",
+            config_file=str(self.cache_dir / "yaml"),
         )
 
     def create_cleaner(
@@ -523,6 +519,56 @@ def _resolve_source_class(
     )
 
 
+def _resolve_cleaner_class(
+    cleaning_class_location: str | None,
+    cleaning_class_name: str,
+    cache_dir: Path,
+    context: str,
+    config_file: str | None = None,
+) -> type["DataCleaner"]:
+    """
+    Resolve and load a DataCleaner class from cleaning_class_location.
+
+    Args:
+        cleaning_class_location: "module://..." or file path. Required when
+            cleaning_class_name is configured; blank does not imply built-in.
+        cleaning_class_name: Name of the DataCleaner class to load.
+        cache_dir: Root cache directory (for resolving relative paths).
+        context: Context string for error messages.
+        config_file: Optional config path to attach to ConfigurationError.
+
+    Returns:
+        The DataCleaner subclass.
+
+    Raises:
+        ConfigurationError: If the class cannot be loaded.
+    """
+    if not cleaning_class_location:
+        raise ConfigurationError(
+            f"{context} has cleaning_class_name but no "
+            "cleaning_class_location",
+            config_file=config_file,
+        )
+
+    if cleaning_class_location.startswith("module://"):
+        module_path = cleaning_class_location[len("module://") :]
+        return _load_class_from_module(
+            module_path,
+            cleaning_class_name,
+            DataCleaner,
+            "DataCleaner",
+            context,
+        )
+
+    cleaner_path = _resolve_path(cache_dir, cleaning_class_location)
+    return _load_class_from_file(
+        cleaner_path,
+        cleaning_class_name,
+        DataCleaner,
+        context,
+    )
+
+
 def _load_installed_module_source(
     module_path: str,
     class_name: str,
@@ -542,6 +588,39 @@ def _load_installed_module_source(
     Raises:
         ConfigurationError: If the module cannot be imported, the class is
             not found, is nested, or does not inherit from DataSource.
+    """
+    return _load_class_from_module(
+        module_path,
+        class_name,
+        DataSource,
+        "DataSource or BucketedDataSource",
+        context,
+    )
+
+
+def _load_class_from_module(
+    module_path: str,
+    class_name: str,
+    base_class: type,
+    base_class_description: str,
+    context: str,
+) -> type:
+    """
+    Load and validate a class from an installed/importable Python module.
+
+    Args:
+        module_path: Importable module path (e.g., 'my_library.data_sources').
+        class_name: Name of the class in that module.
+        base_class: Expected base class.
+        base_class_description: Human-readable base class name for errors.
+        context: Context string for error messages.
+
+    Returns:
+        The loaded class.
+
+    Raises:
+        ConfigurationError: If the module cannot be imported, the class is
+            not found, is nested, or does not inherit from base_class.
     """
     try:
         module = importlib.import_module(module_path)
@@ -569,11 +648,10 @@ def _load_installed_module_source(
             f"class",
         )
 
-    # Validate: must inherit from DataSource or BucketedDataSource
-    if not issubclass(cls, DataSource):
+    if not issubclass(cls, base_class):
         raise ConfigurationError(
-            f"{context}: Class '{class_name}' must inherit from DataSource "
-            f"or BucketedDataSource",
+            f"{context}: Class '{class_name}' must inherit from "
+            f"{base_class_description}",
         )
 
     return cls

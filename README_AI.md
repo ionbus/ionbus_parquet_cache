@@ -379,6 +379,25 @@ requirements:
 - class must be obtainable via `getattr(module, class_name)` (top-level or re-exported)
 - see [credentials and secrets](#credentials-and-secrets) for secret handling
 
+### packaging data cleaners in installed packages
+
+`cleaning_class_location` supports the same `module://` import-path syntax for
+`DataCleaner` classes. There is no built-in cleaner namespace, so
+`cleaning_class_location` is required whenever `cleaning_class_name` is set.
+
+```yaml
+cleaning_class_location: module://my_library.cleaners
+cleaning_class_name: MyCleaner
+cleaning_init_args:
+  min_price: 1.0
+```
+
+requirements:
+- class must inherit from `DataCleaner`
+- import path must match the installed package's importable module path, not the distribution name
+- class must be obtainable via `getattr(module, class_name)` (top-level or re-exported)
+- cache-local file paths such as `code/my_cleaner.py` remain supported
+
 ## post-sync operations
 
 sync functions are optional hooks for work that should happen after
@@ -415,6 +434,12 @@ datasets:
     source_class_name: MyDataSource  # must inherit from DataSource
     source_init_args:  # kwargs passed to __init__
       api_endpoint: https://api.example.com
+
+    # optional data cleaner
+    cleaning_class_location: code/my_cleaner.py  # or module://pkg.mod; no built-in cleaner namespace
+    cleaning_class_name: MyCleaner
+    cleaning_init_args:
+      min_price: 1.0
 
     # optional post-sync function (runs only when sync-cache requests it)
     sync_function_location: code/sync_functions.py  # or module://pkg.mod
