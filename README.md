@@ -1415,6 +1415,14 @@ datasets:
     columns: [date, month, instrument_id, close]
 ```
 
+`dest_name` can differ from the source dataset name. As a standard pattern, use
+a subset-specific local name such as `md.etfs_daily` or
+`md.equities_daily.subset.etfs`; that keeps the complete remote dataset
+available under its real name and makes local subset reads explicit. Reusing the
+source dataset name is allowed when the source and destination caches differ,
+and is useful when you intentionally want the local cache to shadow the remote
+cache in registry lookup order.
+
 ```bash
 # Create or update all local subsets in the spec
 python -m ionbus_parquet_cache.local_subset etfs.subset.yaml

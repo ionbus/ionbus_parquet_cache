@@ -198,6 +198,11 @@ datasets:
     columns: [date, month, instrument_id, close]
 ```
 
+prefer subset-specific `dest_name` values such as `md.etfs_daily` or
+`md.equities_daily.subset.etfs` for normal local subsets. reusing the source
+dataset name is allowed only across different source/destination caches and is
+best reserved for intentional local-cache shadowing of the remote dataset name.
+
 ```bash
 python -m ionbus_parquet_cache.local_subset etfs.subset.yaml
 python -m ionbus_parquet_cache.local_subset etfs.subset.yaml --dry-run --verbose
@@ -458,7 +463,7 @@ datasets:
 - **annotations**: optional append-only structured snapshot info. DPDs store it in captured YAML snapshot metadata; NPDs store it in the optional info sidecar. use `ds.get_annotations()` to read a copy of the current or requested snapshot dictionary.
 - **notes**: optional string snapshot info. omitted values carry forward; explicit string updates are allowed, including `""`, but `null` is rejected. use `ds.get_notes()` to read current or historical notes.
 - **column_descriptions**: optional `dict[str, str]` snapshot info. omitted values carry forward; explicit updates may add or change text, but may not remove existing keys in the same lineage. use `ds.get_column_descriptions()` to read the current or requested snapshot dictionary.
-- **local_subset**: DPD-only command/API for filtered local copies of source DPD snapshots. the destination is a normal local DPD. source caches may be local or GCS, but `dest_cache` must be local. re-runs skip when the source snapshot and effective spec hash match the latest local subset provenance.
+- **local_subset**: DPD-only command/API for filtered local copies of source DPD snapshots. the destination is a normal local DPD. source caches may be local or GCS, but `dest_cache` must be local. prefer subset-specific destination names unless intentionally shadowing the remote dataset name. re-runs skip when the source snapshot and effective spec hash match the latest local subset provenance.
 - **NPD info files**: `python -m ionbus_parquet_cache.import_npd --info-file path.yaml` accepts only `notes`, `annotations`, and `column_descriptions`; unknown keys are errors. `--provenance-file path.yaml` is separate explicit provenance and never carries forward.
 - **sync_function_***: optional post-sync hooks for `sync-cache push` from a local source. YAML-configured hooks currently come from DPD YAML entries. NPD sync targets are supported with the CLI `--sync-function` override. cache-local hooks load from the local source cache; remote-source post-sync is unsupported.
 ---

@@ -4298,6 +4298,13 @@ this spec. In particular, partition columns are structural: they must be
 available while writing the subset, but normal DPD layout rules may store those
 values in directory names rather than physical parquet columns.
 
+The destination dataset name is chosen by the subset spec. The recommended
+standard pattern is to use a subset-specific destination name so the complete
+remote dataset keeps its real name and the local subset is explicit. Reusing
+the source dataset name is allowed only when the source and destination caches
+are different, and is mainly useful when the local cache should intentionally
+shadow the remote cache in registry lookup order.
+
 Re-running the command is idempotent. If the latest local subset provenance
 records the same resolved source snapshot and effective subset spec hash, the
 command exits successfully without publishing a new snapshot unless `--force`

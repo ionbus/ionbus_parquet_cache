@@ -100,9 +100,18 @@ destination inherits `sort_columns` from the source snapshot metadata, and the
 materializer is responsible for writing the local files in a way that preserves
 the destination DPD's expected sort behavior.
 
-The destination dataset may use a different dataset name. If the destination
-cache is the same as the source cache, the destination name must be different
-from the source name.
+The destination dataset may use a different dataset name. This should be the
+standard operating pattern for most local subsets: keep the remote dataset's
+"real" name for the complete source dataset and give the local subset an
+explicit subset name, such as `md.etfs_daily` or
+`md.equities_daily.subset.etfs`.
+
+Using the source dataset name for the destination is allowed when the source and
+destination caches are different. That can be useful when a local cache should
+shadow the remote cache in registry lookup order and callers can still target
+the remote cache explicitly by cache name. If the destination cache is the same
+as the source cache, the destination name must be different from the source
+name.
 
 ## Snapshot Identity
 
