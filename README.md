@@ -1077,6 +1077,8 @@ NPDs store them in the optional NPD info sidecar.
 | `source_location` | `str` | `""` | Location of DataSource class: empty for built-in sources, `code/file.py` for cache-local file, `module://pkg.mod` for installed package |
 | `source_class_name` | `str` | required | Name of the DataSource class |
 | `source_init_args` | `dict` | `{}` | Non-secret arguments passed to DataSource constructor |
+| `use_update_lock` | `bool` | `False` | Set to `True` to opt into local update locking. This does not provide a global lock across VMs or GCS sync jobs. |
+| `lock_dir` | `str` | `None` | Optional writable directory for local update lock files. Relative paths are resolved from the cache root. `gs://` lock dirs are rejected until GCS-backed locking exists. |
 | `sync_function_location` | `str` | `None` | Optional post-sync function location: empty for built-in, `code/file.py` for cache-local file, or `module://pkg.mod` for installed package |
 | `sync_function_name` | `str` | `None` | Optional sync function or callable class name to run when explicitly requested by `sync-cache` |
 | `sync_function_init_args` | `dict` | `{}` | Non-secret kwargs used to instantiate class-based sync functions |
@@ -1088,6 +1090,9 @@ NPDs store them in the optional NPD info sidecar.
 | `cleaning_class_location` | `str` | `None` | Location of DataCleaner class: `code/file.py` for cache-local file or `module://pkg.mod` for installed package. Required when `cleaning_class_name` is set; blank does not resolve to a built-in cleaner. |
 | `cleaning_class_name` | `str` | `None` | Name of the DataCleaner class; must inherit from `DataCleaner` |
 | `cleaning_init_args` | `dict` | `{}` | Non-secret arguments passed to DataCleaner constructor |
+
+Dataset YAML entries are strict. Unknown dataset keys are configuration errors
+instead of being silently ignored.
 
 ## Data Cleaning
 
@@ -1347,8 +1352,8 @@ dpd.clear_update_lock(force=True)  # unconditional
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `lock_dir` | `None` (dataset dir) | Override lock file location. Useful when the dataset directory is read-only or GCS-backed — point to a local or writable path instead. Lock filename is `<name>_update.lock` within this directory. |
-| `use_update_lock` | `True` | Set to `False` to disable locking entirely. Appropriate when single-writer is guaranteed by convention (e.g. a scheduled Cloud job with no concurrency). |
+| `lock_dir` | `None` (dataset dir) | Override local lock file location. Useful when the local dataset directory is read-only. Lock filename is `<name>_update.lock` within this directory. `gs://` lock dirs are rejected until GCS-backed locking exists. |
+| `use_update_lock` | `False` | Set to `True` to opt into local update locking. Local locks coordinate only processes sharing the same lock directory; they do not provide a global lock across VMs or GCS sync jobs. |
 
 ## CLI Tools
 

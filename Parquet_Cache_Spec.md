@@ -87,7 +87,7 @@ These are mandatory behaviors for the initial implementation:
     augment snapshots but do not define them; an NPD snapshot exists by its
     suffixed file or directory, not by optional info/provenance sidecars.
 - Snapshot publish is atomic: readers either see the old snapshot or the new snapshot, never a partial state.
-- Single-writer: a DPD must only be updated by one process at a time. Concurrent updates to the same DPD are not supported and may corrupt the cache. `DatedParquetDataset.update()` enforces this with a `<name>_update.lock` file written at the start of every update and removed on completion (success or failure). If a lock already exists, the update raises `UpdateLockedError` with the locking host, PID, age, and instructions for clearing it (`dpd.clear_update_lock(force=True)` or `rm <lock_path>`). The lock file is created atomically (exclusive open) to avoid race conditions. Stale locks from crashed processes can be cleared via `clear_update_lock(force=False)`, which checks whether the locking PID is still alive on the local host before deleting. Lock file location defaults to the dataset directory but can be overridden via `lock_dir` (useful when the dataset directory is read-only or GCS-backed). Locking can be disabled entirely with `use_update_lock=False` for use cases where single-writer is guaranteed by convention (e.g. a scheduled Cloud job).
+- Single-writer: a DPD must only be updated by one process at a time. Concurrent updates to the same DPD are not supported and may corrupt the cache. `use_update_lock` defaults to `False`; when set to `True`, `DatedParquetDataset.update()` enforces a local `<name>_update.lock` file written at the start of every update and removed on completion (success or failure). If a lock already exists, the update raises `UpdateLockedError` with the locking host, PID, age, and instructions for clearing it (`dpd.clear_update_lock(force=True)` or `rm <lock_path>`). The lock file is created atomically (exclusive open) to avoid race conditions on filesystems shared by the writers. Stale locks from crashed processes can be cleared via `clear_update_lock(force=False)`, which checks whether the locking PID is still alive on the local host before deleting. Lock file location defaults to the dataset directory but can be overridden via `lock_dir` (useful when the local dataset directory is read-only). `gs://` lock dirs are rejected until GCS-backed locking exists. Local lock files do not provide a global lock across VMs or GCS sync jobs.
 - Snapshot ids are monotonic: later updates must produce lexicographically larger suffix ids. (With single-writer, second-granularity timestamps are sufficient. If a new snapshot would have the same timestamp as the current snapshot, the update fails with "snapshot will be duplicated." This is extremely unlikely in practice.)
 - Partition values are virtual: partition columns are injected from snapshot metadata/path and are not required in parquet payload columns.
 - A failed update must not change the current snapshot.
@@ -3913,6 +3913,74 @@ dictionary forward when the field is omitted. It carries `notes` and
 and explicit column-description additions or text edits. The top-level snapshot
 `provenance` field remains authoritative for external provenance loading and
 sync.
+
+**DPD configuration round-trip contract:**
+
+`DatedParquetDataset` is itself a `PDYaml` model, but a cache YAML dataset
+entry is larger than the DPD model. It also includes orchestration fields such
+as `source_location`, `source_class_name`, YAML transforms, cleaner settings,
+and sync-function settings. The implementation therefore needs an adapter
+between YAML entries, DPD objects, and snapshot metadata.
+
+That adapter must not be maintained as independent hand-copied field lists in
+each caller. DPD-owned configuration fields must be classified once and reused
+anywhere the library converts between:
+
+- a YAML dataset entry and `DatedParquetDataset`
+- `DatedParquetDataset` and captured snapshot `yaml_config`
+- captured snapshot `yaml_config` and a reconstructed `DatedParquetDataset`
+  for `update-cache`
+- captured snapshot `yaml_config` and a reconstructed `DatedParquetDataset`
+  for `CacheRegistry` reads
+- captured snapshot `yaml_config` and source-DPD reconstruction for
+  `DPDSource` fallback behavior
+
+This rule exists because the cache is increasingly used as a self-describing
+artifact. Today, updates are normally built locally and synced to GCS. Future
+write paths may update cloud-backed caches directly, so operational fields such
+as `use_update_lock`, `lock_dir`, and any future writer/locking settings must
+round-trip through the same configuration contract as layout fields such as
+`date_col`, `partition_columns`, `instrument_column`,
+`num_instrument_buckets`, and `row_group_size`.
+
+Serialized DPD config is portable config, not a dump of every runtime-normalized
+attribute. For example, a relative `lock_dir` such as `mutable-locks` remains
+relative in captured snapshot metadata and is resolved against the active cache
+root when reconstructing the `DatedParquetDataset`. Explicit absolute lock
+directories remain absolute.
+
+User-authored YAML and trusted snapshot metadata are distinct inputs. YAML is
+strict and must not contain runtime-only partition columns such as
+`__instrument_bucket__`. Trusted metadata may contain that injected runtime
+column because it captures the actual written layout; metadata reconstruction
+must remove it before calling the DPD constructor so normal constructor
+validation can inject it exactly once.
+
+Implementation requirements:
+
+- There must be one canonical source for DPD-owned config field names, derived
+  from or checked against `DatedParquetDataset.model_fields`.
+- Any DPD model field must be explicitly classified as a persisted config
+  field, orchestration-only field, runtime-only/internal field, or intentionally
+  excluded field.
+- Unknown YAML keys must not be silently ignored. If a key is not recognized as
+  DPD-owned config, orchestration config, or watched snapshot info, config
+  loading should fail clearly.
+- Code paths must use the strict YAML/user-config constructor for YAML and a
+  separately named trusted-metadata constructor for snapshot metadata or
+  runtime-derived config.
+- Tests must fail when a new DPD config field is added without updating the
+  shared config-field classification and metadata reconstruction behavior.
+- Tests must cover round-tripping non-default DPD config values through YAML
+  loading, snapshot metadata capture, `update-cache` reconstruction, registry
+  reconstruction, and source-DPD fallback reconstruction when that fallback is
+  supported.
+
+NPDs are intentionally separate from this DPD config contract. NPDs are not
+created from cache YAML and do not have DPD layout, transform, source, cleaner,
+or lock configuration. NPD snapshot info comes only from the strict
+`--info-file` contract (`notes`, `annotations`, and `column_descriptions`) and
+explicit provenance comes from `--provenance-file`.
 
 **Note:** The metadata contains the configuration for reference, but may
 not be sufficient to re-run the update, or to run configured post-sync hooks,

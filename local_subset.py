@@ -33,6 +33,8 @@ from ionbus_parquet_cache.dated_dataset import (
     DatedParquetDataset,
     FileMetadata,
     SnapshotMetadata,
+    dpd_config_from_dataset,
+    dpd_from_metadata_config,
 )
 from ionbus_parquet_cache.exceptions import (
     SnapshotNotFoundError,
@@ -54,7 +56,9 @@ from ionbus_parquet_cache.update_pipeline import (
 
 LOCAL_SUBSET_KIND = "local_subset"
 LINEAGE_INSTRUMENT_LIMIT = 1000
-TOP_LEVEL_KEYS = frozenset({"source_cache", "dest_cache", "defaults", "datasets"})
+TOP_LEVEL_KEYS = frozenset(
+    {"source_cache", "dest_cache", "defaults", "datasets"}
+)
 DATASET_KEYS = frozenset(
     {
         "dest_name",
@@ -156,7 +160,9 @@ def local_subset(
                 count=count,
             )
         except Exception as exc:
-            dest_name = entry.get("dest_name") if isinstance(entry, dict) else None
+            dest_name = (
+                entry.get("dest_name") if isinstance(entry, dict) else None
+            )
             result = LocalSubsetResult(
                 source_dataset=source_name,
                 dest_dataset=dest_name,
@@ -181,7 +187,8 @@ def load_subset_spec(spec_file: Path) -> dict[str, Any]:
         payload = yaml.safe_load(f)
     if not isinstance(payload, dict):
         raise ValidationError(
-            f"Subset spec must be a YAML mapping, " f"got {type(payload).__name__}"
+            f"Subset spec must be a YAML mapping, "
+            f"got {type(payload).__name__}"
         )
 
     _reject_unknown(payload, TOP_LEVEL_KEYS, "subset spec")
@@ -189,7 +196,9 @@ def load_subset_spec(spec_file: Path) -> dict[str, Any]:
         if key not in payload:
             raise ValidationError(f"subset spec missing required key: {key}")
     if not isinstance(payload["datasets"], dict) or not payload["datasets"]:
-        raise ValidationError("subset spec datasets must be a non-empty mapping")
+        raise ValidationError(
+            "subset spec datasets must be a non-empty mapping"
+        )
 
     defaults = payload.get("defaults") or {}
     if not isinstance(defaults, dict):
@@ -200,7 +209,9 @@ def load_subset_spec(spec_file: Path) -> dict[str, Any]:
         if not isinstance(name, str) or not name:
             raise ValidationError("dataset names must be non-empty strings")
         if not isinstance(entry, dict):
-            raise ValidationError(f"dataset '{name}' settings must be a mapping")
+            raise ValidationError(
+                f"dataset '{name}' settings must be a mapping"
+            )
         _reject_unknown(entry, DATASET_KEYS, f"dataset '{name}'")
         if "dest_name" not in entry:
             raise ValidationError(f"dataset '{name}' missing dest_name")
@@ -239,7 +250,9 @@ def select_datasets(
     if selected is None:
         return datasets
     if selected not in datasets:
-        raise ValidationError(f"dataset '{selected}' not found in subset spec")
+        raise ValidationError(
+            f"dataset '{selected}' not found in subset spec"
+        )
     return {selected: datasets[selected]}
 
 
@@ -257,9 +270,14 @@ def resolve_work_item(
     settings = {**defaults, **raw_entry}
     dest_name = settings["dest_name"]
     if not isinstance(dest_name, str) or not dest_name:
-        raise ValidationError(f"dataset '{source_name}' dest_name must be a string")
+        raise ValidationError(
+            f"dataset '{source_name}' dest_name must be a string"
+        )
 
-    if _same_local_cache(source_cache, dest_cache) and dest_name == source_name:
+    if (
+        _same_local_cache(source_cache, dest_cache)
+        and dest_name == source_name
+    ):
         raise ValidationError(
             f"dataset '{source_name}' cannot write back to the same cache/name"
         )
@@ -311,7 +329,9 @@ def resolve_source_snapshot(
     """Resolve latest or explicit source snapshot for a source DPD."""
     source_dpd = open_source_dpd(source_cache, source_name)
     if snapshot_setting is None or snapshot_setting == "latest":
-        suffix = source_dpd.current_suffix or source_dpd._discover_current_suffix()
+        suffix = (
+            source_dpd.current_suffix or source_dpd._discover_current_suffix()
+        )
         if suffix is None:
             raise SnapshotNotFoundError(
                 f"No snapshot found for source DPD '{source_name}'",
@@ -319,7 +339,9 @@ def resolve_source_snapshot(
             )
         return suffix
     if not isinstance(snapshot_setting, str):
-        raise ValidationError("source_snapshot must be 'latest' or a suffix string")
+        raise ValidationError(
+            "source_snapshot must be 'latest' or a suffix string"
+        )
     source_dpd._load_metadata_for_snapshot(snapshot_setting)
     return snapshot_setting
 
@@ -353,7 +375,9 @@ def resolve_snapshot_info(
         if key not in base and key in source_info:
             base[key] = deepcopy(source_info[key])
 
-    supplied = {key: work.settings[key] for key in INFO_KEYS if key in work.settings}
+    supplied = {
+        key: work.settings[key] for key in INFO_KEYS if key in work.settings
+    }
     return _validate_info_against_base(dest, base, supplied)
 
 
@@ -489,7 +513,8 @@ def local_subset_main(args: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m ionbus_parquet_cache.local_subset",
         description=(
-            "Create normal local DPD snapshots from filtered source DPD " "snapshots."
+            "Create normal local DPD snapshots from filtered source DPD "
+            "snapshots."
         ),
     )
     parser.add_argument(
@@ -576,7 +601,8 @@ def _process_work_item(
     latest_source = _latest_local_subset_source_snapshot(dest)
     latest_spec_hash = _latest_local_subset_spec_hash(dest)
     is_current = (
-        latest_source == work.source_snapshot and latest_spec_hash == work.spec_hash
+        latest_source == work.source_snapshot
+        and latest_spec_hash == work.spec_hash
     )
     if is_current and not force:
         rows = _count_rows(source, work, filters, columns) if count else None
@@ -696,7 +722,9 @@ def _normalize_instrument_list(values: Any, context: str) -> list[str]:
         if stripped:
             normalized.append(stripped)
     if not normalized:
-        raise ValidationError(f"{context} must contain at least one instrument")
+        raise ValidationError(
+            f"{context} must contain at least one instrument"
+        )
     return sorted(set(normalized))
 
 
@@ -744,22 +772,16 @@ def _new_destination_dpd(
     source: DatedParquetDataset,
 ) -> DatedParquetDataset:
     """Create a destination DPD with the source layout."""
-    partition_columns = [
-        col for col in source.partition_columns if col != INSTRUMENT_BUCKET_COL
-    ]
-    return DatedParquetDataset(
-        cache_dir=dest_cache,
-        name=dest_name,
-        date_col=source.date_col,
-        date_partition=source.date_partition,
-        partition_columns=partition_columns,
-        sort_columns=source.sort_columns,
-        description=source.description,
-        instrument_column=source.instrument_column,
-        instruments=source.instruments,
-        num_instrument_buckets=source.num_instrument_buckets,
-        row_group_size=source.row_group_size,
-    )
+    config = dpd_config_from_dataset(source)
+    # A local subset destination is a derived materialized dataset. Preserve the
+    # physical layout, but do not inherit source update policy.
+    config["start_date_str"] = None
+    config["end_date_str"] = None
+    config["repull_n_days"] = 0
+    config["instruments"] = None
+    config["lock_dir"] = None
+    config["use_update_lock"] = False
+    return dpd_from_metadata_config(dest_cache, dest_name, config)
 
 
 def _validate_existing_destination_layout(
@@ -813,7 +835,8 @@ def _validate_projection(
     missing = sorted(required - set(columns))
     if missing:
         raise ValidationError(
-            "columns is missing required layout column(s): " + ", ".join(missing)
+            "columns is missing required layout column(s): "
+            + ", ".join(missing)
         )
 
     available = set(metadata.schema.names) | set(source.partition_columns)
@@ -901,7 +924,9 @@ def _validate_info_against_base(
     supplied: dict[str, Any],
 ) -> dict[str, Any]:
     """Apply snapshot-info validation with an explicit base mapping."""
-    dest._validate_snapshot_info_keys(supplied, f"snapshot info for '{dest.name}'")
+    dest._validate_snapshot_info_keys(
+        supplied, f"snapshot info for '{dest.name}'"
+    )
     resolved = deepcopy(base)
 
     if "annotations" in supplied:
@@ -983,7 +1008,9 @@ def _partition_table(
     ] = {}
 
     for row_idx in range(table.num_rows):
-        values = {col: values_by_col[col][row_idx] for col in dest.partition_columns}
+        values = {
+            col: values_by_col[col][row_idx] for col in dest.partition_columns
+        }
         key = tuple(sorted(values.items()))
         grouped.setdefault(key, []).append(row_idx)
         partition_values_by_key.setdefault(key, values)
@@ -1001,7 +1028,9 @@ def _partition_values_by_column(
 ) -> dict[str, list[Any]]:
     """Return partition values for every row and partition column."""
     values: dict[str, list[Any]] = {}
-    date_part_col = date_partition_column_name(dest.date_partition, dest.date_col)
+    date_part_col = date_partition_column_name(
+        dest.date_partition, dest.date_col
+    )
 
     if date_part_col in dest.partition_columns:
         date_values = table.column(dest.date_col).to_pylist()
@@ -1014,8 +1043,13 @@ def _partition_values_by_column(
         ]
 
     if INSTRUMENT_BUCKET_COL in dest.partition_columns:
-        if dest.instrument_column is None or dest.num_instrument_buckets is None:
-            raise ValidationError("instrument bucketing requires instrument_column")
+        if (
+            dest.instrument_column is None
+            or dest.num_instrument_buckets is None
+        ):
+            raise ValidationError(
+                "instrument bucketing requires instrument_column"
+            )
         instruments = table.column(dest.instrument_column).to_pylist()
         values[INSTRUMENT_BUCKET_COL] = [
             instrument_bucket(value, dest.num_instrument_buckets)
@@ -1048,7 +1082,9 @@ def _drop_partition_columns(
     dest: DatedParquetDataset,
 ) -> pa.Table:
     """Drop partition columns before writing parquet files."""
-    drop_cols = [col for col in dest.partition_columns if col in table.column_names]
+    drop_cols = [
+        col for col in dest.partition_columns if col in table.column_names
+    ]
     if drop_cols:
         return table.drop(drop_cols)
     return table
@@ -1121,7 +1157,9 @@ def _lineage_for_subset(
     else:
         instrument_scope = "subset"
         lineage_instruments = (
-            instruments if len(instruments) <= LINEAGE_INSTRUMENT_LIMIT else None
+            instruments
+            if len(instruments) <= LINEAGE_INSTRUMENT_LIMIT
+            else None
         )
 
     return SnapshotLineage(
@@ -1169,7 +1207,9 @@ def _log_results(
         elif result.status == "publish":
             logger.info(f"{result.source_dataset} -> {dest}: would publish")
         else:
-            logger.error(f"{result.source_dataset} -> {dest}: error: {result.message}")
+            logger.error(
+                f"{result.source_dataset} -> {dest}: error: {result.message}"
+            )
 
         if verbose:
             logger.info(f"  dest_cache: {result.dest_cache}")

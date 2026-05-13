@@ -143,6 +143,7 @@ class TestLoadYamlFile:
         assert config.description == "Test dataset"
         assert config.date_col == "Date"
         assert config.date_partition == "month"
+        assert config.use_update_lock is False
 
     def test_load_partition_columns(
         self, temp_cache: Path, sample_yaml: Path
@@ -167,6 +168,56 @@ class TestLoadYamlFile:
             "api_key": "test123",
             "timeout": 30,
         }
+
+    def test_load_update_lock_settings(self, temp_cache: Path) -> None:
+        """Should load update lock settings from YAML."""
+        yaml_path = temp_cache / "yaml" / "lock_settings.yaml"
+        yaml_path.write_text("""
+datasets:
+    md.test_dataset:
+        source_class_name: TestSource
+        use_update_lock: true
+        lock_dir: mutable-locks
+""")
+
+        configs = load_yaml_file(yaml_path, temp_cache)
+        config = configs["md.test_dataset"]
+        dpd = config.to_dpd()
+
+        assert config.use_update_lock is True
+        assert config.lock_dir == "mutable-locks"
+        assert dpd.use_update_lock is True
+        assert dpd._lock_path == (
+            temp_cache / "mutable-locks" / "md.test_dataset_update.lock"
+        )
+        assert config.to_yaml_config()["lock_dir"] == "mutable-locks"
+
+    def test_use_update_lock_must_be_bool(self, temp_cache: Path) -> None:
+        """use_update_lock must be a YAML boolean."""
+        yaml_path = temp_cache / "yaml" / "bad_lock_bool.yaml"
+        yaml_path.write_text("""
+datasets:
+    bad:
+        source_class_name: TestSource
+        use_update_lock: definitely
+""")
+
+        with pytest.raises(ConfigurationError, match="use_update_lock"):
+            load_yaml_file(yaml_path, temp_cache)
+
+    def test_lock_dir_must_be_string(self, temp_cache: Path) -> None:
+        """lock_dir must be a string path."""
+        yaml_path = temp_cache / "yaml" / "bad_lock_dir.yaml"
+        yaml_path.write_text("""
+datasets:
+    bad:
+        source_class_name: TestSource
+        lock_dir:
+            - locks
+""")
+
+        with pytest.raises(ConfigurationError, match="lock_dir"):
+            load_yaml_file(yaml_path, temp_cache)
 
     def test_load_sync_function_settings(self, temp_cache: Path) -> None:
         """Should load optional post-sync function settings."""

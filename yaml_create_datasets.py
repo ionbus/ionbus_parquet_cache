@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from ionbus_utils.logging_utils import logger
 
+from ionbus_parquet_cache.dated_dataset import dpd_from_metadata_config
 from ionbus_parquet_cache.exceptions import (
     ConfigurationError,
     DataSourceError,
@@ -25,7 +27,6 @@ from ionbus_parquet_cache.exceptions import (
     ValidationError,
 )
 from ionbus_parquet_cache.yaml_config import load_yaml_file
-from ionbus_utils.logging_utils import logger
 
 # Fields that must not change between YAML config and stored metadata
 IMMUTABLE_FIELDS = [
@@ -288,20 +289,14 @@ def _run_create_from_yaml(
                     # Use stored config for DPD structure, only use YAML for source
                     if verbose:
                         logger.info(f"  {name}: Preserving existing config")
-                    # Update DPD with stored config values
-                    dpd.date_col = stored_config.get("date_col", dpd.date_col)
-                    dpd.date_partition = stored_config.get(
-                        "date_partition", dpd.date_partition
+                    metadata = dpd._metadata
+                    dpd = dpd_from_metadata_config(
+                        cache_path,
+                        name,
+                        stored_config,
                     )
-                    dpd.partition_columns = stored_config.get(
-                        "partition_columns", dpd.partition_columns
-                    )
-                    dpd.sort_columns = stored_config.get(
-                        "sort_columns", dpd.sort_columns
-                    )
-                    dpd.instrument_column = stored_config.get(
-                        "instrument_column", dpd.instrument_column
-                    )
+                    dpd._metadata = metadata
+                    dpd.current_suffix = metadata.suffix
                 else:
                     errors = check_config_consistency(
                         yaml_config, stored_config, name

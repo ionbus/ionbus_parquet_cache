@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,11 @@ from ionbus_utils.logging_utils import logger
 
 from ionbus_parquet_cache.data_cleaner import DataCleaner
 from ionbus_parquet_cache.data_source import DataSource
-from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
+from ionbus_parquet_cache.dated_dataset import (
+    DatedParquetDataset,
+    dpd_config_for_metadata,
+    dpd_from_config,
+)
 from ionbus_parquet_cache.exceptions import ConfigurationError
 
 
@@ -47,8 +51,8 @@ class DatasetConfig:
     instrument_column: str | None = None
     instruments: list[str] | None = None
     num_instrument_buckets: int | None = None
-    use_update_lock: bool = True
-    lock_dir: Path | None = None
+    use_update_lock: bool = False
+    lock_dir: str | Path | None = None
     row_group_size: int | None = None
     annotations: dict[str, Any] | None = None
     notes: str | None = None
@@ -83,24 +87,7 @@ class DatasetConfig:
         Returns:
             A configured DatedParquetDataset instance.
         """
-        return DatedParquetDataset(
-            cache_dir=self.cache_dir,
-            name=self.name,
-            date_col=self.date_col,
-            date_partition=self.date_partition,
-            partition_columns=self.partition_columns,
-            sort_columns=self.sort_columns,
-            description=self.description,
-            start_date_str=self.start_date_str,
-            end_date_str=self.end_date_str,
-            repull_n_days=self.repull_n_days,
-            instrument_column=self.instrument_column,
-            instruments=self.instruments,
-            num_instrument_buckets=self.num_instrument_buckets,
-            use_update_lock=self.use_update_lock,
-            lock_dir=self.lock_dir,
-            row_group_size=self.row_group_size,
-        )
+        return dpd_from_config(self.cache_dir, self.name, self.__dict__)
 
     def to_yaml_config(self) -> dict[str, Any]:
         """
@@ -112,20 +99,9 @@ class DatasetConfig:
         Returns:
             Dict with all configuration fields.
         """
+        dpd = self.to_dpd()
         config = {
-            # Core DPD settings
-            "date_col": self.date_col,
-            "date_partition": self.date_partition,
-            "partition_columns": self.partition_columns,
-            "sort_columns": self.sort_columns or [self.date_col],
-            "description": self.description,
-            "start_date_str": self.start_date_str,
-            "end_date_str": self.end_date_str,
-            "repull_n_days": self.repull_n_days,
-            "instrument_column": self.instrument_column,
-            "instruments": self.instruments,
-            "num_instrument_buckets": self.num_instrument_buckets,
-            "row_group_size": self.row_group_size,
+            **dpd_config_for_metadata(dpd, self.__dict__),
             # Source settings
             "source_location": self.source_location,
             "source_class_name": self.source_class_name,
@@ -247,6 +223,29 @@ class DatasetConfig:
         )
 
 
+DATASET_CONFIG_FIELDS = frozenset(
+    field.name
+    for field in fields(DatasetConfig)
+    if field.name not in {"cache_dir", "name"}
+)
+
+
+def _reject_unknown_dataset_settings(
+    settings: dict[str, Any],
+    name: str,
+    yaml_path: Path,
+) -> None:
+    """Reject dataset YAML keys that are not part of DatasetConfig."""
+    unknown = sorted(set(settings) - DATASET_CONFIG_FIELDS)
+    if unknown:
+        allowed = ", ".join(sorted(DATASET_CONFIG_FIELDS))
+        raise ConfigurationError(
+            f"Dataset '{name}' has unknown key(s): {', '.join(unknown)}. "
+            f"Allowed keys are: {allowed}",
+            config_file=str(yaml_path),
+        )
+
+
 def load_yaml_file(
     yaml_path: Path, cache_dir: Path
 ) -> dict[str, DatasetConfig]:
@@ -298,6 +297,7 @@ def load_yaml_file(
                 f"Dataset '{name}' settings must be a mapping",
                 config_file=str(yaml_path),
             )
+        _reject_unknown_dataset_settings(settings, name, yaml_path)
 
         annotations = settings.get("annotations")
         if "annotations" in settings and not isinstance(annotations, dict):
@@ -340,38 +340,39 @@ def load_yaml_file(
                 config_file=str(yaml_path),
             )
 
-        configs[name] = DatasetConfig(
-            name=name,
-            cache_dir=cache_dir,
-            description=settings.get("description", ""),
-            date_col=settings.get("date_col", "Date"),
-            date_partition=settings.get("date_partition", "day"),
-            partition_columns=settings.get("partition_columns", []),
-            sort_columns=settings.get("sort_columns"),
-            start_date_str=settings.get("start_date_str"),
-            end_date_str=settings.get("end_date_str"),
-            repull_n_days=settings.get("repull_n_days", 0),
-            instrument_column=settings.get("instrument_column"),
-            instruments=settings.get("instruments"),
-            num_instrument_buckets=settings.get("num_instrument_buckets"),
-            row_group_size=settings.get("row_group_size"),
+        use_update_lock = settings.get("use_update_lock", False)
+        if not isinstance(use_update_lock, bool):
+            raise ConfigurationError(
+                f"Dataset '{name}' use_update_lock must be a boolean",
+                config_file=str(yaml_path),
+            )
+
+        lock_dir = settings.get("lock_dir")
+        if lock_dir is not None:
+            if not isinstance(lock_dir, str):
+                raise ConfigurationError(
+                    f"Dataset '{name}' lock_dir must be a string path",
+                    config_file=str(yaml_path),
+                )
+
+        config_kwargs = {
+            key: settings[key]
+            for key in DATASET_CONFIG_FIELDS
+            if key in settings
+        }
+        config_kwargs.update(
             annotations=annotations,
             notes=notes,
             column_descriptions=column_descriptions,
-            source_location=settings.get("source_location", ""),
-            source_class_name=settings.get("source_class_name", ""),
-            source_init_args=settings.get("source_init_args", {}),
-            sync_function_location=settings.get("sync_function_location"),
-            sync_function_name=settings.get("sync_function_name"),
             sync_function_init_args=sync_function_init_args,
-            columns_to_drop=settings.get("columns_to_drop", []),
-            columns_to_rename=settings.get("columns_to_rename", {}),
-            dropna_columns=settings.get("dropna_columns", []),
-            dedup_columns=settings.get("dedup_columns", []),
-            dedup_keep=settings.get("dedup_keep", "last"),
-            cleaning_class_location=settings.get("cleaning_class_location"),
-            cleaning_class_name=settings.get("cleaning_class_name"),
-            cleaning_init_args=settings.get("cleaning_init_args", {}),
+            use_update_lock=use_update_lock,
+            lock_dir=lock_dir,
+        )
+
+        configs[name] = DatasetConfig(
+            name=name,
+            cache_dir=cache_dir,
+            **config_kwargs,
         )
 
     return configs

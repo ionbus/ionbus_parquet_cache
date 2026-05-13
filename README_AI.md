@@ -475,6 +475,8 @@ datasets:
     instrument_column: instrument  # required if num_instrument_buckets set
     sort_columns: [instrument, date]  # sort order within each partition file
     repull_n_days: 5  # business days to re-fetch on each update
+    use_update_lock: true  # opt into local locking when it helps
+    lock_dir: mutable-locks  # optional writable lock dir under cache root
     start_date_str: 2020-01-01  # clamp source requests to date range
     end_date_str: 2024-12-31
 
@@ -489,10 +491,12 @@ datasets:
 
 ### key fields
 
+- **unknown YAML keys**: dataset entries are strict. unknown keys are configuration errors instead of being silently ignored.
 - **row_group_size**: parquet row groups. larger = fewer groups = faster schema inference, slower predicate pushdown. default None (let pyarrow decide). for GCS, consider 128k–256k to balance metadata vs latency.
 - **num_instrument_buckets**: if set, enables bucketing. rows are distributed across `__instrument_bucket__=0/` ... `__instrument_bucket__=N/` based on `hash(instrument_column) % num_instrument_buckets`. breakingchanges with bucketing: bucketed datasets cannot be updated without full rebuild if you change `num_instrument_buckets`.
 - **sort_columns**: affects read performance. set to frequent filter columns.
 - **repull_n_days**: useful for datasets that correct historical data (e.g. option prices). e.g., `repull_n_days: 5` means "always fetch the last 5 business days, not just new dates".
+- **use_update_lock / lock_dir**: update locking is off by default. set `use_update_lock: true` to opt into local lock files, optionally with `lock_dir` pointing at a mutable location. relative values like `mutable-locks` resolve under the cache root for local cache builds. `gs://` lock dirs are rejected until GCS-backed locking exists. local locks do not coordinate multiple VMs syncing to the same GCS destination; use a single-writer job convention until a real GCS/global lock is implemented.
 - **annotations**: optional append-only structured snapshot info. DPDs store it in captured YAML snapshot metadata; NPDs store it in the optional info sidecar. use `ds.get_annotations()` to read a copy of the current or requested snapshot dictionary.
 - **notes**: optional string snapshot info. omitted values carry forward; explicit string updates are allowed, including `""`, but `null` is rejected. use `ds.get_notes()` to read current or historical notes.
 - **column_descriptions**: optional `dict[str, str]` snapshot info. omitted values carry forward; explicit updates may add or change text, but may not remove existing keys in the same lineage. use `ds.get_column_descriptions()` to read the current or requested snapshot dictionary.

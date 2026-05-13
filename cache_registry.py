@@ -16,9 +16,9 @@ from typing import Any
 import pandas as pd
 
 from ionbus_parquet_cache.dated_dataset import (
-    INSTRUMENT_BUCKET_COL,
     DatedParquetDataset,
     SnapshotMetadata,
+    dpd_from_metadata_config,
 )
 from ionbus_parquet_cache.exceptions import SnapshotNotFoundError
 from ionbus_parquet_cache.non_dated_dataset import NonDatedParquetDataset
@@ -301,24 +301,7 @@ class CacheRegistry:
         config = metadata.yaml_config
 
         # Create DPD with configuration from metadata
-        partition_columns = [
-            c
-            for c in config.get("partition_columns", [])
-            if c != INSTRUMENT_BUCKET_COL
-        ]
-        dpd = DatedParquetDataset(
-            cache_dir=cache_path,
-            name=name,
-            date_col=config.get("date_col", "Date"),
-            date_partition=config.get("date_partition", "day"),
-            partition_columns=partition_columns,
-            sort_columns=config.get("sort_columns"),
-            description=config.get("description", ""),
-            instrument_column=config.get("instrument_column"),
-            num_instrument_buckets=config.get("num_instrument_buckets"),
-            instruments=config.get("instruments"),
-            row_group_size=config.get("row_group_size"),
-        )
+        dpd = dpd_from_metadata_config(cache_path, name, config)
 
         # Set loaded state so is_update_available() and summary() work
         dpd.current_suffix = current_suffix

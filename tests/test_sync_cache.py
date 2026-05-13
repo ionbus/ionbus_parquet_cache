@@ -20,6 +20,7 @@ from ionbus_parquet_cache.snapshot_history import SnapshotProvenanceRef
 from ionbus_parquet_cache.sync_cache import (
     _collect_gcs_sync_blobs,
     _collect_selected_local_snapshots,
+    _local_sync_pairs_from_selected,
     _should_copy_file,
     _sync_function_targets_from_selected,
     sync_cache_main,
@@ -240,6 +241,30 @@ class TestSyncCacheMain:
             ]
         )
         assert result == 1
+
+    def test_local_snapshot_selection_excludes_update_lock(
+        self,
+        source_with_dpd: Path,
+    ) -> None:
+        """Selected snapshot sync should not include update lock files."""
+        lock_file = (
+            source_with_dpd / "test_dataset" / "test_dataset_update.lock"
+        )
+        lock_file.write_text("stale lock")
+
+        selected = _collect_selected_local_snapshots(
+            source_path=source_with_dpd,
+            dataset_names=None,
+            ignore_dataset_names=None,
+            dpd_only=False,
+            npd_only=False,
+            all_snapshots=False,
+            snapshot_suffixes=None,
+        )
+        pairs = _local_sync_pairs_from_selected(source_with_dpd, selected, {})
+
+        synced_rel_paths = {rel for _path, rel in pairs}
+        assert "test_dataset/test_dataset_update.lock" not in synced_rel_paths
 
     def test_mutually_exclusive_dataset_dpd_only(
         self, source_cache: Path, dest_cache: Path
