@@ -18,9 +18,9 @@ from ionbus_utils.file_utils import format_size
 from ionbus_utils.logging_utils import logger
 
 from ionbus_parquet_cache.dated_dataset import (
-    DatedParquetDataset,
     FileMetadata,
     SnapshotMetadata,
+    dpd_from_metadata_config,
 )
 from ionbus_parquet_cache.snapshot import (
     extract_suffix_from_filename,
@@ -379,13 +379,25 @@ def _run_trim(
 
         # Load the DPD
         try:
-            dpd = DatedParquetDataset(cache_dir=cache_path, name=name)
-            if dpd.current_suffix is None:
-                dpd.current_suffix = dpd._discover_current_suffix()
-            if dpd.current_suffix is None:
+            meta_files = sorted(
+                [
+                    f
+                    for f in meta_dir.glob("*.pkl.gz")
+                    if "_trimmed" not in f.name
+                ],
+                reverse=True,
+            )
+            if not meta_files:
                 continue
 
-            metadata = dpd._load_metadata()
+            metadata = SnapshotMetadata.from_pickle(meta_files[0])
+            dpd = dpd_from_metadata_config(
+                cache_path,
+                name,
+                metadata.yaml_config,
+            )
+            dpd.current_suffix = metadata.suffix
+            dpd._metadata = metadata
         except Exception as e:
             logger.error(f"  {name}: ERROR loading metadata - {e}")
             continue

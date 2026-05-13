@@ -39,20 +39,20 @@ class TestLockPath:
         )
         assert dpd._lock_path == lock_dir / "test_ds_update.lock"
 
-    def test_use_update_lock_false_default_is_true(
+    def test_use_update_lock_default_is_false(
         self, dpd: DatedParquetDataset
     ) -> None:
-        assert dpd.use_update_lock is True
+        assert dpd.use_update_lock is False
 
-    def test_use_update_lock_false_can_be_set(self, tmp_path: Path) -> None:
+    def test_use_update_lock_true_can_be_set(self, tmp_path: Path) -> None:
         dpd = DatedParquetDataset(
             cache_dir=tmp_path / "cache",
             name="test_ds",
             date_col="date",
             date_partition="year",
-            use_update_lock=False,
+            use_update_lock=True,
         )
-        assert dpd.use_update_lock is False
+        assert dpd.use_update_lock is True
 
 
 class TestAcquireLock:

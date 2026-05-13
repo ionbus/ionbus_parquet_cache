@@ -325,7 +325,9 @@ For each dataset entry:
 1. Register/open the source cache.
 2. Resolve the source DPD and source snapshot suffix.
 3. Resolve and validate the destination DPD configuration from the source
-   snapshot metadata.
+   snapshot metadata. The destination preserves the source physical layout but
+   clears source update-policy fields such as request-date bounds, instrument
+   update lists, and lock location.
 4. Read the source snapshot with date, instrument, filter, and column
    projection.
 5. Write the filtered table to destination temporary files using the normal DPD

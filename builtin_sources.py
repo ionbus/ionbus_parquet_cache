@@ -17,7 +17,10 @@ import pyarrow as pa
 import pyarrow.dataset as pds
 
 from ionbus_parquet_cache.data_source import DataSource
-from ionbus_parquet_cache.dated_dataset import DatedParquetDataset
+from ionbus_parquet_cache.dated_dataset import (
+    DatedParquetDataset,
+    dpd_from_metadata_config,
+)
 from ionbus_parquet_cache.exceptions import (
     ConfigurationError,
     DataSourceError,
@@ -526,14 +529,13 @@ class DPDSource(DataSource):
             if meta_files:
                 metadata = SnapshotMetadata.from_pickle(meta_files[-1])
                 config = metadata.yaml_config
-                self._source_dpd = DatedParquetDataset(
-                    cache_dir=self.dpd_cache_path,
-                    name=self.dpd_name,
-                    date_col=config.get("date_col", "Date"),
-                    date_partition=config.get("date_partition", "day"),
-                    partition_columns=config.get("partition_columns", []),
-                    sort_columns=config.get("sort_columns"),
+                self._source_dpd = dpd_from_metadata_config(
+                    self.dpd_cache_path,
+                    self.dpd_name,
+                    config,
                 )
+                self._source_dpd.current_suffix = metadata.suffix
+                self._source_dpd._metadata = metadata
                 return self._source_dpd
 
         # Last resort: use target config (may be wrong but better than nothing)

@@ -10,6 +10,8 @@ from __future__ import annotations
 import datetime as dt
 import gzip
 import pickle
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -59,6 +61,141 @@ from ionbus_parquet_cache.update_pipeline import (
 )
 
 SNAPSHOT_METADATA_PICKLE_PROTOCOL = 4
+DPD_CONFIG_FIELD_ORDER = (
+    "date_col",
+    "date_partition",
+    "partition_columns",
+    "sort_columns",
+    "description",
+    "start_date_str",
+    "end_date_str",
+    "repull_n_days",
+    "instrument_column",
+    "instruments",
+    "num_instrument_buckets",
+    "lock_dir",
+    "use_update_lock",
+    "row_group_size",
+)
+DPD_CONFIG_FIELDS = frozenset(DPD_CONFIG_FIELD_ORDER)
+DPD_CONFIG_EXCLUDED_FIELDS = frozenset(
+    {
+        "cache_dir",
+        "current_suffix",
+        "name",
+        "parent",
+    }
+)
+
+
+def dpd_config_from_mapping(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return DPD-owned config fields from a larger mapping."""
+    return {
+        field: deepcopy(config[field])
+        for field in DPD_CONFIG_FIELD_ORDER
+        if field in config
+    }
+
+
+def dpd_config_from_dataset(
+    dpd: "DatedParquetDataset",
+) -> dict[str, Any]:
+    """Return canonical DPD config from the runtime DPD object."""
+    return {
+        field: deepcopy(getattr(dpd, field))
+        for field in DPD_CONFIG_FIELD_ORDER
+    }
+
+
+def dpd_config_for_metadata(
+    dpd: "DatedParquetDataset",
+    base_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return portable DPD config for snapshot metadata capture."""
+    config = dpd_config_from_dataset(dpd)
+    if base_config is not None and "lock_dir" in base_config:
+        config["lock_dir"] = deepcopy(base_config["lock_dir"])
+    return config
+
+
+def dpd_from_config(
+    cache_dir: str | Path,
+    name: str,
+    config: Mapping[str, Any],
+) -> "DatedParquetDataset":
+    """Construct a DPD from portable user-authored config."""
+    return _dpd_from_config(
+        cache_dir,
+        name,
+        config,
+        strip_runtime_bucket_column=False,
+    )
+
+
+def _dpd_from_config(
+    cache_dir: str | Path,
+    name: str,
+    config: Mapping[str, Any],
+    *,
+    strip_runtime_bucket_column: bool,
+) -> "DatedParquetDataset":
+    """Construct a DPD with caller-selected runtime cleanup."""
+    kwargs = dpd_config_from_mapping(config)
+
+    lock_dir = kwargs.get("lock_dir")
+    if lock_dir is not None:
+        kwargs["lock_dir"] = _resolve_dpd_lock_dir(cache_dir, lock_dir)
+
+    if (
+        strip_runtime_bucket_column
+        and kwargs.get("num_instrument_buckets") is not None
+    ):
+        partition_columns = kwargs.get("partition_columns")
+        if partition_columns is not None:
+            kwargs["partition_columns"] = [
+                col
+                for col in partition_columns
+                if col != INSTRUMENT_BUCKET_COL
+            ]
+
+    return DatedParquetDataset(
+        cache_dir=cache_dir,
+        name=name,
+        **kwargs,
+    )
+
+
+def dpd_from_metadata_config(
+    cache_dir: str | Path,
+    name: str,
+    config: Mapping[str, Any],
+) -> "DatedParquetDataset":
+    """Construct a DPD from trusted runtime snapshot metadata config."""
+    return _dpd_from_config(
+        cache_dir,
+        name,
+        config,
+        strip_runtime_bucket_column=True,
+    )
+
+
+def _resolve_dpd_lock_dir(
+    cache_dir: str | Path,
+    lock_dir: str | Path,
+) -> Path:
+    """Resolve a DPD lock directory relative to a local cache root."""
+    if str(lock_dir).startswith("gs://"):
+        raise ValidationError(
+            "GCS lock_dir values are not supported yet. "
+            "Omit lock_dir while use_update_lock=False, or use a "
+            "local/mounted writable lock_dir."
+        )
+    path = Path(lock_dir).expanduser()
+    if path.is_absolute():
+        return path
+    if str(cache_dir).startswith("gs://"):
+        return path
+    return Path(cache_dir) / path
 
 
 @dataclass
@@ -190,7 +327,7 @@ class DatedParquetDataset(ParquetDataset):
     instruments: list[str] | None = None
     num_instrument_buckets: int | None = None
     lock_dir: Path | None = None
-    use_update_lock: bool = True
+    use_update_lock: bool = False
     row_group_size: int | None = None
 
     # Private attributes for cached state
@@ -623,20 +760,7 @@ class DatedParquetDataset(ParquetDataset):
 
     def _default_yaml_config(self) -> dict[str, Any]:
         """Build the default captured YAML config for this DPD."""
-        return {
-            "date_col": self.date_col,
-            "date_partition": self.date_partition,
-            "partition_columns": self.partition_columns,
-            "sort_columns": self.sort_columns or [self.date_col],
-            "description": self.description,
-            "start_date_str": self.start_date_str,
-            "end_date_str": self.end_date_str,
-            "repull_n_days": self.repull_n_days,
-            "instrument_column": self.instrument_column,
-            "instruments": self.instruments,
-            "num_instrument_buckets": self.num_instrument_buckets,
-            "row_group_size": self.row_group_size,
-        }
+        return dpd_config_for_metadata(self)
 
     def _load_current_metadata_if_available(self) -> None:
         """Populate _metadata when a current snapshot exists."""
@@ -819,17 +943,14 @@ class DatedParquetDataset(ParquetDataset):
             )
 
         # Build yaml_config with all DPD configuration fields if not provided
+        runtime_config = dpd_config_for_metadata(self, yaml_config)
         if yaml_config is None:
-            yaml_config = self._default_yaml_config()
+            yaml_config = runtime_config
         else:
-            # Caller-supplied yaml_config may have pre-expansion partition_columns
-            # (e.g. from DatasetConfig.to_yaml_config() which stores the YAML value
-            # before model_post_init expands it). Always stamp the actual runtime
-            # partition_columns so _build_dataset_from_metadata reads them correctly.
-            yaml_config = {
-                **yaml_config,
-                "partition_columns": self.partition_columns,
-            }
+            # Caller-supplied yaml_config may have stale or pre-expansion DPD
+            # fields. Always stamp the actual runtime DPD config so metadata
+            # reconstruction and dataset reads use the same contract.
+            yaml_config = {**yaml_config, **runtime_config}
 
         # Build metadata
         metadata = SnapshotMetadata(

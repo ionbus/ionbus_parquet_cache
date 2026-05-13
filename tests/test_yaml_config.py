@@ -143,6 +143,7 @@ class TestLoadYamlFile:
         assert config.description == "Test dataset"
         assert config.date_col == "Date"
         assert config.date_partition == "month"
+        assert config.use_update_lock is False
 
     def test_load_partition_columns(
         self, temp_cache: Path, sample_yaml: Path
@@ -175,7 +176,7 @@ class TestLoadYamlFile:
 datasets:
     md.test_dataset:
         source_class_name: TestSource
-        use_update_lock: false
+        use_update_lock: true
         lock_dir: mutable-locks
 """)
 
@@ -183,12 +184,13 @@ datasets:
         config = configs["md.test_dataset"]
         dpd = config.to_dpd()
 
-        assert config.use_update_lock is False
-        assert config.lock_dir == temp_cache / "mutable-locks"
-        assert dpd.use_update_lock is False
+        assert config.use_update_lock is True
+        assert config.lock_dir == "mutable-locks"
+        assert dpd.use_update_lock is True
         assert dpd._lock_path == (
             temp_cache / "mutable-locks" / "md.test_dataset_update.lock"
         )
+        assert config.to_yaml_config()["lock_dir"] == "mutable-locks"
 
     def test_use_update_lock_must_be_bool(self, temp_cache: Path) -> None:
         """use_update_lock must be a YAML boolean."""
