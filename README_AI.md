@@ -475,6 +475,8 @@ datasets:
     instrument_column: instrument  # required if num_instrument_buckets set
     sort_columns: [instrument, date]  # sort order within each partition file
     repull_n_days: 5  # business days to re-fetch on each update
+    use_update_lock: false  # disable when single-writer operation is guaranteed
+    lock_dir: mutable-locks  # optional writable lock dir under cache root
     start_date_str: 2020-01-01  # clamp source requests to date range
     end_date_str: 2024-12-31
 
@@ -493,6 +495,7 @@ datasets:
 - **num_instrument_buckets**: if set, enables bucketing. rows are distributed across `__instrument_bucket__=0/` ... `__instrument_bucket__=N/` based on `hash(instrument_column) % num_instrument_buckets`. breakingchanges with bucketing: bucketed datasets cannot be updated without full rebuild if you change `num_instrument_buckets`.
 - **sort_columns**: affects read performance. set to frequent filter columns.
 - **repull_n_days**: useful for datasets that correct historical data (e.g. option prices). e.g., `repull_n_days: 5` means "always fetch the last 5 business days, not just new dates".
+- **use_update_lock / lock_dir**: updates write a lock by default. for immutable GCS destinations, build locally and sync snapshot files; if the build cache itself is read-only or single-writer, set `use_update_lock: false`, or set `lock_dir` to a mutable location. relative values like `mutable-locks` resolve under the cache root.
 - **annotations**: optional append-only structured snapshot info. DPDs store it in captured YAML snapshot metadata; NPDs store it in the optional info sidecar. use `ds.get_annotations()` to read a copy of the current or requested snapshot dictionary.
 - **notes**: optional string snapshot info. omitted values carry forward; explicit string updates are allowed, including `""`, but `null` is rejected. use `ds.get_notes()` to read current or historical notes.
 - **column_descriptions**: optional `dict[str, str]` snapshot info. omitted values carry forward; explicit updates may add or change text, but may not remove existing keys in the same lineage. use `ds.get_column_descriptions()` to read the current or requested snapshot dictionary.

@@ -1077,6 +1077,8 @@ NPDs store them in the optional NPD info sidecar.
 | `source_location` | `str` | `""` | Location of DataSource class: empty for built-in sources, `code/file.py` for cache-local file, `module://pkg.mod` for installed package |
 | `source_class_name` | `str` | required | Name of the DataSource class |
 | `source_init_args` | `dict` | `{}` | Non-secret arguments passed to DataSource constructor |
+| `use_update_lock` | `bool` | `True` | Set to `False` to disable the update lock when single-writer operation is guaranteed. |
+| `lock_dir` | `str` | `None` | Optional writable directory for update lock files. Relative paths are resolved from the cache root. |
 | `sync_function_location` | `str` | `None` | Optional post-sync function location: empty for built-in, `code/file.py` for cache-local file, or `module://pkg.mod` for installed package |
 | `sync_function_name` | `str` | `None` | Optional sync function or callable class name to run when explicitly requested by `sync-cache` |
 | `sync_function_init_args` | `dict` | `{}` | Non-secret kwargs used to instantiate class-based sync functions |

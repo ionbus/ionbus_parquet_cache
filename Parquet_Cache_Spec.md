@@ -3914,6 +3914,58 @@ and explicit column-description additions or text edits. The top-level snapshot
 `provenance` field remains authoritative for external provenance loading and
 sync.
 
+**DPD configuration round-trip contract:**
+
+`DatedParquetDataset` is itself a `PDYaml` model, but a cache YAML dataset
+entry is larger than the DPD model. It also includes orchestration fields such
+as `source_location`, `source_class_name`, YAML transforms, cleaner settings,
+and sync-function settings. The implementation therefore needs an adapter
+between YAML entries, DPD objects, and snapshot metadata.
+
+That adapter must not be maintained as independent hand-copied field lists in
+each caller. DPD-owned configuration fields must be classified once and reused
+anywhere the library converts between:
+
+- a YAML dataset entry and `DatedParquetDataset`
+- `DatedParquetDataset` and captured snapshot `yaml_config`
+- captured snapshot `yaml_config` and a reconstructed `DatedParquetDataset`
+  for `update-cache`
+- captured snapshot `yaml_config` and a reconstructed `DatedParquetDataset`
+  for `CacheRegistry` reads
+- captured snapshot `yaml_config` and source-DPD reconstruction for
+  `DPDSource` fallback behavior
+
+This rule exists because the cache is increasingly used as a self-describing
+artifact. Today, updates are normally built locally and synced to GCS. Future
+write paths may update cloud-backed caches directly, so operational fields such
+as `use_update_lock`, `lock_dir`, and any future writer/locking settings must
+round-trip through the same configuration contract as layout fields such as
+`date_col`, `partition_columns`, `instrument_column`,
+`num_instrument_buckets`, and `row_group_size`.
+
+Implementation requirements:
+
+- There must be one canonical source for DPD-owned config field names, derived
+  from or checked against `DatedParquetDataset.model_fields`.
+- Any DPD model field must be explicitly classified as a persisted config
+  field, orchestration-only field, runtime-only/internal field, or intentionally
+  excluded field.
+- Unknown YAML keys must not be silently ignored. If a key is not recognized as
+  DPD-owned config, orchestration config, or watched snapshot info, config
+  loading should fail clearly.
+- Tests must fail when a new DPD config field is added without updating the
+  shared config-field classification and metadata reconstruction behavior.
+- Tests must cover round-tripping non-default DPD config values through YAML
+  loading, snapshot metadata capture, `update-cache` reconstruction, registry
+  reconstruction, and source-DPD fallback reconstruction when that fallback is
+  supported.
+
+NPDs are intentionally separate from this DPD config contract. NPDs are not
+created from cache YAML and do not have DPD layout, transform, source, cleaner,
+or lock configuration. NPD snapshot info comes only from the strict
+`--info-file` contract (`notes`, `annotations`, and `column_descriptions`) and
+explicit provenance comes from `--provenance-file`.
+
 **Note:** The metadata contains the configuration for reference, but may
 not be sufficient to re-run the update, or to run configured post-sync hooks,
 if the code referenced by `source_location`, `cleaning_class_location`, or

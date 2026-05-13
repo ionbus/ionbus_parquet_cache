@@ -340,6 +340,24 @@ def load_yaml_file(
                 config_file=str(yaml_path),
             )
 
+        use_update_lock = settings.get("use_update_lock", True)
+        if not isinstance(use_update_lock, bool):
+            raise ConfigurationError(
+                f"Dataset '{name}' use_update_lock must be a boolean",
+                config_file=str(yaml_path),
+            )
+
+        lock_dir = settings.get("lock_dir")
+        if lock_dir is not None:
+            if not isinstance(lock_dir, str):
+                raise ConfigurationError(
+                    f"Dataset '{name}' lock_dir must be a string path",
+                    config_file=str(yaml_path),
+                )
+            lock_dir = Path(lock_dir).expanduser()
+            if not lock_dir.is_absolute():
+                lock_dir = cache_dir / lock_dir
+
         configs[name] = DatasetConfig(
             name=name,
             cache_dir=cache_dir,
@@ -354,6 +372,8 @@ def load_yaml_file(
             instrument_column=settings.get("instrument_column"),
             instruments=settings.get("instruments"),
             num_instrument_buckets=settings.get("num_instrument_buckets"),
+            use_update_lock=use_update_lock,
+            lock_dir=lock_dir,
             row_group_size=settings.get("row_group_size"),
             annotations=annotations,
             notes=notes,
