@@ -26,6 +26,14 @@ remote metadata and object access costs.
 
 The goal is to let a user specify the subset they want, read only the relevant
 remote snapshot data, and publish the result into a normal local cache dataset.
+The primary use case is a cloud-to-local working copy: materialize a narrow slice
+of a larger cache onto one machine, run repeated local workflows against it, and
+refresh it by re-running the same subset spec.
+
+The subset YAML is the durable source of truth for refresh. Destination metadata
+stores enough provenance to audit the previous materialization and skip repeated
+work when the same resolved source snapshot and effective spec hash are seen,
+but it does not store a complete replayable copy of the subset spec.
 
 ## Non-Goals
 
@@ -34,6 +42,8 @@ remote snapshot data, and publish the result into a normal local cache dataset.
 - Do not make `sync-cache` responsible for row filtering.
 - Do not support direct writes to remote caches.
 - Do not implement incremental row-level merge semantics in the first version.
+- Do not make local subsets immutable or block ordinary DPD updates after
+  materialization.
 
 ## Terminology
 
@@ -71,6 +81,23 @@ Then creates or updates the local subset:
 python -m ionbus_parquet_cache.local_subset etfs.subset.yaml
 ```
 
+For local/manual workflows, keep subset specs with the destination cache, using
+the same convention as normal cache YAML:
+
+```text
+~/cache/quiet-subsets/
+  yaml/
+    etfs.subset.yaml
+    futures-liquid.subset.yaml
+  code/
+    # usually empty for local_subset
+  md.etfs_daily/
+```
+
+For scheduled workers or shared jobs, the subset specs may instead live with
+the job configuration or in a version-controlled repository. In that case the
+worker should pass explicit spec paths to `local_subset`.
+
 Running the same command again later should read the latest matching remote
 snapshot and publish a new local snapshot if the source snapshot or subset spec
 changed.
@@ -78,6 +105,12 @@ changed.
 ## Output Dataset Semantics
 
 For a DPD source, the destination should be a normal local DPD.
+
+This normal-DPD status is intentionally about compatibility, not about the
+expected maintenance workflow. A local subset can be read like any other local
+DPD, and existing cache APIs are not prevented from writing to it. In normal
+use, though, the subset is refreshed by re-running `local_subset`, not by
+incrementally extending or manually editing the destination dataset.
 
 The destination DPD should preserve the source dataset's core layout unless the
 spec explicitly supports an override in a later version:
@@ -155,6 +188,10 @@ The first implementation should use full rematerialization. It should not try to
 append only newly available dates or merge individual partitions. Full
 rematerialization is simpler, safer, and easier to explain. Incremental
 materialization can be added later if the use case requires it.
+
+Ordinary DPD updates to the destination are not prohibited, because the
+destination is a normal local DPD. They should be treated as explicit advanced
+use, not the expected way to keep a local subset current.
 
 By default, a spec processes all dataset entries. Use `--dataset NAME` to run
 only one entry.
@@ -352,6 +389,10 @@ filters:
 
 The subset spec hash should be computed from a canonicalized version of the
 effective dataset spec, including resolved file contents for instrument lists.
+The `subset_spec_path` is recorded for debugging and repeatability, but the
+cache should not treat it as an embedded spec. If the file is moved, deleted, or
+changed, the local subset metadata can still explain what was previously
+materialized but cannot fully reconstruct the original refresh input.
 
 ## Snapshot Info
 
@@ -473,7 +514,8 @@ expected and should be documented in command output.
    for advanced users?
 2. Should large instrument lists be stored in provenance as full lists, hashes,
    or both?
-3. Should a subset spec be stored inside the destination cache for easy reruns,
-   or should the command only record the spec hash and path?
+3. Should a future version optionally copy the normalized subset spec into the
+   destination cache as a convenience artifact, while still treating the YAML
+   file as the refresh source of truth?
 4. Should `--count` be implemented in the first version, or deferred until the
    base materialization path is working?

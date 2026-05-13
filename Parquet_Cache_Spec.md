@@ -4313,6 +4313,22 @@ snapshots in another cache. The source cache may be local or remote, including
 GCS. The destination cache must be local. NPDs are intentionally out of scope
 for this command.
 
+The expected operating model is a local working copy of a larger source cache:
+materialize the subset once, run repeated local work against it, then refresh it
+by re-running the subset spec. The destination is still a normal local DPD, so
+the base cache APIs do not forbid later ordinary updates, but those updates are
+outside the normal local-subset maintenance path.
+
+The subset YAML file remains the durable source of truth for normal refreshes.
+The local subset provenance records the resolved source snapshot, effective
+spec hash, spec path, and filter summary for auditability and idempotence, but
+it is not a complete embedded copy of the subset spec and is not sufficient to
+reconstruct every refresh input. For local/manual use, the recommended layout is
+to keep subset specs under the destination cache's `yaml/` directory; the
+destination cache's `code/` directory may be empty. Worker or deployment-managed
+flows may instead keep those YAML files with the job configuration and pass
+explicit spec paths to the command.
+
 The detailed design and acceptance rules live in
 [Local_Subsetting_Spec.md](Local_Subsetting_Spec.md). This section links the
 feature into the main cache spec and records its relationship to the base DPD

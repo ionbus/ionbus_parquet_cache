@@ -1417,6 +1417,23 @@ Create a normal local `DatedParquetDataset` snapshot from a filtered source DPD
 snapshot in another cache. The source cache may be local or GCS; the destination
 cache must be local. NPDs are not supported by this command.
 
+The typical use is a cloud-to-local working copy: pull a narrow slice of a
+larger cache to a local machine, run repeated local jobs against that data, and
+refresh the local copy by re-running the subset spec. The destination remains a
+normal local DPD and the library does not prevent ordinary DPD updates, but
+manual or incremental writes are not the expected maintenance path for a local
+subset.
+
+Keep the subset YAML file. It is the durable source of truth for refreshing the
+local subset; the destination cache metadata records provenance, the resolved
+source snapshot, and the spec hash/path for audit and idempotence, but it does
+not store a complete replayable copy of the spec. For local/manual workflows,
+put subset specs under the destination cache's `yaml/` directory, for example
+`~/cache/quiet-subsets/yaml/etfs.subset.yaml`. The cache's `code/` directory may
+be empty for this workflow. For scheduled workers or shared jobs, keeping the
+specs in version-controlled job configuration and passing explicit spec paths is
+also appropriate.
+
 ```yaml
 source_cache: gs://quiet-cache/prod
 dest_cache: ~/cache/quiet-subsets

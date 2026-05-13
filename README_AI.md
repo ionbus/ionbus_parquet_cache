@@ -212,7 +212,15 @@ local subsets are DPD-only. re-running the same spec skips publishing when the
 resolved source snapshot and effective spec hash are unchanged, unless
 `--force` is supplied. projection columns must include inherited layout columns;
 partition columns are structural and may be stored in directories rather than
-inside each parquet file. zero-row subsets fail without publishing.
+inside each parquet file. zero-row subsets fail without publishing. the normal
+operating model is cloud-to-local materialization plus refresh by rerunning the
+subset spec; the destination remains a normal DPD, but manual/incremental writes
+are not the expected local-subset maintenance path. keep the subset YAML file:
+it is the refresh source of truth. destination provenance stores the source
+snapshot, spec hash/path, and filter summary for audit/idempotence, but not a
+complete replayable spec. for local/manual use, prefer
+`DEST_CACHE/yaml/*.subset.yaml`; for workers, keep specs with job config and
+pass explicit paths.
 
 or programmatically:
 
