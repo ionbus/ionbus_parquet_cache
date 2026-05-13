@@ -13,7 +13,7 @@ RELEASE_TAG=""
 usage() {
   echo "Usage: $0 [all|build|send|build-pip|send-pip|build-conda|send-conda]"
   echo "          [--tag] [--any-branch] [--allow-dirty]"
-  echo "  all: build and publish pip and conda artifacts"
+  echo "  all: build and publish pip artifacts, then conda artifacts"
   echo "  build: build pip and conda artifacts locally"
   echo "  send: upload pip and conda artifacts"
   echo "  build-pip: build pip artifacts only"
@@ -357,6 +357,16 @@ send_release() {
   send_conda_artifacts
 }
 
+all_release() {
+  build_pip_artifacts
+  send_pip_artifacts
+  build_conda_artifacts
+  send_conda_artifacts
+
+  echo
+  echo "Version/tag used: $RELEASE_TAG"
+}
+
 maybe_tag_release() {
   if [[ "$TAG_FLAG" == "--tag" ]]; then
     CREATED_TAG="$(get_next_tag_name)"
@@ -400,7 +410,6 @@ case "$MODE" in
     send_conda_artifacts
     ;;
   all)
-    build_release
-    send_release
+    all_release
     ;;
 esac

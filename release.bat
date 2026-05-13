@@ -78,7 +78,7 @@ goto usage_error
 
 :usage
 echo Usage: %~nx0 [all^|build^|send^|build-pip^|send-pip^|build-conda^|send-conda] [--tag] [--any-branch] [--allow-dirty]
-echo   all: build and publish pip and conda artifacts
+echo   all: build and publish pip artifacts, then conda artifacts
 echo   build: build pip and conda artifacts locally
 echo   send: upload pip and conda artifacts
 echo   build-pip: build pip artifacts only
@@ -335,9 +335,16 @@ call :send_conda_release
 exit /b %errorlevel%
 
 :all
-call :build_release
+call :build_pip_release
 if errorlevel 1 exit /b 1
-call :send_release
+call :send_pip_release
+if errorlevel 1 exit /b 1
+call :build_conda_release
+if errorlevel 1 exit /b 1
+call :send_conda_release
+if errorlevel 1 exit /b 1
+echo.
+echo Version/tag used: %RELEASE_TAG%
 exit /b %errorlevel%
 
 :build

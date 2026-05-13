@@ -23,8 +23,8 @@ This will:
 - create the next local tag
 - verify the tag is on `HEAD`
 - build the pip artifacts
-- build the conda artifacts
 - upload to PyPI
+- build the conda artifacts
 - upload to `ionbus` on Anaconda.org
 
 If everything succeeds, push the branch and the new git tag manually when you are ready.
@@ -74,7 +74,7 @@ Combined modes:
 
 - `./release.sh build` builds pip and conda locally
 - `./release.sh send` uploads pip and conda artifacts
-- `./release.sh all --tag` tags, builds, and uploads both
+- `./release.sh all --tag` tags, builds/uploads pip, then builds/uploads conda
 
 Single-target modes:
 
